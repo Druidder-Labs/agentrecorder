@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use agentrecorder_store::{Event, Session, Store, format_rfc3339, kind, now_unix_ns};
+use agentrecorder_store::{Body, Event, Session, Store, format_rfc3339, kind, now_unix_ns};
 use agentrecorder_supervisor::Layout;
 use anyhow::{Context, Result, anyhow, bail};
 use regex::bytes::Regex;
@@ -82,6 +82,11 @@ pub struct BundleArgs {
         help = "Remove terminal data, hooks, marks and notifications between two offsets, such as 00:12:03-00:12:09 (repeatable)"
     )]
     pub cut: Vec<String>,
+    #[arg(
+        long,
+        help = "Include the text of each prompt from the agent transcript, after redaction; without it the bundle has only lengths, times and tokens"
+    )]
+    pub prompts: bool,
     #[arg(long, help = "List what --redact and --cut would change, with offsets, and write nothing")]
     pub dry_run: bool,
     #[arg(long, help = "Print the result as JSON")]
@@ -139,6 +144,8 @@ pub struct ViewArgs {
     pub target: String,
     #[arg(long, help = "Print the dashboard path instead of opening it in a browser")]
     pub no_open: bool,
+    #[arg(long, help = "For a session id: include the text of each prompt from the agent transcript")]
+    pub prompts: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -194,6 +201,7 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     let duration_ns = items.last().map_or(0, |it| it.event.mono_ns);
     let cut_report = apply_cuts(&mut items, &cuts);
     let matches = apply_redactions(&mut items, &patterns);
+    let (story, prompt_matches) = agent_story(&store, &s, &items, &cut_report, &patterns, args.prompts)?;
     let mut warnings = Vec::new();
     for (c, r) in cuts.iter().zip(&cut_report) {
         let (from, to) = (crate::fmt::offset_ms(c.from_ns / 1_000_000), crate::fmt::offset_ms(c.to_ns / 1_000_000));
@@ -206,11 +214,14 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
             warnings.push(format!("cut {from}-{to} matched no events"));
         }
     }
-    if !patterns.is_empty() && matches.is_empty() {
+    if !patterns.is_empty() && matches.is_empty() && prompt_matches.is_empty() {
         warnings.push("no redaction pattern matched anything".into());
     }
+    if args.prompts && story["available"] == false {
+        warnings.push(format!("no prompt text included: {}", story["reason"].as_str().unwrap_or("no transcript")));
+    }
     if args.dry_run {
-        return dry_run(&s, &out, &items, &matches, &cut_report, &warnings, args.json);
+        return dry_run(&s, &out, &items, (&matches, &prompt_matches), &cut_report, &warnings, args.json);
     }
     for w in &warnings {
         eprintln!("agentrecorder: warning: {w}");
@@ -221,7 +232,15 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
         prepare_dir(&out, args.force)?;
     }
     let name = out.file_name().map_or_else(|| format!("agentrecorder-{}", s.id), |n| n.to_string_lossy().into_owned());
-    let (files, summary) = write_bundle(&store, &s, &name, &items, &patterns, &cut_report, matches.len() as u64)?;
+    let total_matches = (matches.len() + prompt_matches.len()) as u64;
+    let (files, summary) = write_bundle(
+        &store,
+        &s,
+        &name,
+        &items,
+        &Edits { patterns: &patterns, cut_report: &cut_report, matches: total_matches },
+        story,
+    )?;
     let bytes: u64 = if args.zip {
         write_zip(&out, &files)?;
         fs::metadata(&out).map(|m| m.len()).unwrap_or(0)
@@ -240,6 +259,7 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     }
     println!("wrote bundle for session {} to {}", s.id, out.display());
     println!("  {}", summary_line(&summary));
+    println!("  {}", story_line(&summary["prompts"]));
     if args.zip {
         println!(
             "  {} in one zip file; send it to the reviewer, who checks it against the anchors received while the session ran",
@@ -257,7 +277,7 @@ fn dry_run(
     s: &Session,
     out: &Path,
     items: &[Item],
-    matches: &[Match],
+    (matches, prompt_matches): (&[Match], &[String]),
     cut_report: &[Value],
     warnings: &[String],
     as_json: bool,
@@ -273,6 +293,7 @@ fn dry_run(
                 "events": items.len(),
                 "fates": fates,
                 "matches": matches.iter().map(Match::to_json).collect::<Vec<_>>(),
+                "prompt_matches": prompt_matches,
                 "cuts": cut_report,
                 "warnings": warnings,
             }))?
@@ -290,6 +311,9 @@ fn dry_run(
     println!("  {} redaction matches", matches.len());
     for m in matches {
         println!("    {} {} {}", crate::fmt::offset_ms(m.mono_ns / 1_000_000), m.kind, m.preview);
+    }
+    if !prompt_matches.is_empty() {
+        println!("  {} redaction matches in prompt text: {}", prompt_matches.len(), prompt_matches.join(", "));
     }
     for c in cut_report {
         println!(
@@ -547,15 +571,21 @@ fn apply_redactions(items: &mut [Item], patterns: &[Regex]) -> Vec<Match> {
 
 type Files = Vec<(&'static str, String)>;
 
+struct Edits<'a> {
+    patterns: &'a [Regex],
+    cut_report: &'a [Value],
+    matches: u64,
+}
+
 fn write_bundle(
     store: &Store,
     s: &Session,
     bundle_name: &str,
     items: &[Item],
-    patterns: &[Regex],
-    cut_report: &[Value],
-    matches: u64,
+    edits: &Edits,
+    story: Value,
 ) -> Result<(Files, Value)> {
+    let Edits { patterns, cut_report, matches } = *edits;
     let mut events = String::new();
     let mut chain_lines = String::new();
     let genesis = chain::genesis(s.anchor_token_digest.as_deref());
@@ -617,6 +647,7 @@ fn write_bundle(
         "redaction": {"patterns": patterns.len(), "matches": matches, "events": fates.get("redacted").copied().unwrap_or(0)},
         "cuts": cut_report,
         "files": digests,
+        "prompts": story,
     });
     for field in ["session", "command_display", "program"] {
         mask_value(&mut manifest[field], patterns);
@@ -632,8 +663,91 @@ fn write_bundle(
         "matches": matches,
         "chain_head": chain::hex(&head),
         "token_bound": s.anchor_token_digest.is_some(),
+        "prompts": manifest["prompts"].clone(),
     });
     Ok((files, summary))
+}
+
+fn agent_story(
+    store: &Store,
+    s: &Session,
+    items: &[Item],
+    cut_report: &[Value],
+    patterns: &[Regex],
+    with_text: bool,
+) -> Result<(Value, Vec<String>)> {
+    let mut transcript = None;
+    let mut hooks = 0u64;
+    store.for_each_event(&s.id, Some(&[kind::AGENT_HOOK]), |e| {
+        hooks += 1;
+        if let Some(Body::AgentHook(h)) = e.body()
+            && let Some(path) = h.transcript_path
+        {
+            transcript = Some((h.agent, path));
+        }
+        Ok(())
+    })?;
+    let unavailable = |reason: String| Ok((json!({"available": false, "reason": reason}), Vec::new()));
+    let Some((agent, path)) = transcript else {
+        let reason = if hooks == 0 { "no agent hook events" } else { "the agent hooks reported no transcript path" };
+        return unavailable(reason.into());
+    };
+    let (from_ns, to_ns) = super::inspect::session_window(s);
+    let usage = match crate::transcript::usage(Path::new(&path), from_ns, to_ns) {
+        Ok(u) => u,
+        Err(e) => return unavailable(format!("{e:#}")),
+    };
+    let base_ns = items.first().map_or(s.created_at_ns, |it| it.event.ts_ns - it.event.mono_ns);
+    let in_cut = |t_ms: i64| {
+        cut_report.iter().any(|c| t_ms >= c["from_ms"].as_i64().unwrap_or(0) && t_ms < c["to_ms"].as_i64().unwrap_or(0))
+    };
+    let mut list = Vec::new();
+    let mut cut = 0u64;
+    for (i, t) in usage.interactions.iter().enumerate() {
+        let t_ms = t.at_ns.map(|at| ((at - base_ns) / 1_000_000).max(0));
+        if t_ms.is_some_and(in_cut) {
+            cut += 1;
+            continue;
+        }
+        let mut v = json!({
+            "index": i + 1,
+            "t_ms": t_ms,
+            "origin": t.origin,
+            "chars": t.chars,
+            "images": t.images,
+            "api_calls": t.api_calls,
+            "input": t.input,
+            "output": t.output,
+            "cache_read": t.cache_read,
+            "cache_creation": t.cache_creation,
+            "total": t.total(),
+        });
+        if with_text {
+            v["text"] = json!(t.text);
+        }
+        list.push(v);
+    }
+    let mut story = json!({
+        "available": true,
+        "source": format!("{agent} transcript"),
+        "text": with_text,
+        "cut": cut,
+        "interactions": list,
+    });
+    let found = if with_text { mask_value(&mut story["interactions"], patterns) } else { Vec::new() };
+    Ok((story, found))
+}
+
+fn story_line(story: &Value) -> String {
+    if story["available"] != true {
+        return format!("prompts: unavailable ({})", story["reason"].as_str().unwrap_or("no transcript"));
+    }
+    let n = story["interactions"].as_array().map_or(0, Vec::len);
+    if story["text"] == true {
+        format!("prompts: {n} with their text, after redaction; read them before sending")
+    } else {
+        format!("prompts: {n} with times and tokens, text not included (--prompts adds it)")
+    }
 }
 
 fn summary_line(summary: &Value) -> String {
@@ -982,7 +1096,15 @@ pub fn view(layout: &Layout, args: ViewArgs) -> Result<i32> {
         let dir = layout.view_dir(&s.id);
         prepare_dir(&dir, true)?;
         let items = load(&store, &s.id)?;
-        let (files, _) = write_bundle(&store, &s, &format!("agentrecorder-{}", s.id), &items, &[], &[], 0)?;
+        let (story, _) = agent_story(&store, &s, &items, &[], &[], args.prompts)?;
+        let (files, _) = write_bundle(
+            &store,
+            &s,
+            &format!("agentrecorder-{}", s.id),
+            &items,
+            &Edits { patterns: &[], cut_report: &[], matches: 0 },
+            story,
+        )?;
         write_dir(&dir, &files)?;
         dir.join("index.html")
     };
@@ -1063,6 +1185,7 @@ mod tests {
             redact_literal: vec!["a(b".into()],
             redact_secrets: true,
             cut: vec![],
+            prompts: false,
             dry_run: true,
             json: false,
         };

@@ -1183,6 +1183,55 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     let db = std::fs::read(env.db()).unwrap();
     assert!(!db.windows(17).any(|w| w == b"the-secret-prompt"));
 
+    let plain = env.path().join("plain");
+    let out = env.ok(&["bundle", &id, "-o", plain.to_str().unwrap()]);
+    assert!(out.contains("prompts: 2 with times and tokens, text not included (--prompts adds it)"), "{out}");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plain.join("manifest.json")).unwrap()).unwrap();
+    let story = &manifest["prompts"];
+    assert_eq!((story["available"].as_bool(), story["text"].as_bool()), (Some(true), Some(false)), "{story}");
+    assert_eq!(story["source"], "claude transcript");
+    let listed: Vec<(u64, String, u64, bool)> = story["interactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["index"].as_u64().unwrap(),
+                t["origin"].as_str().unwrap().into(),
+                t["total"].as_u64().unwrap(),
+                t["t_ms"].is_u64(),
+            )
+        })
+        .collect();
+    assert_eq!(listed, [(1, "none".to_string(), 652, true), (2, "human".to_string(), 613, true)]);
+    for f in ["manifest.json", "index.html", "events.jsonl", "session.cast"] {
+        assert!(!std::fs::read_to_string(plain.join(f)).unwrap().contains("the-secret-prompt"), "{f}");
+    }
+    assert!(std::fs::read_to_string(plain.join("index.html")).unwrap().contains("Waited: from the previous answer"));
+
+    let with_text = env.path().join("with-text.zip");
+    let out = env.ok(&[
+        "bundle",
+        &id,
+        "--zip",
+        "--prompts",
+        "--redact-literal",
+        "the-secret",
+        "-o",
+        with_text.to_str().unwrap(),
+    ]);
+    assert!(out.contains("prompts: 2 with their text, after redaction; read them before sending"), "{out}");
+    let dry = env.ok(&["bundle", &id, "--prompts", "--redact-literal", "the-secret", "--dry-run"]);
+    assert!(dry.contains("1 redaction matches in prompt text: the-***"), "{dry}");
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&with_text).unwrap()).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("with-text/manifest.json").unwrap(), &mut text).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(manifest["prompts"]["text"], true);
+    assert_eq!(manifest["prompts"]["interactions"][1]["text"], "**********-prompt\n\u{1b}]52;c;evil\u{7}");
+    assert!(!text.contains("the-secret"), "{text}");
+
     std::fs::remove_file(tokens["transcript_path"].as_str().unwrap()).unwrap();
     let gone = env.inspect(&id);
     assert!(gone["tokens"].is_null());

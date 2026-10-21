@@ -27,7 +27,7 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 sys
 header { padding: 20px 24px 8px; }
 header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
 header .cmd { font-family: var(--mono); color: var(--muted); word-break: break-all; }
-main { padding: 8px 24px 32px; display: grid; gap: 16px; }
+main { padding: 8px 24px 32px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .tile, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .tile { padding: 12px 14px; }
@@ -68,6 +68,20 @@ pre.cmdline { margin: 6px 0; padding: 8px 10px; background: var(--chip); border-
 ul.files { margin: 4px 0 0; padding: 0; list-style: none; max-height: 240px; overflow: auto; font-size: 12px; }
 ul.files li { word-break: break-all; }
 code { font-family: var(--mono); font-size: 12px; background: var(--chip); padding: 1px 4px; border-radius: 4px; }
+.story-sum { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.scroll { overflow-x: auto; }
+table.story { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.story th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.story td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.story td.num { font-family: var(--mono); font-size: 12px; white-space: nowrap; text-align: right; }
+table.story td.prompt { min-width: 260px; max-width: 640px; }
+table.story tr.current td { background: var(--chip); }
+table.story .sub { color: var(--muted); font-size: 12px; }
+table.story button.at { border: 0; background: none; color: var(--accent); font: inherit; font-family: var(--mono); font-size: 12px; padding: 0; cursor: pointer; }
+.ptext { white-space: pre-wrap; word-break: break-word; }
+details.ptext summary { cursor: pointer; list-style: none; }
+details.ptext summary::-webkit-details-marker { display: none; }
+details.ptext[open] summary { color: var(--muted); }
 @media (max-width: 900px) {
   header, main { padding-left: 16px; padding-right: 16px; }
   .grid { grid-template-columns: minmax(0, 1fr); }
@@ -84,6 +98,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--chip); paddi
 <main>
   <section class="panel"><h2>Verification</h2><div class="body" id="verify"></div></section>
   <section class="tiles" id="tiles"></section>
+  <section class="panel"><h2>Prompts</h2><div class="body" id="story"></div></section>
   <div class="grid">
     <div class="col">
       <section class="panel">
@@ -187,6 +202,25 @@ const edited = (M.fates.redacted || 0) + (M.fates.cut || 0);
 const usageHook = hooks.slice().reverse().find(h => h.payload.usage);
 const usage = usageHook ? usageHook.payload.usage : null;
 const bundleName = D.bundle_name || `agentrecorder-${S.id}`;
+const P = M.prompts || { available: false, reason: "the bundle was written by an agentrecorder version without prompt data" };
+const stops = hooks.filter(h => h.payload.hook_event_name === "Stop" || h.payload.hook_event_name === "StopFailure");
+const before = (P.interactions || []).filter(t => t.origin === "none");
+const turns = (P.interactions || []).filter(t => t.origin !== "none" && t.t_ms != null).map(t => ({ ...t }));
+turns.forEach((t, i) => {
+  const next = i + 1 < turns.length ? turns[i + 1].t_ms : Infinity;
+  const stop = stops.find(h => h.t_ms >= t.t_ms && h.t_ms < next);
+  t.end = stop ? stop.t_ms : null;
+  t.agent = stop ? stop.t_ms - t.t_ms : null;
+  t.calls = toolCalls.filter(h => h.t_ms >= t.t_ms && h.t_ms < next);
+  const prev = turns[i - 1];
+  t.waited = !prev ? t.t_ms : prev.end != null ? Math.max(0, t.t_ms - prev.end) : null;
+});
+const sum = xs => xs.reduce((a, b) => a + (b || 0), 0);
+function secs(ms) {
+  if (ms == null) return "-";
+  return ms < 60000 ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s` : dur(ms);
+}
+const num = n => Number(n || 0).toLocaleString("en-US");
 document.getElementById("verify").append(
   el("div", { class: "vstatus" },
     el("span", { class: `pill ${M.chain.token_bound ? "ok" : "warn"}` }, M.chain.token_bound ? "chain bound to a reviewer token" : "not bound to a token"),
@@ -204,6 +238,7 @@ const tiles = [
   ["Commands", shell.length ? shell.length : "unavailable", shell.length ? `${failed} failed (OSC 133)` : "no OSC 133 marks"],
   ["Tool calls", hooks.length ? toolCalls.length : "unavailable", hooks.length ? `${toolFailed} failed, ${hooks.length} hook events` : "no agent hooks"],
   ["Tokens", usage ? (usage.input + usage.output + usage.cache_read + usage.cache_creation).toLocaleString("en-US") : "unavailable", usage ? `${usage.output.toLocaleString("en-US")} output, ${usage.api_calls} API calls` : hooks.length ? "no usage summary in the hooks" : "no agent hooks"],
+  ["Prompts", P.available ? turns.length : "unavailable", P.available ? `agent ${secs(sum(turns.map(t => t.agent)))}, between turns ${secs(sum(turns.slice(1).map(t => t.waited)))}` : "no agent transcript"],
   ["Markers", marks.length, "user marks"],
   ["Edited for sharing", (M.fates.redacted || 0) + (M.fates.cut || 0), `${M.fates.redacted || 0} redacted, ${M.fates.cut || 0} cut`],
 ];
@@ -219,6 +254,52 @@ if (window.AsciinemaPlayer) {
     el("code", {}, `agentrecorder replay ${S.id}`), " plays the recording on the machine that made it, and ", el("code", {}, "session.cast"), " plays in any asciinema player."));
 }
 
+const story = document.getElementById("story");
+const storyRows = [];
+if (!P.available) {
+  story.append(el("div", {}, `Unavailable: ${P.reason}.`),
+    el("div", { class: "caveat" }, "Prompts, times and tokens per prompt come from the agent transcript that the hooks name. Claude Code reports it when started as ", el("code", {}, "agentrecorder run -- claude"), "."));
+} else if (!turns.length) {
+  story.append(el("div", {}, "The transcript has no prompt inside this session."));
+} else {
+  const total = sum(turns.map(t => t.total)) + sum(before.map(t => t.total));
+  story.append(el("div", { class: "story-sum" },
+    el("span", { class: "pill" }, `${turns.length} prompts`),
+    el("span", { class: "pill" }, `agent working ${secs(sum(turns.map(t => t.agent)))}`),
+    el("span", { class: "pill" }, `between turns ${secs(sum(turns.slice(1).map(t => t.waited)))}`),
+    el("span", { class: "pill" }, `${num(total)} tokens, ${num(sum(turns.map(t => t.output)) + sum(before.map(t => t.output)))} output`),
+    P.cut ? el("span", { class: "pill warn" }, `${P.cut} prompts removed by --cut`) : null));
+  const tbody = el("tbody", {});
+  for (const t of turns) {
+    let prompt;
+    if (P.text) {
+      const flat = (t.text || "").replace(/\s+/g, " ").trim();
+      prompt = flat.length > 160 || /\n/.test(t.text || "")
+        ? el("details", { class: "ptext" }, el("summary", {}, flat.slice(0, 160) + (flat.length > 160 ? "..." : "")), t.text)
+        : el("div", { class: "ptext" }, t.text || "(empty)");
+    } else {
+      prompt = el("div", { class: "sub" }, `${num(t.chars)} characters${t.images ? `, ${t.images} images` : ""}; text not included`);
+    }
+    const tools = {};
+    for (const c of t.calls) { const k = c.payload.tool_name || "tool"; tools[k] = (tools[k] || 0) + 1; }
+    const failedCalls = t.calls.filter(c => c.payload.hook_event_name === "PostToolUseFailure").length;
+    const row = el("tr", {},
+      el("td", { class: "num" }, t.index),
+      el("td", { class: "num" }, el("button", { type: "button", class: "at", title: "Play from here", onclick: () => player && player.seek(t.t_ms / 1000) }, off(t.t_ms))),
+      el("td", { class: "num", title: "Time between the end of the previous answer (Stop hook) and this prompt; the first row counts from the session start" }, secs(t.waited)),
+      el("td", { class: "prompt" }, t.origin !== "human" && t.origin !== "user" ? el("span", { class: "pill" }, t.origin) : null, prompt),
+      el("td", { class: "num", title: "Time from this prompt to the agent's Stop hook" }, t.agent != null ? secs(t.agent) : el("span", { class: "sub", title: "No Stop hook before the next prompt: interrupted, or still running at exit" }, "no stop")),
+      el("td", {}, t.calls.length ? Object.entries(tools).map(([k, n]) => `${k} ${n}`).join(", ") : el("span", { class: "sub" }, "none"),
+        failedCalls ? el("div", { class: "sub" }, `${failedCalls} failed`) : null),
+      el("td", { class: "num" }, num(t.total), el("div", { class: "sub" }, `${num(t.output)} out, ${t.api_calls} calls`)));
+    storyRows.push([t.t_ms, row]);
+    tbody.append(row);
+  }
+  story.append(el("div", { class: "scroll" }, el("table", { class: "story" },
+    el("thead", {}, el("tr", {}, ["#", "At", "Waited", "Prompt", "Agent", "Tools", "Tokens"].map(h => el("th", {}, h)))), tbody)));
+  story.append(el("div", { class: "caveat" },
+    `Waited: from the previous answer (Stop hook) to this prompt; the first row counts from the session start. Agent: from the prompt to its Stop hook. Tools: PostToolUse hooks until the next prompt. Tokens: replies until the next prompt${before.length ? `; ${num(sum(before.map(t => t.total)))} tokens came before the first prompt` : ""}. From the ${P.source} read when the bundle was written: not covered by the hash chain or verify. ${P.text ? "Prompt text included with --prompts, after redaction." : "Prompt text is included only when the bundle is written with --prompts."}`));
+}
 const active = new Set(Object.keys(CATS));
 const filters = document.getElementById("filters");
 const list = document.getElementById("rows");
@@ -249,12 +330,15 @@ function render() {
 }
 render();
 if (player) {
-  let last = null;
+  let last = null, lastTurn = null;
   setInterval(() => {
     const t = player.getCurrentTime() * 1000;
     let cur = null;
     for (const [ms, n] of rendered) { if (ms <= t) cur = n; else break; }
     if (cur !== last) { last && last.classList.remove("current"); cur && cur.classList.add("current"); last = cur; }
+    let turn = null;
+    for (const [ms, n] of storyRows) { if (ms <= t) turn = n; else break; }
+    if (turn !== lastTurn) { lastTurn && lastTurn.classList.remove("current"); turn && turn.classList.add("current"); lastTurn = turn; }
   }, 500);
 }
 

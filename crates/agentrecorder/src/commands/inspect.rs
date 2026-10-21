@@ -107,7 +107,7 @@ pub fn files_changed(snapshots: &[Body]) -> Result<FilesChanged, &'static str> {
     })
 }
 
-fn session_window(s: &agentrecorder_store::Session) -> (i64, i64) {
+pub(crate) fn session_window(s: &agentrecorder_store::Session) -> (i64, i64) {
     (s.started_at_ns.unwrap_or(s.created_at_ns), s.ended_at_ns.unwrap_or_else(now_unix_ns))
 }
 

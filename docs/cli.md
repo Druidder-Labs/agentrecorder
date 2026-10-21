@@ -24,10 +24,10 @@ Requirements: Linux or macOS. Building needs Rust 1.95 or newer.
 | `replay ID [--speed N] [--from T\|--from-mark N\|LABEL] [--max-idle S] [--instant] [--raw] [--follow]` | Play back recorded output. `--follow` keeps playing while the session runs; `--from-mark` takes a number (1 is first) or an exact label |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, SIGKILL after the timeout (default 5 s) |
 | `export ID [--format jsonl\|asciicast-v2\|asciicast-v3] [--follow]` | Events as JSON Lines, or an asciicast with markers (v3 carries the exit status) |
-| `bundle ID [-o DIR\|FILE] [--zip] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--dry-run] [--json]` | Write `agentrecorder-ID/` (or `agentrecorder-ID.zip`): `index.html`, `session.cast`, `events.jsonl`, `chain.jsonl`, `manifest.json`. `--dry-run` lists what would change and writes nothing |
+| `bundle ID [-o DIR\|FILE] [--zip] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--prompts] [--dry-run] [--json]` | Write `agentrecorder-ID/` (or `agentrecorder-ID.zip`): `index.html`, `session.cast`, `events.jsonl`, `chain.jsonl`, `manifest.json`. `--prompts` adds each prompt's text. `--dry-run` lists what would change and writes nothing |
 | `anchor ID [--interval S]` | Print one anchor line every S seconds (default 30) and one at exit; a finished session prints one line |
 | `verify DIR\|FILE.zip [--anchors FILE] [--token T] [--json]` | Check file digests, the hash chain, every anchor, and that the genesis is the token's SHA-256. Exit 0 when all pass |
-| `view DIR\|FILE.zip\|ID [--no-open]` | Open a bundle's dashboard, or write one for a finished session to `views/ID` |
+| `view DIR\|FILE.zip\|ID [--no-open] [--prompts]` | Open a bundle's dashboard, or write one for a finished session to `views/ID` (`--prompts` includes prompt text) |
 | `rm ID...`, `prune --older-than 30d` | Delete finished sessions and their recordings |
 | `completions SHELL` | bash, zsh, fish or elvish |
 | `hook [--agent NAME]` | Record a hook event read from stdin in the session named by `AGENTRECORDER_SESSION`; always exits 0, prints nothing |
@@ -120,9 +120,10 @@ agentrecorder verify agentrecorder-3f9a1c.zip --anchors anchors.jsonl --token "$
 
 Send the reviewer the bundle and, when integrity matters, the `anchors.jsonl` they received while the session ran (synced folder, `tail -f anchors.jsonl | curl -T - URL`). A reviewer who issues one token per session passes it to the candidate; the token is never stored, its SHA-256 is the chain genesis, so `verify --token` fails for a bundle made without it. The token identifies the session, not the person.
 
-- `index.html` opens offline and makes no requests: verification panel with the exact `verify` command, summary tiles, player (`asciinema-player` 3.17.0, vendored), timeline of markers, hook events, commands, git snapshots and warnings (click to seek), files changed, activity per tool with token totals, integrity data.
+- `index.html` opens offline and makes no requests: verification panel with the exact `verify` command, summary tiles, the prompts in order, player (`asciinema-player` 3.17.0, vendored), timeline of markers, hook events, commands, git snapshots and warnings (click to seek), files changed, activity per tool with token totals, integrity data.
 - `--redact REGEX` (Rust regex on bytes), `--redact-literal TEXT`, `--redact-secrets` (OpenAI and Anthropic keys, GitHub and GitLab tokens, AWS key ids, Google API keys, Slack tokens, bearer tokens, JWTs, private key blocks; `SECRET_PATTERNS` in `bundle.rs`) replace matches with `*` of the same length in output, input, snapshots, payload strings, metadata and the cast header. Patterns are not written to the bundle. `--dry-run` prints each match with offset, event type, first four characters and length. A pattern that matches nothing warns.
 - `--cut FROM-TO` (seconds, `MM:SS` or `HH:MM:SS`) removes output, input, snapshots, notifications, hooks, commands and marks in the range; lifecycle events stay. The screen after a cut can look wrong until the program redraws.
+- Prompts: one row per prompt from the agent transcript, read when the bundle is written: time, wait since the previous answer (`Stop` hook), agent time until its `Stop`, tools called, tokens. Without `--prompts` only the length is included; with it the text, after redaction. Prompts inside a `--cut` range are dropped. This data is not in the hash chain: treat it as self-reported.
 - `--zip` writes the same five files into one deflate zip under a directory named after the file; `verify` and `view` read it directly.
 - `chain.jsonl` lists every event with its hash and fate (`kept`, `redacted`, `cut`).
 

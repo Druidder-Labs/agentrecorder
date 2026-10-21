@@ -60,7 +60,7 @@ A session without `session.terminated` was lost; `sessions` shows `lost` and `in
 
 | File | Content |
 | --- | --- |
-| `manifest.json` | `format`, `bundle_version`, `generator`, `created_at`, `session`, `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `genesis`, `token_bound`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts`, `files` (`sha256`, `bytes` of the three data files) |
+| `manifest.json` | `format`, `bundle_version`, `generator`, `created_at`, `session`, `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `genesis`, `token_bound`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts`, `files` (`sha256`, `bytes` of the three data files), `prompts` (`available`, `reason`, `source`, `text`, `cut`, `interactions`: `index`, `t_ms`, `origin`, `chars`, `images`, `api_calls`, `input`, `output`, `cache_read`, `cache_creation`, `total`, and `text` with `--prompts`; from the agent transcript, not hash-chained) |
 | `events.jsonl` | The envelope above, one line per event not cut; redacted events carry redacted bytes |
 | `chain.jsonl` | One line per recorded event: `seq`, `leaf`, `chain`, `fate` (`kept`, `redacted`, `cut`) |
 | `session.cast` | asciicast v3 with a `cut FROM-TO` marker per range |

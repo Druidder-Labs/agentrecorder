@@ -33,7 +33,7 @@ Assets: terminal output and input (code, secrets, passwords), the environment of
 | Transcript and hook data leak prompts | `inspect` reads the transcript read-only and takes only usage, ids, timestamps, origins and prompt text (shown only with `--prompts`, control characters replaced). `agentrecorder hook` keeps an allowlist of metadata fields; `prompt`, `tool_input` and `last_assistant_message` are dropped in the hook process; at `Stop` it records only token sums and model names. It prints nothing on stdout | `transcript.rs`, `hook.rs` |
 | Attaching a session to itself | Refused when `AGENTRECORDER_SESSION` equals the target | `attach.rs` |
 | Terminal left in raw mode | Restored on detach, exit, error, SIGTERM, SIGINT, SIGHUP | `attach.rs` |
-| A shared bundle leaks a secret | `--redact*` masks output, input, snapshots, payloads, metadata and the cast header; `--cut` removes a range; patterns are not stored; files are 0600 | `bundle.rs` |
+| A shared bundle leaks a secret or a prompt | Prompt text enters a bundle only with `--prompts`. `--redact*` masks output, input, snapshots, payloads, metadata, the cast header and prompt text; `--cut` removes a range; patterns are not stored; files are 0600 | `bundle.rs` |
 | Recorded output runs script in the dashboard | Data embedded as JSON with `<`, `>`, `&` escaped; `textContent` only; CSP with inline script and style only and no `connect-src` | `dashboard.html` |
 | A bundle is edited afterwards | Hash chain over every event; `verify` rechecks events, chain, digests and anchors | `chain.rs` |
 | A bundle for a session the reviewer did not issue | `run --anchor-token` seeds the chain with the token's SHA-256; only the digest is stored; `verify --token` | `chain.rs` |
