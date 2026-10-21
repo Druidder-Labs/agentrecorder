@@ -21,7 +21,7 @@ const RESUME_WAIT: Duration = Duration::from_secs(15);
 
 #[derive(clap::Args)]
 pub struct RecoverArgs {
-    #[arg(help = "Session id or a unique prefix of it")]
+    #[arg(help = crate::SESSION_HELP)]
     pub session: String,
     #[arg(long, help = "Start a new session that re-executes the original command in its working directory")]
     pub restart: bool,
@@ -172,6 +172,7 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
         detach_key: args.detach_key.clone(),
         no_agent_integration: false,
         cwd,
+        anchor: None,
         command: argv,
     };
     let started = run::start(layout, &run_args, Some(&s.id))?;

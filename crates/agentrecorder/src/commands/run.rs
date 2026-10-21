@@ -39,6 +39,12 @@ pub struct RunArgs {
     pub no_agent_integration: bool,
     #[arg(long, help = "Working directory for the command (default: current directory)")]
     pub cwd: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Append hash-chain anchor lines to FILE every 30 s while the session runs (see `agentrecorder anchor`)"
+    )]
+    pub anchor: Option<PathBuf>,
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND", help = "Command and arguments, after --")]
     pub command: Vec<String>,
 }
@@ -137,6 +143,9 @@ fn last_log_line(layout: &Layout, id: &str) -> Option<String> {
 pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     let key = DetachKey::parse(&args.detach_key)?;
     let started = start(layout, &args, None)?;
+    if let Some(file) = &args.anchor {
+        start_anchor(&started.id, file)?;
+    }
     if args.detached {
         println!("{}", started.id);
         return Ok(0);
@@ -154,6 +163,23 @@ pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         attach::Outcome::Ended => print_finished(layout, &started.id),
         outcome => Ok(attach::report_outcome(&started.id, &outcome)),
     }
+}
+
+fn start_anchor(id: &str, file: &PathBuf) -> Result<()> {
+    let out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .with_context(|| format!("opening anchor file {}", file.display()))?;
+    let exe = std::env::current_exe().context("locating the agentrecorder binary")?;
+    Command::new(exe)
+        .args(["anchor", id])
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(Stdio::null())
+        .spawn()
+        .context("starting the anchor writer")?;
+    Ok(())
 }
 
 fn new_id(store: &Store) -> Result<String> {

@@ -355,6 +355,15 @@ impl Store {
     }
 
     pub fn resolve(&self, id_or_prefix: &str) -> Result<Session> {
+        if id_or_prefix == "last" || id_or_prefix == "latest" {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY created_at_ns DESC LIMIT 1"))?;
+            return match stmt.query_map([], row_to_session)?.next() {
+                Some(s) => Ok(s?),
+                None => bail!("no sessions recorded yet; start one with `agentrecorder run -- <command>`"),
+            };
+        }
         if id_or_prefix.is_empty() || !id_or_prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
             bail!("invalid session id {id_or_prefix:?}");
         }

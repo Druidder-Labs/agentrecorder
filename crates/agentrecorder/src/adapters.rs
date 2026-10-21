@@ -141,12 +141,21 @@ pub fn claude_hook_settings(hook_program: &str) -> String {
 pub const HOOKS_PLACEHOLDER: &str = "<agentrecorder hooks>";
 
 pub fn display(argv: &[String]) -> String {
+    display_argv(argv).join(" ")
+}
+
+pub fn display_quoted(argv: &[String]) -> String {
+    let shown: Vec<String> = display_argv(argv).into_iter().map(str::to_string).collect();
+    crate::commands::export::shell_join(&shown)
+}
+
+fn display_argv(argv: &[String]) -> Vec<&str> {
     let mut out = Vec::with_capacity(argv.len());
     for (i, a) in argv.iter().enumerate() {
         let injected = i > 0 && argv[i - 1] == "--settings" && is_injected_settings(a);
         out.push(if injected { HOOKS_PLACEHOLDER } else { a.as_str() });
     }
-    out.join(" ")
+    out
 }
 
 fn is_injected_settings(value: &str) -> bool {

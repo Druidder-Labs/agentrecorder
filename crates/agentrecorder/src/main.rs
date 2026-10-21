@@ -15,6 +15,7 @@ use std::process::ExitCode;
 use agentrecorder_supervisor::Layout;
 use clap::{Parser, Subcommand};
 
+pub const SESSION_HELP: &str = "Session id, a unique prefix of it, or `last` for the most recent session";
 pub const DEFAULT_DETACH_KEY: &str = "ctrl-\\";
 pub const DEFAULT_MAX_RECORD_MB: u64 = 256;
 pub static USER_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -23,8 +24,9 @@ pub static USER_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 #[command(
     name = "agentrecorder",
     version,
+    arg_required_else_help = true,
     about = "Run, inspect, recover and replay terminal sessions of AI coding agents and other programs",
-    after_help = "Examples:\n  agentrecorder run -- claude\n  agentrecorder sessions\n  agentrecorder attach a91f2c\n  agentrecorder inspect a91f2c\n  agentrecorder replay a91f2c --speed 2\n\nState lives in $AGENTRECORDER_HOME (default: $XDG_STATE_HOME/agentrecorder or ~/.local/state/agentrecorder)."
+    after_help = "Examples:\n  agentrecorder run -- claude\n  agentrecorder sessions\n  agentrecorder attach a91f2c\n  agentrecorder inspect a91f2c\n  agentrecorder replay last --speed 2\n  agentrecorder bundle last\n\nState lives in $AGENTRECORDER_HOME (default: $XDG_STATE_HOME/agentrecorder or ~/.local/state/agentrecorder)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,7 +44,7 @@ enum Command {
     },
     #[command(about = "Attach the current terminal to a running session")]
     Attach {
-        #[arg(help = "Session id or a unique prefix of it")]
+        #[arg(help = crate::SESSION_HELP)]
         session: String,
         #[arg(
             long,
@@ -53,17 +55,20 @@ enum Command {
         detach_key: String,
     },
     #[command(about = "Detach whichever client is attached to a session")]
-    Detach { session: String },
+    Detach {
+        #[arg(help = crate::SESSION_HELP)]
+        session: String,
+    },
     #[command(about = "Record a marker in a running session; replay --from-mark starts there")]
     Mark {
-        #[arg(help = "Session id or a unique prefix of it")]
+        #[arg(help = crate::SESSION_HELP)]
         session: String,
         #[arg(default_value = "", help = "Label shown by inspect, replay and asciicast export")]
         label: String,
     },
     #[command(about = "Show measured process, terminal and event data for a session")]
     Inspect {
-        #[arg(help = "Session id or a unique prefix of it")]
+        #[arg(help = crate::SESSION_HELP)]
         session: String,
         #[arg(long, help = "Print JSON instead of text")]
         json: bool,
@@ -74,14 +79,14 @@ enum Command {
     Replay(commands::replay::ReplayArgs),
     #[command(about = "Stop the managed process of a session")]
     Stop {
-        #[arg(help = "Session id or a unique prefix of it")]
+        #[arg(help = crate::SESSION_HELP)]
         session: String,
         #[arg(long, default_value = "HUP", help = "First signal: HUP, TERM, INT or KILL")]
         signal: String,
         #[arg(long, default_value_t = 5.0, help = "Seconds before escalating to SIGKILL")]
         timeout: f64,
     },
-    #[command(about = "Export recorded events as JSON Lines or an asciicast v2 file")]
+    #[command(about = "Export recorded events as JSON Lines or an asciicast v2 or v3 file")]
     Export(commands::export::ExportArgs),
     #[command(about = "Write a shareable directory: dashboard, asciicast, events, hash chain and manifest")]
     Bundle(commands::bundle::BundleArgs),
@@ -103,6 +108,11 @@ enum Command {
     },
     #[command(about = "Record an agent hook event (JSON on stdin) in the session named by AGENTRECORDER_SESSION")]
     Hook(commands::hook::HookArgs),
+    #[command(about = "Print a shell completion script: bash, zsh, fish or elvish")]
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     #[command(name = "__supervise", hide = true)]
     Supervise(SuperviseArgs),
 }
@@ -152,6 +162,11 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         Command::Hook(args) => return Ok(commands::hook::hook(args)),
         Command::Verify(args) => return commands::bundle::verify(args),
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "agentrecorder", &mut std::io::stdout());
+            return Ok(0);
+        }
         _ => {}
     }
     let layout = Layout::from_env()?;
@@ -174,7 +189,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Command::View(args) => commands::bundle::view(&layout, args),
         Command::Rm { sessions } => commands::sessions::remove(&layout, &sessions),
         Command::Prune { older_than } => commands::sessions::prune(&layout, &older_than),
-        Command::Hook(_) | Command::Verify(_) => unreachable!("handled before the state directory is resolved"),
+        Command::Hook(_) | Command::Verify(_) | Command::Completions { .. } => {
+            unreachable!("handled before the state directory is resolved")
+        }
         Command::Supervise(a) => {
             layout.ensure()?;
             agentrecorder_supervisor::run(agentrecorder_supervisor::Config {

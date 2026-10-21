@@ -14,7 +14,9 @@ Releases are cut by release-please from Conventional Commits on `main`, and the 
 3. Merging that PR creates the tag `vX.Y.Z` and a GitHub release.
 4. The `Publish crates` workflow checks out the tag, verifies that the tag matches the workspace version, runs `cargo package --workspace --locked`, obtains a short-lived crates.io token through trusted publishing (OIDC), and runs `cargo publish --workspace --locked`, which publishes `agentrecorder-store`, `agentrecorder-supervisor` and `agentrecorder` in dependency order.
 
-`just package` runs the same packaging check locally; `just check-ci` includes it.
+5. The `Release binaries` workflow runs on the same event: one job per target (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin`) builds the CLI, packs `agentrecorder-vX.Y.Z-<target>.tar.gz` with the binary, `LICENSE` and `README.md`, and uploads it with a `.sha256` file through `gh release upload`. `install.sh` at the repository root downloads these; it needs no change per release.
+
+`just package` runs the same packaging check locally; `just check-ci` includes it. When `just package` fails only locally on a type that was just added to a workspace crate, `just clean-package` removes the stale unpacked copy that `cargo package` verifies against.
 
 ## One-time setup
 

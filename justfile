@@ -24,6 +24,11 @@ check-ci: check deny package
 package:
     cargo package --workspace --locked --allow-dirty
 
+# `just package` can verify against a stale unpack of the workspace crates after an API change; this clears it.
+clean-package:
+    rm -rf ~/.cargo/registry/src/-*/agentrecorder-store-* ~/.cargo/registry/src/-*/agentrecorder-supervisor-*
+    cargo clean -p agentrecorder-store -p agentrecorder-supervisor
+
 deny:
     cargo deny check
 

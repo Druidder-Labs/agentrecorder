@@ -20,6 +20,8 @@ use crate::render::initial_size;
 pub const BUNDLE_FORMAT: &str = "agentrecorder-bundle";
 pub const BUNDLE_VERSION: u32 = 1;
 const DASHBOARD: &str = include_str!("../dashboard.html");
+const PLAYER_JS: &str = include_str!("../vendor/asciinema-player/asciinema-player.min.js");
+const PLAYER_CSS: &str = include_str!("../vendor/asciinema-player/asciinema-player.css");
 const DATA_PLACEHOLDER: &str = "__AGENTRECORDER_DATA__";
 const CUTTABLE: &[&str] = &[
     kind::TERMINAL_OUTPUT,
@@ -33,29 +35,73 @@ const CUTTABLE: &[&str] = &[
 const BYTE_STREAMS: &[&str] = &[kind::TERMINAL_OUTPUT, kind::TERMINAL_INPUT];
 const TIMELINE_SKIP: &[&str] = &[kind::TERMINAL_OUTPUT, kind::TERMINAL_INPUT, kind::TERMINAL_SNAPSHOT];
 
+pub const SECRET_PATTERNS: &[(&str, &str)] = &[
+    ("openai or anthropic key", r"sk-[A-Za-z0-9_-]{16,}"),
+    ("github token", r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}"),
+    ("gitlab token", r"glpat-[A-Za-z0-9_-]{20,}"),
+    ("aws access key id", r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    ("google api key", r"AIza[0-9A-Za-z_-]{35}"),
+    ("slack token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    ("bearer token", r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+    ("jwt", r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    ("private key block", r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+];
+
 #[derive(clap::Args)]
 pub struct BundleArgs {
-    #[arg(help = "Session id or a unique prefix of it; the session must have finished")]
+    #[arg(help = "Session id, a unique prefix of it, or `last`; the session must have finished")]
     pub session: String,
-    #[arg(short, long, help = "Directory to create; it must not exist or be empty")]
-    pub out: PathBuf,
+    #[arg(short, long, help = "Directory to create (default: ./agentrecorder-<ID>); it must not exist or be empty")]
+    pub out: Option<PathBuf>,
+    #[arg(long, help = "Replace the output directory if it exists")]
+    pub force: bool,
     #[arg(
         long,
         value_name = "REGEX",
         help = "Replace every match in output, input, snapshots and event payloads with '*' (repeatable)"
     )]
     pub redact: Vec<String>,
+    #[arg(long, value_name = "TEXT", help = "Replace every occurrence of this exact text with '*' (repeatable)")]
+    pub redact_literal: Vec<String>,
+    #[arg(
+        long,
+        help = "Also redact common secret shapes: API keys, GitHub and GitLab tokens, AWS key ids, bearer tokens, JWTs, private key blocks"
+    )]
+    pub redact_secrets: bool,
     #[arg(
         long,
         value_name = "FROM-TO",
         help = "Remove terminal data, hooks, marks and notifications between two offsets, such as 00:12:03-00:12:09 (repeatable)"
     )]
     pub cut: Vec<String>,
+    #[arg(long, help = "List what --redact and --cut would change, with offsets, and write nothing")]
+    pub dry_run: bool,
+    #[arg(long, help = "Print the result as JSON")]
+    pub json: bool,
+}
+
+pub fn patterns(args: &BundleArgs) -> Result<Vec<Regex>> {
+    let mut out = Vec::new();
+    for p in &args.redact {
+        out.push(Regex::new(p).with_context(|| format!("invalid --redact pattern {p:?}"))?);
+    }
+    for t in &args.redact_literal {
+        if t.is_empty() {
+            bail!("--redact-literal needs a non-empty text");
+        }
+        out.push(Regex::new(&regex::escape(t)).expect("escaped literal"));
+    }
+    if args.redact_secrets {
+        for (_, p) in SECRET_PATTERNS {
+            out.push(Regex::new(p).expect("built-in pattern"));
+        }
+    }
+    Ok(out)
 }
 
 #[derive(clap::Args)]
 pub struct AnchorArgs {
-    #[arg(help = "Session id or a unique prefix of it")]
+    #[arg(help = crate::SESSION_HELP)]
     pub session: String,
     #[arg(long, default_value_t = 30, help = "Seconds between anchors while the session runs")]
     pub interval: u64,
@@ -67,6 +113,8 @@ pub struct VerifyArgs {
     pub dir: PathBuf,
     #[arg(long, help = "File of anchor lines received from `agentrecorder anchor` while the session ran")]
     pub anchors: Option<PathBuf>,
+    #[arg(long, help = "Print the result as JSON")]
+    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -100,7 +148,7 @@ struct Item {
     fate: Fate,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 struct CutRange {
     from_ns: i64,
     to_ns: i64,
@@ -119,29 +167,112 @@ fn parse_cut(s: &str) -> Result<CutRange> {
 
 pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     let store = open_store(layout)?;
-    let (s, _) = finished_session(layout, &store, &args.session)?;
+    let (s, _) = finished_session(layout, &store, &args.session, "a bundle")?;
     let cuts = args.cut.iter().map(|c| parse_cut(c)).collect::<Result<Vec<_>>>()?;
-    let patterns = args
-        .redact
-        .iter()
-        .map(|p| Regex::new(p).with_context(|| format!("invalid --redact pattern {p:?}")))
-        .collect::<Result<Vec<_>>>()?;
-    prepare_dir(&args.out, false)?;
-    let summary = write_bundle(&store, &s, &args.out, &patterns, &cuts)?;
-    println!("wrote bundle for session {} to {}", s.id, args.out.display());
-    println!("  {summary}");
-    println!("  open it with: agentrecorder view {}", args.out.display());
-    println!("  check it with: agentrecorder verify {}", args.out.display());
+    let patterns = patterns(&args)?;
+    let out = args.out.clone().unwrap_or_else(|| PathBuf::from(format!("agentrecorder-{}", s.id)));
+    let mut items = load(&store, &s.id)?;
+    let duration_ns = items.last().map_or(0, |it| it.event.mono_ns);
+    let cut_report = apply_cuts(&mut items, &cuts);
+    let matches = apply_redactions(&mut items, &patterns);
+    let mut warnings = Vec::new();
+    for (c, r) in cuts.iter().zip(&cut_report) {
+        let (from, to) = (crate::fmt::offset_ms(c.from_ns / 1_000_000), crate::fmt::offset_ms(c.to_ns / 1_000_000));
+        if c.from_ns > duration_ns {
+            warnings.push(format!(
+                "cut {from}-{to} starts after the session ended at {}; nothing removed",
+                crate::fmt::offset_ms(duration_ns / 1_000_000)
+            ));
+        } else if r["events"] == 0 {
+            warnings.push(format!("cut {from}-{to} matched no events"));
+        }
+    }
+    if !patterns.is_empty() && matches.is_empty() {
+        warnings.push("no redaction pattern matched anything".into());
+    }
+    if args.dry_run {
+        return dry_run(&s, &out, &items, &matches, &cut_report, &warnings, args.json);
+    }
+    for w in &warnings {
+        eprintln!("agentrecorder: warning: {w}");
+    }
+    prepare_dir(&out, args.force)?;
+    let summary = write_bundle(&store, &s, &out, &items, &patterns, &cut_report, matches.len() as u64)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({"session": s.id, "dir": out, "summary": summary, "warnings": warnings})
+            )?
+        );
+        return Ok(0);
+    }
+    println!("wrote bundle for session {} to {}", s.id, out.display());
+    println!("  {}", summary_line(&summary));
+    println!("  open it with: agentrecorder view {}", out.display());
+    println!("  check it with: agentrecorder verify {}", out.display());
     Ok(0)
 }
 
-fn finished_session(layout: &Layout, store: &Store, id: &str) -> Result<(Session, crate::state::State)> {
+fn dry_run(
+    s: &Session,
+    out: &Path,
+    items: &[Item],
+    matches: &[Match],
+    cut_report: &[Value],
+    warnings: &[String],
+    as_json: bool,
+) -> Result<i32> {
+    let fates = count_fates(items);
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "session": s.id,
+                "dir": out,
+                "dry_run": true,
+                "events": items.len(),
+                "fates": fates,
+                "matches": matches.iter().map(Match::to_json).collect::<Vec<_>>(),
+                "cuts": cut_report,
+                "warnings": warnings,
+            }))?
+        );
+        return Ok(0);
+    }
+    println!("dry run for session {}: nothing written to {}", s.id, out.display());
+    println!(
+        "  {} events: {} kept, {} redacted, {} cut",
+        items.len(),
+        fates.get("kept").copied().unwrap_or(0),
+        fates.get("redacted").copied().unwrap_or(0),
+        fates.get("cut").copied().unwrap_or(0)
+    );
+    println!("  {} redaction matches", matches.len());
+    for m in matches {
+        println!("    {} {} {}", crate::fmt::offset_ms(m.mono_ns / 1_000_000), m.kind, m.preview);
+    }
+    for c in cut_report {
+        println!(
+            "  cut {}-{}: {} events removed",
+            crate::fmt::offset_ms(c["from_ms"].as_i64().unwrap_or(0)),
+            crate::fmt::offset_ms(c["to_ms"].as_i64().unwrap_or(0)),
+            c["events"]
+        );
+    }
+    for w in warnings {
+        println!("  warning: {w}");
+    }
+    Ok(0)
+}
+
+fn finished_session(layout: &Layout, store: &Store, id: &str, what: &str) -> Result<(Session, crate::state::State)> {
     let mut s = store.resolve(id)?;
     let st = crate::state::resolve(layout, store, &mut s);
     if !st.is_finished() {
         bail!(
-            "session {} is {}; a bundle needs a finished session (stop it with `agentrecorder stop {}`, or stream \
-             anchors meanwhile with `agentrecorder anchor {}`)",
+            "session {} is {}; {what} needs a finished session. Stop it with `agentrecorder stop {}`, or follow it \
+             live with `agentrecorder replay {} --follow`",
             s.id,
             st.label(),
             s.id,
@@ -151,12 +282,38 @@ fn finished_session(layout: &Layout, store: &Store, id: &str) -> Result<(Session
     Ok((s, st))
 }
 
+struct Match {
+    mono_ns: i64,
+    kind: String,
+    preview: String,
+}
+
+impl Match {
+    fn to_json(&self) -> Value {
+        json!({"offset_ms": self.mono_ns / 1_000_000, "type": self.kind, "preview": self.preview})
+    }
+}
+
+fn preview(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let shown: String = text.chars().take(4).collect();
+    format!("{shown}{} ({} bytes)", "*".repeat(text.chars().count().saturating_sub(4).min(12)), bytes.len())
+}
+
+fn count_fates(items: &[Item]) -> BTreeMap<&'static str, u64> {
+    let mut fates = BTreeMap::new();
+    for it in items {
+        *fates.entry(it.fate.as_str()).or_default() += 1;
+    }
+    fates
+}
+
 fn prepare_dir(dir: &Path, replace: bool) -> Result<()> {
     if dir.exists() {
         if replace {
             fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
         } else if fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?.next().is_some() {
-            bail!("{} exists and is not empty; choose a new directory", dir.display());
+            bail!("{} exists and is not empty; choose another directory or pass --force", dir.display());
         }
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
@@ -188,47 +345,55 @@ fn apply_cuts(items: &mut [Item], cuts: &[CutRange]) -> Vec<Value> {
         .collect()
 }
 
-fn mask(buf: &mut [u8], patterns: &[Regex]) -> u64 {
+fn mask(buf: &mut [u8], patterns: &[Regex]) -> Vec<(usize, String)> {
     let mut ranges = Vec::new();
     for p in patterns {
         ranges.extend(p.find_iter(buf).filter(|m| !m.is_empty()).map(|m| m.range()));
     }
+    ranges.sort_by_key(|r| r.start);
+    let found = ranges.iter().map(|r| (r.start, preview(&buf[r.clone()]))).collect();
     for r in &ranges {
         buf[r.clone()].fill(b'*');
     }
-    ranges.len() as u64
+    found
 }
 
-fn mask_value(v: &mut Value, patterns: &[Regex]) -> u64 {
+fn mask_value(v: &mut Value, patterns: &[Regex]) -> Vec<String> {
     match v {
         Value::String(s) => {
             let mut bytes = s.as_bytes().to_vec();
-            let n = mask(&mut bytes, patterns);
-            if n > 0 {
+            let found = mask(&mut bytes, patterns);
+            if !found.is_empty() {
                 *s = String::from_utf8_lossy(&bytes).into_owned();
             }
-            n
+            found.into_iter().map(|(_, p)| p).collect()
         }
-        Value::Array(a) => a.iter_mut().map(|x| mask_value(x, patterns)).sum(),
-        Value::Object(o) => o.values_mut().map(|x| mask_value(x, patterns)).sum(),
-        _ => 0,
+        Value::Array(a) => a.iter_mut().flat_map(|x| mask_value(x, patterns)).collect(),
+        Value::Object(o) => o.values_mut().flat_map(|x| mask_value(x, patterns)).collect(),
+        _ => Vec::new(),
     }
 }
 
-fn apply_redactions(items: &mut [Item], patterns: &[Regex]) -> u64 {
+fn apply_redactions(items: &mut [Item], patterns: &[Regex]) -> Vec<Match> {
+    let mut matches = Vec::new();
     if patterns.is_empty() {
-        return 0;
+        return matches;
     }
-    let mut matches = 0;
     for stream in BYTE_STREAMS {
         let idx: Vec<usize> = (0..items.len())
             .filter(|&i| items[i].fate != Fate::Cut && items[i].event.kind == *stream && items[i].event.data.is_some())
             .collect();
         let mut joined = Vec::new();
+        let mut starts = Vec::new();
         for &i in &idx {
+            starts.push(joined.len());
             joined.extend_from_slice(items[i].event.data.as_deref().unwrap_or_default());
         }
-        matches += mask(&mut joined, patterns);
+        for (start, preview) in mask(&mut joined, patterns) {
+            let n = starts.partition_point(|&s| s <= start).saturating_sub(1);
+            let e = &items[idx[n]].event;
+            matches.push(Match { mono_ns: e.mono_ns, kind: e.kind.clone(), preview });
+        }
         let mut at = 0;
         for &i in &idx {
             let data = items[i].event.data.as_mut().expect("filtered on data");
@@ -241,32 +406,42 @@ fn apply_redactions(items: &mut [Item], patterns: &[Regex]) -> u64 {
         }
     }
     for it in items.iter_mut().filter(|it| it.fate != Fate::Cut) {
-        let mut n = mask_value(&mut it.event.payload, patterns);
+        let mut found = mask_value(&mut it.event.payload, patterns);
         if it.event.kind == kind::TERMINAL_SNAPSHOT
             && let Some(d) = it.event.data.as_mut()
         {
-            n += mask(d, patterns);
+            found.extend(mask(d, patterns).into_iter().map(|(_, p)| p));
         }
-        if n > 0 {
+        if !found.is_empty() {
             it.fate = Fate::Redacted;
-            matches += n;
+            let e = &it.event;
+            matches.extend(found.into_iter().map(|preview| Match {
+                mono_ns: e.mono_ns,
+                kind: e.kind.clone(),
+                preview,
+            }));
         }
     }
+    matches.sort_by_key(|m| m.mono_ns);
     matches
 }
 
-fn write_bundle(store: &Store, s: &Session, dir: &Path, patterns: &[Regex], cuts: &[CutRange]) -> Result<String> {
-    let mut items = load(store, &s.id)?;
-    let cut_report = apply_cuts(&mut items, cuts);
-    let matches = apply_redactions(&mut items, patterns);
-
+fn write_bundle(
+    store: &Store,
+    s: &Session,
+    dir: &Path,
+    items: &[Item],
+    patterns: &[Regex],
+    cut_report: &[Value],
+    matches: u64,
+) -> Result<Value> {
     let mut events = String::new();
     let mut chain_lines = String::new();
     let mut head = chain::GENESIS;
     let mut fates: BTreeMap<&str, u64> = BTreeMap::new();
     let mut timeline = Vec::new();
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
-    for it in &items {
+    for it in items {
         head = chain::link(&head, &it.leaf);
         *fates.entry(it.fate.as_str()).or_default() += 1;
         let e = &it.event;
@@ -292,7 +467,7 @@ fn write_bundle(store: &Store, s: &Session, dir: &Path, patterns: &[Regex], cuts
         }
     }
 
-    let cast = render_cast(store, s, &items, cuts, patterns)?;
+    let cast = render_cast(store, s, items, cut_report, patterns)?;
     let files = [("events.jsonl", events), ("chain.jsonl", chain_lines), ("session.cast", cast)];
     let mut digests = serde_json::Map::new();
     for (name, body) in &files {
@@ -323,30 +498,46 @@ fn write_bundle(store: &Store, s: &Session, dir: &Path, patterns: &[Regex], cuts
     fs::write(dir.join("manifest.json"), &manifest_text).context("writing manifest.json")?;
     let data = json!({"manifest": manifest, "timeline": timeline, "cast": files[2].1});
     fs::write(dir.join("index.html"), dashboard(&data)).context("writing index.html")?;
-    Ok(format!(
-        "{} events ({} kept, {} redacted, {} cut), {} redaction matches, chain head {}",
-        items.len(),
-        fates.get("kept").copied().unwrap_or(0),
-        fates.get("redacted").copied().unwrap_or(0),
-        fates.get("cut").copied().unwrap_or(0),
-        matches,
-        &chain::hex(&head)[..16]
-    ))
+    Ok(json!({
+        "events": items.len(),
+        "fates": fates,
+        "matches": matches,
+        "chain_head": chain::hex(&head),
+    }))
 }
 
-fn render_cast(store: &Store, s: &Session, items: &[Item], cuts: &[CutRange], patterns: &[Regex]) -> Result<String> {
+fn summary_line(summary: &Value) -> String {
+    let f = &summary["fates"];
+    format!(
+        "{} events ({} kept, {} redacted, {} cut), {} redaction matches, chain head {}",
+        summary["events"],
+        f["kept"].as_u64().unwrap_or(0),
+        f["redacted"].as_u64().unwrap_or(0),
+        f["cut"].as_u64().unwrap_or(0),
+        summary["matches"],
+        &summary["chain_head"].as_str().unwrap_or("")[..16]
+    )
+}
+
+fn render_cast(store: &Store, s: &Session, items: &[Item], cuts: &[Value], patterns: &[Regex]) -> Result<String> {
     let mut header = cast_header(s, Cast::V3, initial_size(store, s)?, recorded_term(store, s)?);
     mask_value(&mut header, patterns);
     let mut out = format!("{header}\n");
     let mut writer = CastWriter::new(Cast::V3);
-    let mut pending_cuts: Vec<&CutRange> = cuts.iter().collect();
+    let mut pending_cuts: Vec<CutRange> = cuts
+        .iter()
+        .map(|c| CutRange {
+            from_ns: c["from_ms"].as_i64().unwrap_or(0) * 1_000_000,
+            to_ns: c["to_ms"].as_i64().unwrap_or(0) * 1_000_000,
+        })
+        .collect();
     pending_cuts.sort_by_key(|c| c.from_ns);
     let push = |out: &mut String, v: Value| {
         out.push_str(&cast_line(&v));
         out.push('\n');
     };
     for it in items.iter().filter(|it| it.fate != Fate::Cut) {
-        while let Some(c) = pending_cuts.first().filter(|c| c.from_ns <= it.event.mono_ns) {
+        while let Some(c) = pending_cuts.first().filter(|c| c.from_ns <= it.event.mono_ns).cloned() {
             let label = format!(
                 "cut {}-{}",
                 crate::fmt::offset_ms(c.from_ns / 1_000_000),
@@ -367,7 +558,10 @@ fn render_cast(store: &Store, s: &Session, items: &[Item], cuts: &[CutRange], pa
 
 fn dashboard(data: &Value) -> String {
     let json = data.to_string().replace('<', "\\u003c").replace('>', "\\u003e").replace('&', "\\u0026");
-    DASHBOARD.replacen(DATA_PLACEHOLDER, &json, 1)
+    DASHBOARD
+        .replacen("__AGENTRECORDER_PLAYER_CSS__", PLAYER_CSS, 1)
+        .replacen("__AGENTRECORDER_PLAYER_JS__", PLAYER_JS, 1)
+        .replacen(DATA_PLACEHOLDER, &json, 1)
 }
 
 pub fn anchor(layout: &Layout, args: AnchorArgs) -> Result<i32> {
@@ -431,11 +625,14 @@ fn read_json_lines(path: &Path) -> Result<Vec<(String, Value)>> {
 
 pub fn verify(args: VerifyArgs) -> Result<i32> {
     let dir = &args.dir;
-    let manifest: Value = serde_json::from_str(
-        &fs::read_to_string(dir.join("manifest.json"))
-            .with_context(|| format!("reading {}/manifest.json", dir.display()))?,
-    )
-    .context("manifest.json is not JSON")?;
+    let manifest_text = match fs::read_to_string(dir.join("manifest.json")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("{} is not an agentrecorder bundle: it has no manifest.json", dir.display())
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}/manifest.json", dir.display())),
+    };
+    let manifest: Value = serde_json::from_str(&manifest_text).context("manifest.json is not JSON")?;
     if manifest["format"] != BUNDLE_FORMAT {
         bail!("{} is not an agentrecorder bundle", dir.display());
     }
@@ -529,6 +726,25 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
         }
     }
 
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "bundle": dir,
+                "session": session_id,
+                "ok": failures.is_empty(),
+                "events": entries.len(),
+                "kept": kept,
+                "redacted": redacted,
+                "cut": cut,
+                "head": chain::hex(&head),
+                "anchored_through_seq": anchored,
+                "anchors_checked": args.anchors.is_some(),
+                "failures": failures,
+            }))?
+        );
+        return Ok(if failures.is_empty() { 0 } else { 1 });
+    }
     println!("bundle:   {}", dir.display());
     println!("session:  {session_id}");
     println!("events:   {} in chain ({kept} kept and hash-checked, {redacted} redacted, {cut} cut)", entries.len());
@@ -560,10 +776,11 @@ pub fn view(layout: &Layout, args: ViewArgs) -> Result<i32> {
         as_dir.join("index.html")
     } else {
         let store = open_store(layout)?;
-        let (s, _) = finished_session(layout, &store, &args.target)?;
+        let (s, _) = finished_session(layout, &store, &args.target, "the dashboard")?;
         let dir = layout.view_dir(&s.id);
         prepare_dir(&dir, true)?;
-        write_bundle(&store, &s, &dir, &[], &[])?;
+        let items = load(&store, &s.id)?;
+        write_bundle(&store, &s, &dir, &items, &[], &[], 0)?;
         dir.join("index.html")
     };
     if !index.is_file() {
@@ -606,8 +823,10 @@ mod tests {
             ev(2, kind::TERMINAL_NOTIFICATION, 3, None, json!({"source": "osc9", "text": "key sk-XY1"})),
             ev(3, kind::TERMINAL_OUTPUT, 4, Some(b"clean"), Value::Null),
         ];
-        let n = apply_redactions(&mut items, &[Regex::new("sk-[A-Z0-9]+").unwrap()]);
-        assert_eq!(n, 2);
+        let found = apply_redactions(&mut items, &[Regex::new("sk-[A-Z0-9]+").unwrap()]);
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].mono_ns, found[0].preview.as_str()), (1_000_000, "sk-A*** (7 bytes)"));
+        assert_eq!(found[1].kind, kind::TERMINAL_NOTIFICATION);
         assert_eq!(items[0].event.data.as_deref(), Some(&b"token=*****"[..]));
         assert_eq!(items[1].event.data.as_deref(), Some(&b"** done"[..]));
         assert_eq!(items[2].event.payload["text"], "key ******");
@@ -631,6 +850,36 @@ mod tests {
     }
 
     #[test]
+    fn built_in_secret_patterns_compile_and_match_their_shapes() {
+        let args = BundleArgs {
+            session: "last".into(),
+            out: None,
+            force: false,
+            redact: vec![],
+            redact_literal: vec!["a(b".into()],
+            redact_secrets: true,
+            cut: vec![],
+            dry_run: true,
+            json: false,
+        };
+        let ps = patterns(&args).unwrap();
+        assert_eq!(ps.len(), SECRET_PATTERNS.len() + 1);
+        assert!(ps[0].is_match(b"xa(bx") && !ps[0].is_match(b"ab"));
+        let samples: &[&[u8]] = &[
+            b"sk-ant-api03-abcdefghijklmnop",
+            b"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            b"AKIAABCDEFGHIJKLMNOP",
+            b"Bearer abcdefghijklmnopqrstuvwxyz",
+            b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnop",
+            b"-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----",
+        ];
+        for s in samples {
+            assert!(ps[1..].iter().any(|p| p.is_match(s)), "{}", String::from_utf8_lossy(s));
+        }
+        assert!(!ps[1..].iter().any(|p| p.is_match(b"cargo build --release")));
+    }
+
+    #[test]
     fn parses_cut_ranges() {
         assert_eq!(
             parse_cut("00:01:00-00:01:30").unwrap(),
@@ -645,5 +894,7 @@ mod tests {
         let html = dashboard(&json!({"cast": "</script><script>alert(1)</script>"}));
         assert!(!html.contains("</script><script>alert"));
         assert!(!html.contains(DATA_PLACEHOLDER));
+        assert!(!html.contains("__AGENTRECORDER_PLAYER") && !html.contains("cdn.jsdelivr.net"));
+        assert!(!PLAYER_JS.contains("</script") && !PLAYER_CSS.contains("</style"));
     }
 }

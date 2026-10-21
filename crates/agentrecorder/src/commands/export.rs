@@ -25,7 +25,7 @@ const CAST_KINDS: &[&str] = &[
 
 #[derive(clap::Args)]
 pub struct ExportArgs {
-    #[arg(help = "Session id or a unique prefix of it")]
+    #[arg(help = crate::SESSION_HELP)]
     pub session: String,
     #[arg(
         long,
@@ -84,7 +84,7 @@ pub fn recorded_term(store: &Store, s: &Session) -> Result<Option<String>> {
     Ok(term)
 }
 
-fn shell_join(argv: &[String]) -> String {
+pub fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|a| {
             if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c)) {

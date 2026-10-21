@@ -1,0 +1,69 @@
+name: Release binaries
+
+# Runs when release-please publishes a GitHub release. One job per target builds a
+# static (Linux, musl) or native (macOS) binary and attaches it to the release as a
+# tarball with a sibling .sha256 file; install.sh downloads these.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: none
+
+concurrency:
+  group: release-binaries-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup target add ${{ matrix.target }}
+      - name: Install the musl toolchain
+        if: contains(matrix.target, 'musl')
+        # musl-tools 1.2.4-2 on ubuntu-24.04 at the time of writing; the runner image is not digest-pinned
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Check that the tag matches the workspace version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          test "v${version}" = "${TAG}" || { echo "tag ${TAG} does not match Cargo.toml version ${version}"; exit 1; }
+      - run: cargo build --release --locked -p agentrecorder --target ${{ matrix.target }}
+      - name: Package
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="agentrecorder-${TAG}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/agentrecorder" LICENSE README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          "./${name}/agentrecorder" --version
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "${TAG}" dist/*.tar.gz dist/*.sha256 --clobber --repo "${GITHUB_REPOSITORY}"

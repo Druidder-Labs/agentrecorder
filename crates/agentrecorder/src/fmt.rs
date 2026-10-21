@@ -18,6 +18,37 @@ pub fn offset_ms(ms: i64) -> String {
     format!("{:02}:{:02}:{:02}.{t}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
+pub fn ago(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    if s < 60 {
+        format!("{s}s ago")
+    } else if s < 3600 {
+        format!("{}m ago", s / 60)
+    } else if s < 86_400 {
+        format!("{}h ago", s / 3600)
+    } else {
+        format!("{}d ago", s / 86_400)
+    }
+}
+
+pub fn abbreviate_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && path == h => "~".into(),
+        Ok(h) if !h.is_empty() && path.starts_with(&format!("{h}/")) => format!("~{}", &path[h.len()..]),
+        _ => path.into(),
+    }
+}
+
+pub fn truncate_back(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max { s.into() } else { format!("{}...", s.chars().take(max.saturating_sub(3)).collect::<String>()) }
+}
+
+pub fn truncate_front(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max { s.into() } else { format!("...{}", s.chars().skip(n + 3 - max).collect::<String>()) }
+}
+
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut v = n as f64;
@@ -58,6 +89,17 @@ pub fn parse_age(s: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relative_times_and_truncation() {
+        assert_eq!(super::ago(5_000), "5s ago");
+        assert_eq!(super::ago(90_000), "1m ago");
+        assert_eq!(super::ago(7_200_000), "2h ago");
+        assert_eq!(super::ago(200_000_000), "2d ago");
+        assert_eq!(super::truncate_back("abcdef", 5), "ab...");
+        assert_eq!(super::truncate_front("abcdef", 5), "...ef");
+        assert_eq!(super::truncate_back("abc", 5), "abc");
+    }
+
     use super::*;
 
     #[test]

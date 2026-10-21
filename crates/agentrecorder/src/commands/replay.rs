@@ -15,7 +15,7 @@ use crate::sanitize::Sanitizer;
 
 #[derive(clap::Args)]
 pub struct ReplayArgs {
-    #[arg(help = "Session id or a unique prefix of it")]
+    #[arg(help = crate::SESSION_HELP)]
     pub session: String,
     #[arg(long, default_value_t = 1.0, help = "Playback speed multiplier")]
     pub speed: f64,

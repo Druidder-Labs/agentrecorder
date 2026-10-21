@@ -23,6 +23,7 @@ agentrecorder-store.workspace = true
 agentrecorder-supervisor.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 nix.workspace = true
 regex.workspace = true
 serde.workspace = true

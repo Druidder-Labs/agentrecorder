@@ -10,7 +10,7 @@ use serde_json::json;
 use super::open_store;
 use crate::attach::{self, DetachKey};
 use crate::fmt;
-use crate::state::{self, State, duration_ms, open_and_resolve, program};
+use crate::state::{self, State, duration_ms, open_and_resolve};
 
 pub fn list(layout: &Layout, as_json: bool) -> Result<i32> {
     if !layout.db_path().exists() {
@@ -46,7 +46,11 @@ pub fn list(layout: &Layout, as_json: bool) -> Result<i32> {
         println!("no sessions");
         return Ok(0);
     }
-    println!("{:<8}  {:<14}  {:<11}  {:>11}  EXIT", "SESSION", "COMMAND", "STATUS", "DURATION");
+    let now = agentrecorder_store::now_unix_ns();
+    println!(
+        "{:<8}  {:<9}  {:<11}  {:>9}  {:<9}  {:<24}  COMMAND",
+        "SESSION", "STARTED", "STATUS", "DURATION", "EXIT", "DIRECTORY"
+    );
     for (st, s) in &rows {
         let exit = match (s.exit_code, s.exit_signal) {
             (Some(c), _) => c.to_string(),
@@ -54,9 +58,19 @@ pub fn list(layout: &Layout, as_json: bool) -> Result<i32> {
             _ => "-".to_string(),
         };
         let dur = duration_ms(s).map(fmt::duration_ms).unwrap_or_else(|| "-".into());
-        let mut prog = program(s);
-        prog.truncate(14);
-        println!("{:<8}  {:<14}  {:<11}  {:>11}  {}", s.id, prog, st, dur, exit);
+        let ago = fmt::ago((now - s.created_at_ns) / 1_000_000);
+        let dir = s.cwd.as_deref().map(fmt::abbreviate_home).unwrap_or_else(|| "-".into());
+        let cmd = crate::adapters::display_quoted(&s.command);
+        println!(
+            "{:<8}  {:<9}  {:<11}  {:>9}  {:<9}  {:<24}  {}",
+            s.id,
+            ago,
+            st,
+            dur,
+            exit,
+            fmt::truncate_front(&dir, 24),
+            fmt::truncate_back(&cmd, 60)
+        );
     }
     Ok(0)
 }

@@ -47,7 +47,7 @@ The layers map to the requested separation as follows.
 | Event collection | `crates/agentrecorder-supervisor/src/recorder.rs` |
 | Persistent event store | `crates/agentrecorder-store/src/lib.rs`, `events.rs` |
 | Inspection, recovery, replay | `crates/agentrecorder/src/commands/{inspect,recover,replay,export}.rs`, `procinfo.rs`, `render.rs`, `sanitize.rs`, `crates/agentrecorder-supervisor/src/screen.rs` |
-| Sharing | `crates/agentrecorder/src/commands/bundle.rs` (`bundle`, `anchor`, `verify`, `view`), `chain.rs` (hash chain), `dashboard.html` (template compiled into the binary) |
+| Sharing | `crates/agentrecorder/src/commands/bundle.rs` (`bundle`, `anchor`, `verify`, `view`), `chain.rs` (hash chain), `dashboard.html` (template compiled into the binary), `vendor/asciinema-player/` (player inlined into every dashboard) |
 
 There is no TUI in the MVP. `ratatui` was not added because no command needs a full-screen interface yet.
 

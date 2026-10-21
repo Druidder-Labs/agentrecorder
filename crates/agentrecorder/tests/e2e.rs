@@ -1492,3 +1492,120 @@ fn anchor_streams_heads_while_the_session_runs_and_ends_with_it() {
     assert_eq!(lines.last().unwrap()["seq"], last_seq);
     assert!(lines.windows(2).all(|w| w[0]["seq"].as_i64() < w[1]["seq"].as_i64()));
 }
+
+#[test]
+fn last_resolves_the_most_recent_session_and_no_args_prints_help() {
+    let env = Env::new();
+    let out = env.run(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("agentrecorder run -- claude"));
+    let out = env.run(&["inspect", "last"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("no sessions recorded yet"));
+    let first = env.start_detached(&["true"]);
+    env.wait_status(&first, "exited");
+    let second = env.start_detached(&["true"]);
+    env.wait_status(&second, "exited");
+    assert_eq!(env.inspect("last")["session"]["id"], second);
+    assert_eq!(env.inspect("latest")["session"]["id"], second);
+    env.ok(&["rm", "last"]);
+    assert_eq!(env.inspect("last")["session"]["id"], first);
+}
+
+#[test]
+fn sessions_table_shows_when_where_and_the_full_command() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "echo table test"]);
+    env.wait_status(&id, "exited");
+    let out = env.ok(&["sessions"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("SESSION   STARTED    STATUS        DURATION  EXIT       DIRECTORY"), "{}", lines[0]);
+    assert!(lines[0].ends_with("COMMAND"));
+    assert!(
+        lines[1].starts_with(&id) && lines[1].contains("s ago") && lines[1].ends_with("sh -c 'echo table test'"),
+        "{}",
+        lines[1]
+    );
+}
+
+#[test]
+fn run_anchor_writes_chain_heads_to_a_file() {
+    let env = Env::new();
+    let file = env.path().join("anchors.jsonl");
+    let out = env.ok(&["run", "-d", "--anchor", file.to_str().unwrap(), "--", "sh", "-c", "echo a; sleep 0.3; echo b"]);
+    let id = out.trim().to_string();
+    env.wait_status(&id, "exited");
+    wait_for("anchor file to be written", || std::fs::read_to_string(&file).is_ok_and(|s| s.contains("\"seq\"")));
+    std::thread::sleep(Duration::from_millis(300));
+    let text = std::fs::read_to_string(&file).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["session_id"], id);
+    let dir = env.path().join("b");
+    env.ok(&["bundle", &id, "-o", dir.to_str().unwrap()]);
+    let report = env.ok(&["verify", dir.to_str().unwrap(), "--anchors", file.to_str().unwrap(), "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["anchored_through_seq"], last["seq"]);
+}
+
+#[test]
+fn bundle_dry_run_presets_default_dir_and_warnings() {
+    let env = Env::new();
+    let id =
+        env.start_detached(&["sh", "-c", "echo token ghp_abcdefghijklmnopqrstuvwxyz0123456789; echo pass=hunter2"]);
+    env.wait_status(&id, "exited");
+    let out = env.ok(&[
+        "bundle",
+        &id,
+        "--dry-run",
+        "--redact-secrets",
+        "--redact-literal",
+        "hunter2",
+        "--cut",
+        "01:00-02:00",
+    ]);
+    assert!(out.contains("nothing written"), "{out}");
+    assert!(
+        out.contains("6 redaction matches")
+            && out.contains("ghp_************ (40 bytes)")
+            && out.contains("hunt*** (7 bytes)"),
+        "{out}"
+    );
+    assert!(out.contains("terminal.output ghp_"), "{out}");
+    assert!(out.contains("starts after the session ended"), "{out}");
+    assert!(!out.contains("hunter2") && !out.contains("ghp_abcdef"));
+    assert!(
+        std::fs::read_dir(env.path()).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("agentrecorder-"))
+    );
+
+    let out = env
+        .command(&["bundle", &id, "--redact-literal", "hunter2", "--json"])
+        .current_dir(env.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dir"], format!("agentrecorder-{id}"));
+    let dir = env.path().join(format!("agentrecorder-{id}"));
+    assert!(dir.join("index.html").is_file());
+    let html = std::fs::read_to_string(dir.join("index.html")).unwrap();
+    assert!(!html.contains("hunter2") && !html.contains("cdn.jsdelivr.net") && html.contains("AsciinemaPlayer"));
+
+    let out = env.run(&["bundle", &id, "-o", dir.to_str().unwrap()]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("--force"));
+    env.ok(&["bundle", &id, "-o", dir.to_str().unwrap(), "--force"]);
+    let out = env.run(&["verify", env.path().to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not an agentrecorder bundle"));
+}
+
+#[test]
+fn completions_are_generated_for_each_shell() {
+    let env = Env::new();
+    for shell in ["bash", "zsh", "fish"] {
+        let out = env.ok(&["completions", shell]);
+        assert!(out.contains("bundle") && out.contains("agentrecorder"), "{shell}");
+    }
+}

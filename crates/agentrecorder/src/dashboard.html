@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://cdn.jsdelivr.net; font-src data: https://cdn.jsdelivr.net; img-src data:; worker-src blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; font-src data:; img-src data:; worker-src blob:">
 <title>agentrecorder session</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.17.0/dist/bundle/asciinema-player.css" integrity="sha384-05cmIVRzN7mR7nmqajPpGPUPqJ5VyTAGHL1xJuiGWfhpWDp5hEfBk50kr21f3ILM" crossorigin="anonymous">
+<style>__AGENTRECORDER_PLAYER_CSS__</style>
 <style>
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5d6673; --line: #dde1e6;
@@ -99,7 +99,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--chip); paddi
   </div>
 </main>
 <script id="data" type="application/json">__AGENTRECORDER_DATA__</script>
-<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.17.0/dist/bundle/asciinema-player.min.js" integrity="sha384-s55nTYAdrPwGWmKKQ1lCnoB8H9LbqmsXsqqqPAHK2+T5h9IfI2dTXTDXJcZnySJD" crossorigin="anonymous"></script>
+<script>__AGENTRECORDER_PLAYER_JS__</script>
 <script>
 "use strict";
 const D = JSON.parse(document.getElementById("data").textContent);
@@ -194,7 +194,7 @@ const host = document.getElementById("player");
 if (window.AsciinemaPlayer) {
   player = AsciinemaPlayer.create({ data: D.cast }, host, { fit: "width", idleTimeLimit: 3, poster: `npt:${Math.max(0, (M.duration_ms || 0) / 1000)}` });
 } else {
-  host.append(el("div", { class: "notice" }, "The terminal player could not load (offline, or the CDN is blocked). The timeline and summary still work; ",
+  host.append(el("div", { class: "notice" }, "The terminal player did not start in this browser. The timeline and summary still work; ",
     el("code", {}, `agentrecorder replay ${S.id}`), " plays the recording on the machine that made it, and ", el("code", {}, "session.cast"), " plays in any asciinema player."));
 }
 
@@ -254,6 +254,7 @@ document.getElementById("session").append(kv([
 const agent = document.getElementById("agent");
 if (!hooks.length) {
   agent.append(el("div", {}, "No agent hook events. Claude Code reports them when started as ", el("code", {}, "agentrecorder run -- claude"), "."));
+  agent.append(el("div", { class: "caveat" }, "Tokens, cost and model latency are not collected: the agent hooks do not report them, and agentrecorder shows measured values only."));
 } else {
   const by = {};
   for (const h of hooks) { const k = h.payload.tool_name ? `tool: ${h.payload.tool_name}` : h.payload.hook_event_name; by[k] = (by[k] || 0) + 1; }
@@ -262,6 +263,7 @@ if (!hooks.length) {
   agent.append(el("div", { class: "bars" }, top.map(([k, n]) => el("div", { class: "bar" },
     el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(100 * n / max).toFixed(1)}%` }), el("div", { class: "name" }, k)),
     el("div", { class: "n" }, n)))));
+  agent.append(el("div", { class: "caveat" }, "Counts of hook events by type and tool. Tokens, cost and model latency are not collected: the hooks do not report them."));
 }
 
 const files = Object.entries(M.files).map(([name, f]) => [name, el("span", { class: "mono" }, `${f.sha256.slice(0, 16)}... ${f.bytes} B`)]);
@@ -269,13 +271,14 @@ document.getElementById("integrity").append(
   kv([
     ["Chain", el("span", { class: "mono" }, `${M.chain.algorithm}, ${M.chain.events} events`)],
     ["Head", el("span", { class: "mono" }, M.chain.head)],
-    ["Kept", M.fates.kept || 0],
-    ["Redacted", `${M.fates.redacted || 0} events, ${M.redaction.matches} matches`],
-    ["Cut", M.fates.cut || 0],
+    ["Kept", el("span", { title: "Unchanged events; verify rechecks each one against its recorded hash" }, M.fates.kept || 0)],
+    ["Redacted", el("span", { title: "Events where --redact replaced matches with '*'; present but not hash-checked" }, `${M.fates.redacted || 0} events, ${M.redaction.matches} matches`)],
+    ["Cut", el("span", { title: "Events removed by --cut; their hashes stay in the chain so the gap is visible" }, M.fates.cut || 0)],
     ...files,
   ]),
-  el("div", { class: "caveat" }, "Check with ", el("code", {}, "agentrecorder verify <dir> --anchors anchors.jsonl"),
-    ". Without anchors received while the session ran, the bundle is consistent with itself but is self-reported: it shows how the session went, not that nothing happened outside the terminal. Redacted events are not hash-checked."),
+  el("div", { class: "caveat" }, "Kept: unchanged and hash-checked. Redacted: matches replaced with '*', present but not hash-checked. Cut: removed; the hash stays in the chain so the gap is visible. Check with ",
+    el("code", {}, "agentrecorder verify <dir> --anchors anchors.jsonl"),
+    ". Without anchors received while the session ran, the bundle is consistent with itself but is self-reported: it shows how the session went, not that nothing happened outside the terminal."),
 );
 </script>
 </body>

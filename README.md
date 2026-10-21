@@ -21,13 +21,14 @@ If an agent only has to survive a closed tab, tmux, Zellij or the agent's own ba
 
 ## Install
 
-Linux or macOS, Rust 1.95 or newer.
+Linux (x86_64, aarch64) or macOS (Apple silicon, Intel). Prebuilt binaries are attached to each GitHub release; `install.sh` picks the one for this machine, checks its sha256 and copies it to `~/.local/bin`:
 
 ```
-cargo install agentrecorder --locked
+curl -fsSLO https://raw.githubusercontent.com/Druidder-Labs/agentrecorder/main/install.sh
+sh install.sh                      # AGENTRECORDER_VERSION=vX.Y.Z and AGENTRECORDER_INSTALL_DIR=... override the defaults
 ```
 
-To build from a checkout instead: `cargo install --path crates/agentrecorder --locked`.
+With Rust 1.95 or newer, `cargo install agentrecorder --locked` builds from crates.io instead, and `cargo install --path crates/agentrecorder --locked` builds from a checkout. Shell completions: `agentrecorder completions zsh` (also `bash`, `fish`, `elvish`).
 
 ## Try it
 
@@ -36,12 +37,13 @@ $ agentrecorder run -- claude            # work as usual; Ctrl-\ detaches, the a
 [agentrecorder] detached from session 3f9a1c; reattach with: agentrecorder attach 3f9a1c
 
 $ agentrecorder sessions
-SESSION   COMMAND         STATUS          DURATION  EXIT
-3f9a1c    claude          detached         12m 04s  -
+SESSION   STARTED    STATUS        DURATION  EXIT       DIRECTORY                 COMMAND
+3f9a1c    12m ago    detached       12m 04s  -          ~/src/app                 claude
 
-$ agentrecorder attach 3f9a1c            # screen and scrollback are redrawn
-$ agentrecorder inspect 3f9a1c           # process tree, CPU, memory, idle time, git state
-$ agentrecorder replay 3f9a1c --speed 2  # watch what happened
+$ agentrecorder attach last              # screen and scrollback are redrawn; `last` is the newest session
+$ agentrecorder inspect last             # process tree, CPU, memory, idle time, git state
+$ agentrecorder replay last --speed 2    # watch what happened
+$ agentrecorder bundle last --redact-secrets && agentrecorder view last   # share it
 ```
 
 The same sequence, with `bash` in place of `claude`, runs as an automated test against real PTYs on every commit.
@@ -59,9 +61,9 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |
 | `export ID` | JSON Lines, asciicast v2 or asciicast v3; `--follow` streams a running session |
-| `bundle ID -o DIR` | Write a shareable directory: dashboard, asciicast, events, hash chain; `--redact` and `--cut` edit it first |
+| `bundle ID` | Write a shareable directory: dashboard, asciicast, events, hash chain; `--redact-secrets`, `--redact`, `--cut` and `--dry-run` edit and preview it first |
 | `view DIR\|ID` | Open the dashboard of a bundle or a finished session in the browser |
-| `anchor ID`, `verify DIR` | Stream hash-chain anchors to a third party while a session runs; check a bundle against them |
+| `anchor ID`, `verify DIR` | Stream hash-chain anchors to a third party while a session runs (`run --anchor FILE` does it for you); check a bundle against them |
 | `rm ID`, `prune` | Delete finished sessions and their recordings |
 | `hook` | Record an agent hook event; `run` wires it into Claude Code for you |
 
@@ -69,7 +71,7 @@ Every command has `--help`. The full reference, including scripting behavior and
 
 ## Sharing a session
 
-`agentrecorder bundle ID -o DIR` writes a directory that opens in any browser: summary, terminal player, a clickable timeline of markers, agent hook events, commands and git state, and the integrity data. Redact patterns or cut a time range before sharing. For a reviewer, such as a technical interview or a pull request, `anchor` streams hash-chain anchors while the session runs and `verify` checks the bundle against them later. A bundle shows how a session went in the recorded terminal; it does not show what happened outside it. Details: `docs/cli.md`, Sharing a session.
+`agentrecorder bundle last` writes a directory that opens in any browser, offline: summary, terminal player, a clickable timeline of markers, agent hook events, commands and git state, and the integrity data. `--redact-secrets` masks common key and token shapes, `--redact-literal` masks exact text, `--cut` removes a time range, and `--dry-run` shows what would change before anything is written. For a reviewer, such as a technical interview or a pull request, `anchor` streams hash-chain anchors while the session runs and `verify` checks the bundle against them later. A bundle shows how a session went in the recorded terminal; it does not show what happened outside it. Details: `docs/cli.md`, Sharing a session.
 
 ## Recording and privacy
 
@@ -93,7 +95,8 @@ Threat model and controls: `docs/security.md`.
 
 ```
 just check        # fmt-check, clippy -D warnings, all tests
-just check-ci     # check plus cargo deny and a quick benchmark run
+just check-ci     # check plus cargo deny, cargo package and a quick benchmark run
+just clean-package  # when `just package` fails locally on a type that was just added to a workspace crate
 ```
 
 ## License
