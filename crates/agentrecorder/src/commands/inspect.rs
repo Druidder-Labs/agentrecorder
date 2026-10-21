@@ -76,6 +76,9 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     if let Some(r) = &s.restarted_from {
         println!("Restarted from:  {r}");
     }
+    if let Some(a) = &s.agent_session_id {
+        println!("Agent session:   {a}");
+    }
     println!();
     println!("PROCESS");
     println!("Supervisor PID:  {}", s.supervisor_pid.map_or(na.into(), |p| p.to_string()));

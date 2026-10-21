@@ -35,7 +35,7 @@ Schema version: 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib
 
 | Type | Payload | Notes |
 | --- | --- | --- |
-| `session.created` | `command`, `cwd`, `rows`, `cols`, `record_output`, `record_input`, `supervisor_pid`, `restarted_from`, `max_record_bytes`, `term` | First event of every session. `max_record_bytes` and `term` are absent in recordings made before they were added; `recover --restart` reuses the cap and asciicast export uses `term`. |
+| `session.created` | `command`, `cwd`, `rows`, `cols`, `record_output`, `record_input`, `supervisor_pid`, `restarted_from`, `max_record_bytes`, `term`, `agent_session_id` | First event of every session. `max_record_bytes` and `term` are absent in recordings made before they were added; `agent_session_id` is present only when the agent's own session id is known (see `cli.md`, Agent session ids); `recover --restart` reuses the cap and asciicast export uses `term`. |
 | `process.started` | `pid`, `command` | |
 | `session.attached` | `client`, `client_pid`, `rows`, `cols` | `client_pid` is reported by the client and not verified. |
 | `session.detached` | `client`, `reason` | Reasons: `client_request`, `client_disconnected`, `detach_requested`, `attached_elsewhere`, `client_too_slow`, `process_exited`, `pty_write_failed`, `protocol_error`. |
@@ -55,7 +55,7 @@ A session that ends without `session.terminated` was lost: the supervisor was ki
 
 ## Storage
 
-Events live in the `events` table of `state.db` (`crates/agentrecorder-store/src/lib.rs`), keyed by `(session_id, seq)`. `payload` is stored as JSON text, `data` as a BLOB and `data_len` as its length, so counting bytes does not read the blobs. Session metadata (status, pids, exit data, boot time) lives in the `sessions` table; the supervisor updates it, and CLI commands may only mark a session `lost` or delete it. `PRAGMA user_version` holds the database schema version (3); older stores are migrated in place the first time a newer binary opens it (version 2 added `data_len`, version 3 the `events_by_kind` index).
+Events live in the `events` table of `state.db` (`crates/agentrecorder-store/src/lib.rs`), keyed by `(session_id, seq)`. `payload` is stored as JSON text, `data` as a BLOB and `data_len` as its length, so counting bytes does not read the blobs. Session metadata (status, pids, exit data, boot time) lives in the `sessions` table; the supervisor updates it, and CLI commands may only mark a session `lost` or delete it. `PRAGMA user_version` holds the database schema version (4); older stores are migrated in place the first time a newer binary opens it (version 2 added `data_len`, version 3 the `events_by_kind` index, version 4 the `sessions.agent_session_id` column).
 
 The payload shapes in the table above are defined once, as the `Body` enum in `crates/agentrecorder-store/src/events.rs`; a unit test round-trips every variant through its stored form.
 

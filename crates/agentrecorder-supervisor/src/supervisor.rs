@@ -57,6 +57,7 @@ pub struct Config {
     pub record_input: bool,
     pub max_record_bytes: u64,
     pub restarted_from: Option<String>,
+    pub agent_session_id: Option<String>,
     pub umask: Option<u32>,
 }
 
@@ -347,6 +348,7 @@ pub fn run(cfg: Config) -> Result<i32> {
         record_input: cfg.record_input,
         boot_time,
         restarted_from: cfg.restarted_from.as_deref(),
+        agent_session_id: cfg.agent_session_id.as_deref(),
     })?;
 
     let (recorder, recorder_thread) = Recorder::spawn(
@@ -370,6 +372,7 @@ pub fn run(cfg: Config) -> Result<i32> {
         restarted_from: cfg.restarted_from.clone(),
         max_record_bytes: Some(cfg.max_record_bytes),
         term: Some(term_name.clone()),
+        agent_session_id: cfg.agent_session_id.clone(),
     });
 
     let mut child_env = vec![("AGENTRECORDER_SESSION", cfg.id.as_str())];

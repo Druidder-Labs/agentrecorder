@@ -12,11 +12,11 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 
 | Command | Purpose |
 | --- | --- |
-| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--detach-key K] [--cwd DIR] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d` |
+| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-session-id] [--detach-key K] [--cwd DIR] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d` |
 | `sessions [--json]` (alias `ls`) | List sessions and their status (see below) |
 | `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
 | `detach ID` | Detach whichever client is attached |
-| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings |
+| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded |
 | `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise explain what was lost and offer an explicit restart (same command, working directory and recording cap) or the agent's resume command |
 | `replay ID [--speed N] [--from HH:MM:SS] [--max-idle S] [--instant] [--raw]` | Play back recorded output; never re-executes commands |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
@@ -40,13 +40,21 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | Situation | What `agentrecorder recover` does |
 | --- | --- |
 | The client disconnected (terminal closed, SSH dropped, client killed) | The process is still running; it reattaches and redraws the screen. |
-| The process exited or crashed | Shows exit code or signal and the last recorded screen. `--restart` starts a new session with the same command after confirmation; for Claude Code, Codex, Gemini CLI and OpenCode, `--resume` runs the agent's own resume command instead. Process memory is gone. |
+| The process exited or crashed | Shows exit code or signal and the last recorded screen. `--restart` starts a new session with the same command after confirmation, minus a recorded `--session-id`, so Claude Code gets a new one; for Claude Code, Codex, Gemini CLI and OpenCode, `--resume` runs the agent's own resume command instead (see Agent session ids). Process memory is gone. |
 | The supervisor was killed or the host rebooted | Shows persisted metadata and history and offers the same `--restart` and `--resume` options. Arbitrary processes are not restored. |
 | The socket file was deleted but the supervisor still runs | The CLI asks the supervisor to recreate it (SIGUSR1) and the session works again. If the supervisor cannot answer (for example it is stopped), the session is `unreachable`, not `lost`: `rm` refuses to delete it, and `stop` sends SIGTERM to the supervisor. |
 
 ## Scripting
 
 `agentrecorder run -- CMD` behaves like a pipe when it is not on a terminal. When stdin is not a terminal and reaches end of file, the client sends Ctrl-D to the session, so a shell fed from a file ends on its own. When stdout is not a terminal, output waits for the reader instead of being dropped. The client exits with CMD's exit code, and the recording is complete before it exits, so `export` can follow `run` directly. Use `run -d` to start a session and return immediately with its id.
+
+## Agent session ids
+
+When the command is `claude` (directly or behind `env`), `run` generates a UUID v4 and inserts `--session-id <uuid>` right after the program name, so `recover --resume` runs `claude --resume <uuid>` and reopens that exact conversation. The id is stored on the session and shown by `inspect` as `Agent session`; the recorded command line includes the inserted flag.
+
+Nothing is inserted when the arguments already pick or skip a session (`--session-id`, `--resume`, `-r`, `--continue`, `-c`, `--fork-session`, `--from-pr`, `--teleport`, `--no-session-persistence`), start elsewhere (`--bg`, `--cloud`, `--desktop`, `--tmux`), ask for `--help` or `--version`, or name a subcommand such as `mcp`. A UUID the user passed with `--session-id`, `--resume` or `-r` is recorded as is. `--no-agent-session-id` turns insertion off. Without a recorded id, `--resume` falls back to `claude --continue`, the most recent conversation in the working directory.
+
+Claude Code rejects a `--session-id` that was already used (`Session ID ... is already in use`), so `recover --restart` removes the recorded id and `run` inserts a new one. Codex CLI, Gemini CLI and OpenCode keep their "most recent session" resume commands; their session flags are not inserted.
 
 ## Recording and retention
 

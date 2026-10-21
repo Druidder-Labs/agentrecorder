@@ -32,6 +32,11 @@ pub struct RunArgs {
         help = "Key that detaches: ctrl-<key> or none"
     )]
     pub detach_key: String,
+    #[arg(
+        long,
+        help = "Do not add --session-id to a Claude Code command; recover --resume then continues the most recent conversation"
+    )]
+    pub no_agent_session_id: bool,
     #[arg(long, help = "Working directory for the command (default: current directory)")]
     pub cwd: Option<PathBuf>,
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND", help = "Command and arguments, after --")]
@@ -49,6 +54,7 @@ pub fn start(layout: &Layout, args: &RunArgs, restarted_from: Option<&str>) -> R
     apply_retention(layout, &mut store);
     let id = new_id(&store)?;
     layout.socket_path(&id)?;
+    let launch = crate::adapters::prepare(&args.command, !args.no_agent_session_id)?;
     drop(store);
     let (rows, cols) = attach::terminal_size().unwrap_or((24, 80));
     let exe = std::env::current_exe().context("locating the agentrecorder binary")?;
@@ -73,7 +79,10 @@ pub fn start(layout: &Layout, args: &RunArgs, restarted_from: Option<&str>) -> R
     if let Some(from) = restarted_from {
         cmd.args(["--restarted-from", from]);
     }
-    cmd.arg("--").args(&args.command);
+    if let Some(agent) = &launch.agent_session_id {
+        cmd.args(["--agent-session-id", agent]);
+    }
+    cmd.arg("--").args(&launch.argv);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));
     agentrecorder_supervisor::new_session_on_spawn(&mut cmd);
     let mut child = cmd.spawn().context("starting the session supervisor")?;

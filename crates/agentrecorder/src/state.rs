@@ -140,6 +140,10 @@ pub fn duration_ms(s: &Session) -> Option<i64> {
 }
 
 pub fn program(s: &Session) -> String {
-    let p = s.command.first().map(String::as_str).unwrap_or("?");
+    let p = crate::adapters::agent_index(&s.command)
+        .and_then(|i| s.command.get(i))
+        .or(s.command.first())
+        .map(String::as_str)
+        .unwrap_or("?");
     std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string())
 }

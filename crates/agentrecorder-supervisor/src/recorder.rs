@@ -377,6 +377,7 @@ mod tests {
                 record_input: false,
                 boot_time: None,
                 restarted_from: None,
+                agent_session_id: None,
             })
             .unwrap();
         store

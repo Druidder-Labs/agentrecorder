@@ -122,11 +122,15 @@ fn describe(store: &Store, s: &Session) -> Result<()> {
 }
 
 fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &DetachKey) -> Result<i32> {
-    let resume = adapters::resume_for(&s.command);
+    let resume = adapters::resume_for(&s.command, s.agent_session_id.as_deref());
+    let restart_argv = match &s.agent_session_id {
+        Some(id) => adapters::without_session_id(&s.command, id),
+        None => s.command.clone(),
+    };
     if !args.restart && !args.resume {
         println!("Options:");
         println!("  agentrecorder replay {}            view the recorded output", s.id);
-        println!("  agentrecorder recover {} --restart re-run `{}` in a new session", s.id, s.command.join(" "));
+        println!("  agentrecorder recover {} --restart re-run `{}` in a new session", s.id, restart_argv.join(" "));
         if let Some(r) = &resume {
             println!("  agentrecorder recover {} --resume  run `{}` ({}: {})", s.id, r.argv.join(" "), r.agent, r.note);
         }
@@ -138,7 +142,7 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
             None => bail!("no resume adapter is known for `{}`; use --restart", s.command[0]),
         }
     } else {
-        s.command.clone()
+        restart_argv
     };
     let cwd = s.cwd.as_ref().map(PathBuf::from).filter(|p| p.is_dir());
     if !args.yes {
@@ -164,6 +168,7 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
         record_input: s.record_input,
         max_record_mb: original_record_cap_mb(store, s)?,
         detach_key: args.detach_key.clone(),
+        no_agent_session_id: false,
         cwd,
         command: argv,
     };

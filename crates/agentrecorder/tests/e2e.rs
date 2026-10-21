@@ -893,3 +893,90 @@ fn asciicast_export_is_valid_v2() {
         .collect();
     assert!(text.contains("caf\u{e9}"));
 }
+
+fn fake_claude(env: &Env) -> String {
+    let dir = env.path().join("bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let used = env.path().join("used-ids");
+    std::fs::create_dir_all(&used).unwrap();
+    let path = dir.join("claude");
+    let script = format!(
+        r#"#!/bin/sh
+echo "ARGS: $*"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id)
+      if [ -e "{used}/$2" ]; then echo "Error: Session ID $2 is already in use."; exit 1; fi
+      touch "{used}/$2"; shift ;;
+    --resume) echo "RESUMED $2"; shift ;;
+  esac
+  shift
+done
+"#,
+        used = used.display()
+    );
+    std::fs::write(&path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn is_uuid_v4(s: &str) -> bool {
+    s.len() == 36 && s.as_bytes()[14] == b'4' && s.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+}
+
+#[test]
+fn claude_sessions_get_a_pre_assigned_id_used_for_exact_resume_and_fresh_on_restart() {
+    let env = Env::new();
+    let claude = fake_claude(&env);
+    let id = env.start_detached(&["env", "A=1", &claude, "--model", "haiku"]);
+    env.wait_status(&id, "exited");
+    let info = env.inspect(&id);
+    let agent = info["session"]["agent_session_id"].as_str().expect("agent session id").to_string();
+    assert!(is_uuid_v4(&agent), "{agent}");
+    let argv: Vec<&str> = info["session"]["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(argv, ["env", "A=1", claude.as_str(), "--session-id", agent.as_str(), "--model", "haiku"]);
+    let created = env.events(&id).into_iter().find(|e| e["event_type"] == "session.created").unwrap();
+    assert_eq!(created["payload"]["agent_session_id"], agent.as_str());
+    assert!(env.ok(&["replay", &id, "--instant"]).contains(&format!("--session-id {agent} --model haiku")));
+    assert!(env.ok(&["inspect", &id]).contains(&format!("Agent session:   {agent}")));
+
+    let offer = env.ok(&["recover", &id]);
+    assert!(offer.contains(&format!("run `env A=1 {claude} --resume {agent}`")), "{offer}");
+    assert!(offer.contains(&format!("re-run `env A=1 {claude} --model haiku`")), "{offer}");
+
+    let resumed =
+        env.ok(&["recover", &id, "--resume", "--yes", "--detached"]).trim().lines().last().unwrap().to_string();
+    env.wait_status(&resumed, "exited");
+    assert_eq!(env.inspect(&resumed)["session"]["agent_session_id"], agent.as_str());
+    assert!(env.ok(&["replay", &resumed, "--instant"]).contains(&format!("RESUMED {agent}")));
+
+    let restarted =
+        env.ok(&["recover", &id, "--restart", "--yes", "--detached"]).trim().lines().last().unwrap().to_string();
+    env.wait_status(&restarted, "exited");
+    let again = env.inspect(&restarted);
+    assert_eq!(again["session"]["exit_code"], 0, "{}", env.ok(&["replay", &restarted, "--instant"]));
+    let fresh = again["session"]["agent_session_id"].as_str().unwrap();
+    assert!(is_uuid_v4(fresh) && fresh != agent, "{fresh}");
+}
+
+#[test]
+fn session_ids_are_not_injected_when_disabled_or_already_chosen() {
+    let env = Env::new();
+    let claude = fake_claude(&env);
+    let off = env.ok(&["run", "-d", "--no-agent-session-id", "--", &claude, "-p", "hi"]).trim().to_string();
+    let continued = env.start_detached(&[&claude, "--continue"]);
+    let given = "4b41da33-24de-41bb-92ef-77589bb77d13";
+    let chosen = env.start_detached(&[&claude, "--session-id", given]);
+    let shell = env.start_detached(&["sh", "-c", "echo plain"]);
+    for id in [&off, &continued, &chosen, &shell] {
+        env.wait_status(id, "exited");
+    }
+    for (id, want) in [(&off, None), (&continued, None), (&chosen, Some(given)), (&shell, None)] {
+        let s = &env.inspect(id)["session"];
+        assert_eq!(s["agent_session_id"].as_str(), want, "{s}");
+        assert!(!env.ok(&["replay", id, "--instant"]).contains("--session-id ") || want == Some(given));
+    }
+    let resume = env.ok(&["recover", &continued]);
+    assert!(resume.contains(&format!("run `{claude} --continue`")), "{resume}");
+}

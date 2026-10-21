@@ -14,7 +14,7 @@ pub use time::{format_rfc3339, now_unix_ns};
 
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
-const DB_USER_VERSION: i64 = 3;
+const DB_USER_VERSION: i64 = 4;
 const PAGE_ROWS: i64 = 256;
 const WAL_SIZE_LIMIT: i64 = 4 << 20;
 const INIT_RETRY_FOR: Duration = Duration::from_secs(10);
@@ -122,6 +122,7 @@ pub struct Session {
     pub boot_time: Option<i64>,
     pub lost_reason: Option<LostReason>,
     pub restarted_from: Option<String>,
+    pub agent_session_id: Option<String>,
 }
 
 pub struct NewSession<'a> {
@@ -136,6 +137,7 @@ pub struct NewSession<'a> {
     pub record_input: bool,
     pub boot_time: Option<i64>,
     pub restarted_from: Option<&'a str>,
+    pub agent_session_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -236,12 +238,18 @@ impl Store {
             0 => {
                 tx.execute_batch(SCHEMA)?;
                 tx.execute_batch(MIGRATE_2_TO_3)?;
+                tx.execute_batch(MIGRATE_3_TO_4)?;
             }
             1 => {
                 tx.execute_batch(MIGRATE_1_TO_2)?;
                 tx.execute_batch(MIGRATE_2_TO_3)?;
+                tx.execute_batch(MIGRATE_3_TO_4)?;
             }
-            2 => tx.execute_batch(MIGRATE_2_TO_3)?,
+            2 => {
+                tx.execute_batch(MIGRATE_2_TO_3)?;
+                tx.execute_batch(MIGRATE_3_TO_4)?;
+            }
+            3 => tx.execute_batch(MIGRATE_3_TO_4)?,
             DB_USER_VERSION => {}
             v => bail!("event store schema version {v} is newer than this binary supports"),
         }
@@ -253,8 +261,8 @@ impl Store {
     pub fn create_session(&self, s: &NewSession<'_>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO sessions (id, command, cwd, status, created_at_ns, supervisor_pid, rows, cols,
-                record_output, record_input, boot_time, restarted_from)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                record_output, record_input, boot_time, restarted_from, agent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 s.id,
                 serde_json::to_string(s.command)?,
@@ -268,6 +276,7 @@ impl Store {
                 s.record_input,
                 s.boot_time,
                 s.restarted_from,
+                s.agent_session_id,
             ],
         )?;
         Ok(())
@@ -524,9 +533,13 @@ const MIGRATE_2_TO_3: &str = "
 CREATE INDEX IF NOT EXISTS events_by_kind ON events (session_id, kind, seq, data_len);
 ";
 
+const MIGRATE_3_TO_4: &str = "
+ALTER TABLE sessions ADD COLUMN agent_session_id TEXT;
+";
+
 const SESSION_COLS: &str = "id, command, cwd, status, created_at_ns, started_at_ns, ended_at_ns,
     supervisor_pid, child_pid, exit_code, exit_signal, rows, cols, attached, record_output,
-    record_input, boot_time, lost_reason, restarted_from";
+    record_input, boot_time, lost_reason, restarted_from, agent_session_id";
 
 fn row_to_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let command: String = r.get(1)?;
@@ -550,6 +563,7 @@ fn row_to_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         boot_time: r.get(16)?,
         lost_reason: r.get::<_, Option<String>>(17)?.as_deref().and_then(LostReason::parse),
         restarted_from: r.get(18)?,
+        agent_session_id: r.get(19)?,
     })
 }
 
@@ -572,6 +586,7 @@ mod tests {
                 record_input: false,
                 boot_time: None,
                 restarted_from: None,
+                agent_session_id: None,
             })
             .unwrap();
     }
@@ -676,6 +691,7 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.event_counts("abc123").unwrap()[0].bytes, 4);
+        assert_eq!(store.session("abc123").unwrap().unwrap().agent_session_id, None);
         drop(store);
         let conn = Connection::open(&path).unwrap();
         let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();

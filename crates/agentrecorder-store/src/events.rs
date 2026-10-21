@@ -36,6 +36,8 @@ pub enum Body {
         max_record_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         term: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_session_id: Option<String>,
     },
     #[serde(rename = "process.started")]
     ProcessStarted { pid: i32, command: Vec<String> },
@@ -204,6 +206,7 @@ mod tests {
                 restarted_from: None,
                 max_record_bytes: Some(10),
                 term: Some("xterm-256color".into()),
+                agent_session_id: Some("4b41da33-24de-41bb-92ef-77589bb77d13".into()),
             },
             Body::ProcessStarted { pid: 2, command: vec!["bash".into()] },
             Body::SessionAttached { client: 1, client_pid: 3, rows: 24, cols: 80 },

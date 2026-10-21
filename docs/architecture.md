@@ -52,7 +52,7 @@ There is no TUI in the MVP. `ratatui` was not added because no command needs a f
 
 `agentrecorder run -- CMD` does the following:
 
-1. Opens the store, applies retention, allocates a 6-hex-digit session id from `/dev/urandom`, and checks that the socket path fits the platform limit before anything is created.
+1. Opens the store, applies retention, allocates a 6-hex-digit session id from `/dev/urandom`, and checks that the socket path fits the platform limit before anything is created. For a Claude Code command it inserts `--session-id <uuid>` (`adapters::prepare`, rules in `cli.md`, Agent session ids) and passes the uuid to the supervisor, which stores it as `agent_session_id`.
 2. Re-executes its own binary as `agentrecorder __supervise --id ID ...` with `setsid()`, stdin and stdout on `/dev/null`, stderr appended to `logs/ID.log`. The supervisor has no controlling terminal, so closing the client's terminal does not send it SIGHUP.
 3. The supervisor inserts the session row, opens a PTY with `IUTF8` set, spawns CMD as a session leader with the PTY slave as its controlling terminal, binds `run/ID.sock`, and only then moves the row to `running`. Between fork and exec the child gets default signal dispositions and an empty signal mask, every inherited descriptor above 2 is marked close-on-exec, and the umask of the shell that ran `agentrecorder` is restored (agentrecorder itself runs with umask 077). `TERM` is inherited; when it is empty, `xterm-256color` is set. The same reset is applied when the supervisor itself is started.
 4. The client polls every 5 ms until the supervisor answers a status request (10 s timeout), then attaches. With `-d` it prints the id and exits. If CMD already finished, the client prints its recorded output and exits with its code.
@@ -103,7 +103,7 @@ A later `stop` while one is pending sends its signal immediately, so `stop --sig
 | C: supervisor lost | Socket missing or refusing connections while the row says `running`, and no live `agentrecorder __supervise --id ID` process | Row becomes `lost` with `lost_reason` `host_restarted` (boot time differs by more than 5 s) or `supervisor_terminated`; show metadata and history, and offer `--restart` and `--resume` |
 | Unreachable | Socket missing or not answering, but the supervisor process for this id exists | Reported as `unreachable`; `rm` refuses it; `stop` sends SIGTERM to the supervisor |
 
-The environment is not stored, so `--restart` and `--resume` use the environment of the shell that runs `recover`. Resume adapters (`crates/agentrecorder/src/adapters.rs`) map `claude`, `codex`, `gemini` and `opencode` to their documented "continue the most recent session" command. Recency-based resume can pick a different conversation if the agent ran again in the same directory; pre-assigned session ids are not implemented.
+The environment is not stored, so `--restart` and `--resume` use the environment of the shell that runs `recover`. Resume adapters (`crates/agentrecorder/src/adapters.rs`) find the program behind a leading `env` and keep that prefix. A Claude Code session with a recorded `agent_session_id` resumes with `claude --resume <id>`, which is exact. Otherwise `claude`, `codex`, `gemini` and `opencode` map to their documented "continue the most recent session" command, which can pick a different conversation if the agent ran again in the same directory. `--restart` removes the recorded `--session-id` pair before re-running the argv.
 
 ## Replay model
 

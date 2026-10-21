@@ -21,6 +21,7 @@ fn main() -> anyhow::Result<()> {
         record_input: false,
         boot_time: None,
         restarted_from: None,
+        agent_session_id: None,
     })?;
     let payload = vec![b'x'; size];
     let events: Vec<NewEvent> = (0..batch)
