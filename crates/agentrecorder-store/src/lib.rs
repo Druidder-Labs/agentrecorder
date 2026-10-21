@@ -263,7 +263,12 @@ impl Store {
             }
             4 => tx.execute_batch(MIGRATE_4_TO_5)?,
             DB_USER_VERSION => {}
-            v => bail!("event store schema version {v} is newer than this binary supports"),
+            v => bail!(
+                "written by a newer agentrecorder (store schema {v}; this binary is {} and reads up to schema {DB_USER_VERSION}); \
+                 update this binary with install.sh or `cargo install agentrecorder --locked`, then run the command again; \
+                 the store was not changed",
+                env!("CARGO_PKG_VERSION")
+            ),
         }
         tx.pragma_update(None, "user_version", DB_USER_VERSION)?;
         tx.commit()?;
@@ -729,6 +734,24 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(v, DB_USER_VERSION);
+    }
+
+    #[test]
+    fn a_store_from_a_newer_binary_names_the_versions_and_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        drop(Store::open(&path).unwrap());
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", DB_USER_VERSION + 1).unwrap();
+        let err = match Store::open(&path) {
+            Ok(_) => panic!("a newer store opened"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(&format!("opening event store {}", path.display())), "{err}");
+        assert!(err.contains(&format!("store schema {}", DB_USER_VERSION + 1)), "{err}");
+        assert!(err.contains(&format!("this binary is {}", env!("CARGO_PKG_VERSION"))), "{err}");
+        assert!(err.contains("cargo install agentrecorder --locked"), "{err}");
+        let v: i64 = Connection::open(&path).unwrap().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, DB_USER_VERSION + 1);
     }
 
     #[test]

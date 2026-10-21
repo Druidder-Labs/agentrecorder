@@ -4,7 +4,7 @@ Every command prints its flags with `--help`. Session ids accept unique prefixes
 
 ## State directory
 
-State lives in `$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`. It holds `state.db` (SQLite, compiled in), `run/` (one Unix socket per live session) and `logs/` (supervisor stderr per session) and `views/` (dashboards written by `view ID`; `rm` deletes a session's copy). Directories are created 0700 and files 0600.
+State lives in `$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`. It holds `state.db` (SQLite, compiled in), `run/` (one Unix socket per live session) and `logs/` (supervisor stderr per session) and `views/` (dashboards written by `view ID`; `rm` deletes a session's copy). Directories are created 0700 and files 0600. A newer binary migrates `state.db` in place on first open and an older binary refuses it, naming both versions and the fix (update the binary; the store is not changed), so one machine should run one version, for example `~/.local/bin` from `install.sh` or `~/.cargo/bin` from `cargo install`, not both.
 
 Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from crates.io and needs Rust 1.95 or newer, because of `sysinfo` 0.39. No Docker, database server, account or API key.
 
