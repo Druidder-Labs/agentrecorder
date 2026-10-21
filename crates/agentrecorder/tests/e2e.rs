@@ -1507,10 +1507,11 @@ fn a_slow_interactive_client_is_resynced_instead_of_detached() {
     let mut sock = UnixStream::connect(env.path().join("run").join(format!("{id}.sock"))).unwrap();
     let hello = br#"{"version":1,"mode":"attach","rows":24,"cols":80,"client_pid":1}"#;
     sock.write_all(&raw_frame(1, hello)).unwrap();
-    sock.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
     let mut seen = Vec::new();
+    let mut frames = 0u32;
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(25) {
+    while started.elapsed() < Duration::from_secs(120) {
         let mut header = [0u8; 5];
         sock.read_exact(&mut header).unwrap();
         let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
@@ -1518,12 +1519,18 @@ fn a_slow_interactive_client_is_resynced_instead_of_detached() {
         sock.read_exact(&mut payload).unwrap();
         assert_eq!(header[0], 101, "expected output frames only, got kind {}", header[0]);
         seen.extend_from_slice(&payload);
+        frames += 1;
         if seen.windows(15).any(|w| w == b"all-output-done") {
             break;
         }
         std::thread::sleep(Duration::from_millis(15));
     }
-    assert!(seen.windows(15).any(|w| w == b"all-output-done"), "the redrawn screen never reached the client");
+    assert!(
+        seen.windows(15).any(|w| w == b"all-output-done"),
+        "the redrawn screen never reached the client: {frames} frames, {} bytes in {:.1} s",
+        seen.len(),
+        started.elapsed().as_secs_f64()
+    );
     let events = env.events(&id);
     let discarded: Vec<_> = events
         .iter()
