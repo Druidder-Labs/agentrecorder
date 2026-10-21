@@ -6,7 +6,7 @@ Every command prints its flags with `--help`. Session ids accept unique prefixes
 
 State lives in `$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`. It holds `state.db` (SQLite, compiled in), `run/` (one Unix socket per live session) and `logs/` (supervisor stderr per session). Directories are created 0700 and files 0600.
 
-Requirements: Linux or macOS. Rust 1.95 or newer is needed to build, because of `sysinfo` 0.39. No Docker, database server, account or API key.
+Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from crates.io and needs Rust 1.95 or newer, because of `sysinfo` 0.39. No Docker, database server, account or API key.
 
 ## Commands
 

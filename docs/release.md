@@ -29,14 +29,10 @@ The release PR must be created with a GitHub App token, not `GITHUB_TOKEN`: a re
 
 ### crates.io
 
-Trusted publishing can only be configured on a crate that already exists, so the first version of each crate is published once by a maintainer with an API token:
+Trusted publishing can only be configured on a crate that already exists, so the first version of each crate was published once by a maintainer with an API token (`v0.1.0`, 2026-10-21, from the tagged checkout with `CARGO_REGISTRY_TOKEN=... cargo publish --workspace --locked`; the account needs a verified e-mail on crates.io). What remains per crate:
 
-1. Log in at crates.io with the GitHub account that owns the `Druidder-Labs` organization and create an API token with the `publish-new` and `publish-update` scopes.
-2. From the tagged `v0.1.0` checkout: `CARGO_REGISTRY_TOKEN=... cargo publish --workspace --locked`. Revoke the token afterwards.
-3. On each of the three crates, under Settings, Trusted Publishing, add a GitHub publisher with repository owner `Druidder-Labs`, repository `agentrecorder`, workflow `publish-crates.yml`, and no environment.
-4. Add the other maintainers as owners of the three crates (`cargo owner --add`), so publishing does not depend on one account.
-
-After the first publish, add `cargo install agentrecorder --locked` as the installation command in `README.md`.
+1. On each of the three crates, under Settings, Trusted Publishing, add a GitHub publisher with repository owner `Druidder-Labs`, repository `agentrecorder`, workflow `publish-crates.yml`, and no environment. Until this is done the `Publish crates` workflow fails at the token step with `No Trusted Publishing config found`, and the release has to be published by hand the same way.
+2. Add the other maintainers as owners of the three crates (`cargo owner --add`), so publishing does not depend on one account.
 
 ## Versioning
 

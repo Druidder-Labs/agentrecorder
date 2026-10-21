@@ -16,10 +16,10 @@ Works with Claude Code, Codex CLI, Gemini CLI, OpenCode and any other program, i
 Linux or macOS, Rust 1.95 or newer.
 
 ```
-git clone https://github.com/Druidder-Labs/agentrecorder
-cd agentrecorder
-cargo install --path crates/agentrecorder --locked
+cargo install agentrecorder --locked
 ```
+
+To build from a checkout instead: `cargo install --path crates/agentrecorder --locked`.
 
 ## Try it
 
