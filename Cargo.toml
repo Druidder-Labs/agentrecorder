@@ -20,10 +20,12 @@ base64 = "0.22"
 clap = { version = "4.6", features = ["derive", "env"] }
 crossbeam-channel = "0.5"
 libc = "0.2"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 nix = { version = "0.31", features = ["term", "process", "signal", "fs", "ioctl", "user", "socket"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 signal-hook = "0.4"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tempfile = "3"

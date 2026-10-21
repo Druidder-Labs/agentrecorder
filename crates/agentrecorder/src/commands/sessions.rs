@@ -165,6 +165,7 @@ pub fn remove(layout: &Layout, ids: &[String]) -> Result<i32> {
 fn delete(layout: &Layout, store: &mut Store, id: &str) -> Result<()> {
     store.delete_session(id)?;
     let _ = std::fs::remove_file(layout.log_path(id));
+    let _ = std::fs::remove_dir_all(layout.view_dir(id));
     Ok(())
 }
 

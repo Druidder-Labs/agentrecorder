@@ -61,6 +61,10 @@ impl Layout {
         Ok(p)
     }
 
+    pub fn view_dir(&self, id: &str) -> PathBuf {
+        self.root.join("views").join(id)
+    }
+
     pub fn log_path(&self, id: &str) -> PathBuf {
         self.log_dir().join(format!("{id}.log"))
     }

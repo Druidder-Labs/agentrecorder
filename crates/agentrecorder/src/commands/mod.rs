@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod export;
 pub mod hook;
 pub mod inspect;

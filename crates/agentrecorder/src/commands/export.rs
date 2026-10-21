@@ -38,7 +38,7 @@ pub struct ExportArgs {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Cast {
+pub enum Cast {
     V2,
     V3,
 }
@@ -73,7 +73,7 @@ pub fn export(layout: &Layout, args: ExportArgs) -> Result<i32> {
     Ok(if interrupted.load(Ordering::Relaxed) { 130 } else { 0 })
 }
 
-fn recorded_term(store: &Store, s: &Session) -> Result<Option<String>> {
+pub fn recorded_term(store: &Store, s: &Session) -> Result<Option<String>> {
     let mut term = None;
     store.for_each_event(&s.id, Some(&[kind::SESSION_CREATED]), |e| {
         if let Some(Body::SessionCreated { term: t, .. }) = e.body() {
@@ -148,9 +148,7 @@ impl Timeline {
     }
 }
 
-fn write_cast(store: &Store, s: &Session, cast: Cast, follow: &Follow<'_>, out: &mut impl Write) -> Result<()> {
-    let (rows, cols) = initial_size(store, s)?;
-    let term = recorded_term(store, s)?;
+pub fn cast_header(s: &Session, cast: Cast, (rows, cols): (u16, u16), term: Option<String>) -> Value {
     let mut header = match cast {
         Cast::V2 => json!({"version": 2, "width": cols, "height": rows}),
         Cast::V3 => json!({"version": 3, "term": {"cols": cols, "rows": rows}}),
@@ -163,46 +161,74 @@ fn write_cast(store: &Store, s: &Session, cast: Cast, follow: &Follow<'_>, out: 
             Cast::V3 => header["term"]["type"] = json!(t),
         }
     }
+    header
+}
+
+pub fn cast_line(v: &Value) -> String {
+    escape_controls(v.to_string())
+}
+
+pub struct CastWriter {
+    cast: Cast,
+    timeline: Timeline,
+    pending: Vec<u8>,
+}
+
+impl CastWriter {
+    pub fn new(cast: Cast) -> Self {
+        CastWriter { cast, timeline: Timeline { cast, last_ns: 0, emitted_us: 0 }, pending: Vec::new() }
+    }
+
+    pub fn event(&mut self, e: &Event) -> Option<Value> {
+        let t = &mut self.timeline;
+        match e.body() {
+            Some(Body::TerminalResized { rows, cols }) => {
+                Some(json!([t.stamp(e.mono_ns), "r", format!("{cols}x{rows}")]))
+            }
+            Some(Body::TerminalOutput) => {
+                self.pending.extend_from_slice(e.data.as_deref()?);
+                let text = take_utf8(&mut self.pending);
+                (!text.is_empty()).then(|| json!([t.stamp(e.mono_ns), "o", text]))
+            }
+            Some(Body::ProcessExited { exit_code, signal, .. }) if self.cast == Cast::V3 => {
+                let code = exit_code.unwrap_or_else(|| 128 + signal.unwrap_or(0));
+                Some(json!([t.stamp(e.mono_ns), "x", code.to_string()]))
+            }
+            _ => marker(e).map(|label| json!([t.stamp(e.mono_ns), "m", label])),
+        }
+    }
+
+    pub fn marker(&mut self, mono_ns: i64, label: &str) -> Value {
+        json!([self.timeline.stamp(mono_ns), "m", label])
+    }
+
+    pub fn finish(&mut self) -> Option<Value> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let t = self.timeline.stamp(self.timeline.last_ns);
+        Some(json!([t, "o", String::from_utf8_lossy(&std::mem::take(&mut self.pending))]))
+    }
+}
+
+fn write_cast(store: &Store, s: &Session, cast: Cast, follow: &Follow<'_>, out: &mut impl Write) -> Result<()> {
+    let header = cast_header(s, cast, initial_size(store, s)?, recorded_term(store, s)?);
     writeln!(out, "{header}")?;
     let flush = follow.follow;
     let line = |out: &mut dyn Write, v: Value| -> Result<()> {
-        writeln!(out, "{}", escape_controls(v.to_string()))?;
+        writeln!(out, "{}", cast_line(&v))?;
         if flush {
             out.flush()?;
         }
         Ok(())
     };
-    let mut timeline = Timeline { cast, last_ns: 0, emitted_us: 0 };
-    let mut pending: Vec<u8> = Vec::new();
-    follow.each(store, &s.id, Some(CAST_KINDS), |e| {
-        match e.body() {
-            Some(Body::TerminalResized { rows, cols }) => {
-                line(out, json!([timeline.stamp(e.mono_ns), "r", format!("{cols}x{rows}")]))?
-            }
-            Some(Body::TerminalOutput) => {
-                if let Some(d) = &e.data {
-                    pending.extend_from_slice(d);
-                    let text = take_utf8(&mut pending);
-                    if !text.is_empty() {
-                        line(out, json!([timeline.stamp(e.mono_ns), "o", text]))?;
-                    }
-                }
-            }
-            Some(Body::ProcessExited { exit_code, signal, .. }) if cast == Cast::V3 => {
-                let code = exit_code.unwrap_or_else(|| 128 + signal.unwrap_or(0));
-                line(out, json!([timeline.stamp(e.mono_ns), "x", code.to_string()]))?;
-            }
-            _ => {
-                if let Some(label) = marker(&e) {
-                    line(out, json!([timeline.stamp(e.mono_ns), "m", label]))?;
-                }
-            }
-        }
-        Ok(())
+    let mut writer = CastWriter::new(cast);
+    follow.each(store, &s.id, Some(CAST_KINDS), |e| match writer.event(&e) {
+        Some(v) => line(out, v),
+        None => Ok(()),
     })?;
-    if !pending.is_empty() {
-        let t = timeline.stamp(timeline.last_ns);
-        line(out, json!([t, "o", String::from_utf8_lossy(&pending)]))?;
+    if let Some(v) = writer.finish() {
+        line(out, v)?;
     }
     Ok(())
 }

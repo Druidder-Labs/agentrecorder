@@ -59,10 +59,17 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |
 | `export ID` | JSON Lines, asciicast v2 or asciicast v3; `--follow` streams a running session |
+| `bundle ID -o DIR` | Write a shareable directory: dashboard, asciicast, events, hash chain; `--redact` and `--cut` edit it first |
+| `view DIR\|ID` | Open the dashboard of a bundle or a finished session in the browser |
+| `anchor ID`, `verify DIR` | Stream hash-chain anchors to a third party while a session runs; check a bundle against them |
 | `rm ID`, `prune` | Delete finished sessions and their recordings |
 | `hook` | Record an agent hook event; `run` wires it into Claude Code for you |
 
 Every command has `--help`. The full reference, including scripting behavior and what each recovery case means, is in `docs/cli.md`.
+
+## Sharing a session
+
+`agentrecorder bundle ID -o DIR` writes a directory that opens in any browser: summary, terminal player, a clickable timeline of markers, agent hook events, commands and git state, and the integrity data. Redact patterns or cut a time range before sharing. For a reviewer, such as a technical interview or a pull request, `anchor` streams hash-chain anchors while the session runs and `verify` checks the bundle against them later. A bundle shows how a session went in the recorded terminal; it does not show what happened outside it. Details: `docs/cli.md`, Sharing a session.
 
 ## Recording and privacy
 
@@ -76,7 +83,7 @@ Threat model and controls: `docs/security.md`.
 
 - `docs/cli.md`: command reference, session states, recovery cases, scripting, platform notes
 - `docs/architecture.md`: components, process model, replay model
-- `docs/event-model.md`: event schema
+- `docs/event-model.md`: event schema and bundle format
 - `docs/security.md`: threat model and controls
 - `docs/performance.md`: measured baseline and event-loss behavior
 - `docs/release.md`: how releases and crates.io publishing work

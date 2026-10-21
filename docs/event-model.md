@@ -67,6 +67,26 @@ The payload shapes in the table above are defined once, as the `Body` enum in `c
 - `agentrecorder export SESSION --format asciicast-v2` (or `asciicast`) writes asciicast v2 and `--format asciicast-v3` writes asciicast v3 for asciinema players. Both carry `o` (output), `r` (resize) and `m` (markers for warnings, attach, detach, stop requests and notifications); v3 also carries `x` (exit status) and intervals rounded to milliseconds without cumulative drift. The header carries the command and the recorded `TERM`. Bytes that are not valid UTF-8 become U+FFFD in these formats only; DEL and C1 characters are escaped as `\uXXXX`. Exported casts are not sanitized: `asciinema play` writes them to the terminal unfiltered.
 - OpenTelemetry export is not implemented. A possible mapping is one span per session with lifecycle events as span events; terminal bytes are never exported to OTel.
 
+## Bundle format
+
+`agentrecorder bundle` writes a directory (`bundle_version` 1 in `manifest.json`):
+
+| File | Content |
+| --- | --- |
+| `manifest.json` | `format` (`agentrecorder-bundle`), `bundle_version`, `generator`, `created_at`, `session` (the stored session row), `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts` (`from_ms`, `to_ms`, `events`) and `files` (`sha256` and `bytes` of `events.jsonl`, `chain.jsonl` and `session.cast`) |
+| `events.jsonl` | The export envelope above, one line per event that was not cut; redacted events carry the redacted bytes |
+| `chain.jsonl` | One line per recorded event, cut or not: `seq`, `leaf`, `chain`, `fate` (`kept`, `redacted` or `cut`) |
+| `session.cast` | asciicast v3 built from the bundled events, with a `cut FROM-TO` marker per cut range |
+| `index.html` | The dashboard, with the manifest, the cast and the non-byte events inline. It is not listed in `files` |
+
+Hash chain `sha256-chain-v1`, all hashes lowercase hex:
+
+- `leaf` is SHA-256 of the event's JSON line as `export` prints it, without the newline, computed before redaction.
+- `chain` for seq 0 is SHA-256 of 32 zero bytes followed by the leaf; for seq n it is SHA-256 of the previous `chain` followed by the leaf, both as raw 32-byte values.
+- `manifest.json` `chain.head` is the last `chain`.
+
+`agentrecorder anchor` prints lines of `session_id`, `seq`, `chain` (the same value as `chain.jsonl` at that seq) and `timestamp` (when the line was printed, informational).
+
 ## Compatibility rules
 
 - Adding an event type or a payload field is compatible and keeps version 1.

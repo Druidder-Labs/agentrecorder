@@ -1418,3 +1418,77 @@ fn a_pipe_client_gets_output_produced_before_it_attached() {
         assert_eq!(lines, 30000, "round {round}");
     }
 }
+
+#[test]
+fn bundles_redact_verify_and_detect_changes_against_anchors() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "echo 'token sk-SECRET42'; sleep 0.3; echo after; exit 2"]);
+    env.wait_status(&id, "exited");
+    let anchors = env.path().join("anchors.jsonl");
+    std::fs::write(&anchors, env.ok(&["anchor", &id])).unwrap();
+    let dir = env.path().join("bundle");
+    let dir_s = dir.to_str().unwrap();
+    env.ok(&["bundle", &id, "-o", dir_s, "--redact", "sk-[A-Z0-9]+"]);
+    for f in ["index.html", "manifest.json", "events.jsonl", "chain.jsonl", "session.cast"] {
+        let body = std::fs::read_to_string(dir.join(f)).unwrap();
+        assert!(!body.contains("SECRET42"), "{f} leaks the redacted value");
+    }
+    let cast = std::fs::read_to_string(dir.join("session.cast")).unwrap();
+    assert!(cast.contains("after") && cast.contains("token *********"), "{cast}");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["format"], "agentrecorder-bundle");
+    assert!(manifest["fates"]["redacted"].as_u64().unwrap() >= 1);
+    let report = env.ok(&["verify", dir_s, "--anchors", anchors.to_str().unwrap()]);
+    assert!(report.contains("result:   ok"), "{report}");
+
+    let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    std::fs::write(dir.join("events.jsonl"), events.replace("\"exit_code\":2", "\"exit_code\":0")).unwrap();
+    let out = env.run(&["verify", dir_s]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("content differs from its recorded hash"));
+
+    let conn = rusqlite::Connection::open(env.db()).unwrap();
+    conn.execute(
+        "UPDATE events SET payload = replace(payload, '\"exit_code\":2', '\"exit_code\":0') WHERE session_id = ?1",
+        [&id],
+    )
+    .unwrap();
+    drop(conn);
+    let rebuilt = env.path().join("rebuilt");
+    env.ok(&["bundle", &id, "-o", rebuilt.to_str().unwrap()]);
+    let out = env.run(&["verify", rebuilt.to_str().unwrap(), "--anchors", anchors.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("chain differs"));
+}
+
+#[test]
+fn view_writes_a_private_dashboard_that_rm_deletes() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "echo hello"]);
+    env.wait_status(&id, "exited");
+    let path = env.ok(&["view", &id, "--no-open"]).trim().to_string();
+    let html = std::fs::read_to_string(&path).unwrap();
+    assert!(html.contains("\"manifest\"") && !html.contains("__AGENTRECORDER_DATA__"));
+    assert!(path.starts_with(env.path().to_str().unwrap()), "{path}");
+    let live = env.start_detached(&["sleep", "30"]);
+    let out = env.run(&["bundle", &live, "-o", env.path().join("b").to_str().unwrap()]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("needs a finished session"));
+    env.ok(&["stop", &live]);
+    env.ok(&["rm", &id]);
+    assert!(!std::path::Path::new(&path).exists());
+}
+
+#[test]
+fn anchor_streams_heads_while_the_session_runs_and_ends_with_it() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "for i in 1 2 3 4 5 6; do echo $i; sleep 0.4; done"]);
+    let out = env.command(&["anchor", &id, "--interval", "1"]).output().unwrap();
+    assert!(out.status.success());
+    let lines: Vec<serde_json::Value> =
+        String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(lines.len() >= 2, "{lines:?}");
+    let last_seq = env.events(&id).last().unwrap()["seq"].clone();
+    assert_eq!(lines.last().unwrap()["seq"], last_seq);
+    assert!(lines.windows(2).all(|w| w[0]["seq"].as_i64() < w[1]["seq"].as_i64()));
+}

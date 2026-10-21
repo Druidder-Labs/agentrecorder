@@ -8,7 +8,9 @@ agentrecorder (CLI client)          crates/agentrecorder
   |-- sessions / inspect ----> SQLite store + socket status request; may mark a session lost
   |-- rm / prune ------------> SQLite store: deletes finished sessions, checkpoints the WAL
   |-- recover / replay ------> SQLite store (read)
-  `-- export ----------------> SQLite store (read)
+  |-- export ----------------> SQLite store (read)
+  |-- bundle / view / anchor -> SQLite store (read); bundle and view write a directory with the dashboard
+  `-- verify ----------------> bundle directory only (no store)
 
 supervisor                     crates/agentrecorder-supervisor
   |-- client.rs     public: status, stop, detach, Attachment (typed; the only way to talk to a session)
@@ -45,6 +47,7 @@ The layers map to the requested separation as follows.
 | Event collection | `crates/agentrecorder-supervisor/src/recorder.rs` |
 | Persistent event store | `crates/agentrecorder-store/src/lib.rs`, `events.rs` |
 | Inspection, recovery, replay | `crates/agentrecorder/src/commands/{inspect,recover,replay,export}.rs`, `procinfo.rs`, `render.rs`, `sanitize.rs`, `crates/agentrecorder-supervisor/src/screen.rs` |
+| Sharing | `crates/agentrecorder/src/commands/bundle.rs` (`bundle`, `anchor`, `verify`, `view`), `chain.rs` (hash chain), `dashboard.html` (template compiled into the binary) |
 
 There is no TUI in the MVP. `ratatui` was not added because no command needs a full-screen interface yet.
 

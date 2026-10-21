@@ -1,6 +1,7 @@
 mod adapters;
 mod agent_state;
 mod attach;
+mod chain;
 mod commands;
 mod fmt;
 mod procinfo;
@@ -82,6 +83,14 @@ enum Command {
     },
     #[command(about = "Export recorded events as JSON Lines or an asciicast v2 file")]
     Export(commands::export::ExportArgs),
+    #[command(about = "Write a shareable directory: dashboard, asciicast, events, hash chain and manifest")]
+    Bundle(commands::bundle::BundleArgs),
+    #[command(about = "Print hash-chain anchors of a session while it runs, for a third party to keep")]
+    Anchor(commands::bundle::AnchorArgs),
+    #[command(about = "Check a bundle's files and hash chain, and optionally the anchors received for it")]
+    Verify(commands::bundle::VerifyArgs),
+    #[command(about = "Open the dashboard of a bundle or of a finished session in a browser")]
+    View(commands::bundle::ViewArgs),
     #[command(about = "Delete finished sessions and their recordings")]
     Rm {
         #[arg(required = true, help = "Session ids or unique prefixes")]
@@ -140,8 +149,10 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli) -> anyhow::Result<i32> {
-    if let Command::Hook(args) = cli.command {
-        return Ok(commands::hook::hook(args));
+    match cli.command {
+        Command::Hook(args) => return Ok(commands::hook::hook(args)),
+        Command::Verify(args) => return commands::bundle::verify(args),
+        _ => {}
     }
     let layout = Layout::from_env()?;
     if !matches!(cli.command, Command::Supervise(_)) {
@@ -158,9 +169,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Command::Replay(args) => commands::replay::replay(&layout, args),
         Command::Stop { session, signal, timeout } => commands::sessions::stop(&layout, &session, &signal, timeout),
         Command::Export(args) => commands::export::export(&layout, args),
+        Command::Bundle(args) => commands::bundle::bundle(&layout, args),
+        Command::Anchor(args) => commands::bundle::anchor(&layout, args),
+        Command::View(args) => commands::bundle::view(&layout, args),
         Command::Rm { sessions } => commands::sessions::remove(&layout, &sessions),
         Command::Prune { older_than } => commands::sessions::prune(&layout, &older_than),
-        Command::Hook(_) => unreachable!("handled before the state directory is resolved"),
+        Command::Hook(_) | Command::Verify(_) => unreachable!("handled before the state directory is resolved"),
         Command::Supervise(a) => {
             layout.ensure()?;
             agentrecorder_supervisor::run(agentrecorder_supervisor::Config {

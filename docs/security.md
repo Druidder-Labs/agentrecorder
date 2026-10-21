@@ -39,6 +39,10 @@
 | Agent hooks record the prompt or tool content | `agentrecorder hook` keeps an allowlist of metadata fields with length caps; `prompt`, `tool_input` and `last_assistant_message` are dropped before the event leaves the hook process. It prints nothing on stdout, so it cannot inject context or a permission decision into the agent. | `hook.rs` unit tests, `injected_claude_hooks_record_agent_events_without_prompt_text`, `the_hook_command_never_fails_the_agent` |
 | Attaching a session to itself | Refused when `AGENTRECORDER_SESSION` equals the target id | `attach.rs` |
 | Terminal left in raw mode | The client restores the saved terminal settings on detach, exit, errors, and SIGTERM, SIGINT or SIGHUP | `killing_the_client_restores_the_terminal` |
+| A shared bundle leaks a secret | `bundle --redact` masks matches in output, input, snapshots, payload strings, session metadata and the cast header; `--cut` removes a time range. The patterns are not stored. `bundle` writes files 0600 under the 077 umask, so sharing is an explicit copy | `bundles_redact_verify_and_detect_changes_against_anchors`, `bundle.rs` unit tests |
+| Recorded output runs script in the dashboard | Data is embedded as JSON with `<`, `>` and `&` escaped, so it cannot close the script element; the page inserts text with `textContent` only; a Content-Security-Policy allows scripts only inline and from `cdn.jsdelivr.net`, and has no `connect-src`, so the page cannot send the data anywhere | `dashboard_data_cannot_close_the_script_element` |
+| A bundle is edited after the fact | Each event's hash is chained in `chain.jsonl`; `verify` rechecks kept events, the chain, the file digests and, with `--anchors`, the chain values a third party received while the session ran | `bundles_redact_verify_and_detect_changes_against_anchors` |
+| Dashboard copies outlive the session | `view ID` writes under `$AGENTRECORDER_HOME/views/ID` (0700) and `rm`, `prune` and retention delete it with the session | `view_writes_a_private_dashboard_that_rm_deletes` |
 | Corrupt store hides recordings | `agentrecorder` reports the path and does not overwrite the file | `corrupt_store_is_reported_not_overwritten` |
 
 ## Residual risks
@@ -47,6 +51,9 @@
 - Output recording stores whatever the agent prints, including secrets it echoes. Use `--no-record` for sessions that print credentials.
 - `--record-input` stores everything typed, including passwords at no-echo prompts.
 - The live session snapshot is sent unfiltered on attach. A process running as the user can already write anything to the user's terminal, so this adds no capability.
+- Redaction is pattern based: a secret that no pattern matches stays in the bundle. Redacted events are not hash-checked, so their content is as trustworthy as whoever made the bundle.
+- A bundle is self-reported unless anchors were sent to someone else while the session ran, and even then it covers only the recorded terminal.
+- Opening `index.html` requests `asciinema-player` from jsDelivr, which sees the viewer's IP address. The integrity hash stops a modified script from running.
 - SQLite `secure_delete` does not reach copies made by filesystem snapshots, backups or SSD wear leveling. Full-disk encryption is the control for those.
 - `client_pid` in `session.attached` is self-reported.
 - `agent.hook` events are self-reported. Any process of the same user that knows a session id can send one; the supervisor's uid check stops other users.

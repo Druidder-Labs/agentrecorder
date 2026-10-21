@@ -4,7 +4,7 @@ Every command prints its flags with `--help`. Session ids accept unique prefixes
 
 ## State directory
 
-State lives in `$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`. It holds `state.db` (SQLite, compiled in), `run/` (one Unix socket per live session) and `logs/` (supervisor stderr per session). Directories are created 0700 and files 0600.
+State lives in `$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`. It holds `state.db` (SQLite, compiled in), `run/` (one Unix socket per live session) and `logs/` (supervisor stderr per session) and `views/` (dashboards written by `view ID`; `rm` deletes a session's copy). Directories are created 0700 and files 0600.
 
 Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from crates.io and needs Rust 1.95 or newer, because of `sysinfo` 0.39. No Docker, database server, account or API key.
 
@@ -22,6 +22,10 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `replay ID [--speed N] [--from HH:MM:SS\|--from-mark N\|LABEL] [--max-idle S] [--instant] [--raw] [-f\|--follow]` | Play back recorded output; never re-executes commands. `--follow` keeps playing new output while the session runs. `--from-mark` starts at a marker, by number (1 is the first) or exact label; on a terminal, replay prints `[agentrecorder] mark N: LABEL` on stderr as it passes each one |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
 | `export ID [--format jsonl\|asciicast-v2\|asciicast-v3] [-f\|--follow]` | Events as JSON Lines, or output as an asciicast file with markers (v3 also carries the exit status). `--follow` keeps writing new events while the session runs |
+| `bundle ID -o DIR [--redact REGEX]... [--cut FROM-TO]...` | Write a shareable directory for a finished session: `index.html` (dashboard), `session.cast` (asciicast v3), `events.jsonl`, `chain.jsonl` and `manifest.json` (see Sharing a session) |
+| `anchor ID [--interval S]` | Print one hash-chain anchor line every S seconds (default 30) while the session runs and a last one when it ends; for a finished session, one line. Exit 130 on Ctrl-C |
+| `verify DIR [--anchors FILE]` | Check a bundle's file digests and hash chain, and that every anchor in FILE matches; exit 0 when everything matches, 1 otherwise |
+| `view DIR\|ID [--no-open]` | Open the dashboard of a bundle, or write one for a finished session to `views/ID` and open it; `--no-open` prints the path only |
 | `rm ID...` | Delete finished sessions and their recordings |
 | `prune --older-than 30d` | Delete finished sessions older than the given age |
 | `hook [--agent NAME]` | Read an agent hook event as JSON on stdin and record it as `agent.hook` in the session named by `AGENTRECORDER_SESSION`; always exits 0 and prints nothing on stdout (see Agent integration) |
@@ -108,6 +112,31 @@ preexec() { print -n "\e]133;C\a" }
 ```
 
 The marks come from the output stream, so any program in the session can emit them; the counts describe what the session printed, not what the kernel ran. Claude Code runs its tools outside the terminal, so agent sessions have no marks.
+
+## Sharing a session
+
+`bundle` turns a finished session into a directory that someone without `agentrecorder` can open, for example a technical interview reviewer, a bug report or a pull request:
+
+```
+agentrecorder run -- claude                        # work as usual
+agentrecorder anchor 3f9a1c | tee anchors.jsonl     # optional, in a second terminal while it runs
+agentrecorder bundle 3f9a1c -o review --redact 'sk-[A-Za-z0-9]+' --cut 00:12:03-00:12:09
+agentrecorder view review                           # dashboard in the browser
+agentrecorder verify review --anchors anchors.jsonl # what the receiver runs
+```
+
+- `index.html` is a single file with the data inline: summary tiles, the terminal player, a timeline of markers, agent hook events, OSC 133 commands, git snapshots, notifications and warnings (click a row to seek), agent activity by tool, and the integrity data. It opens from disk; the terminal player loads `asciinema-player` 3.17.0 from jsDelivr with a subresource integrity hash, and without network the rest of the page still works.
+- `--redact REGEX` (Rust `regex` syntax, matched on bytes) replaces every match with `*` of the same length in output and input (matched across event boundaries), screen snapshots, every string in event payloads, the stored session metadata and the asciicast header. The patterns are not written to the bundle; the manifest records how many there were and how many matches they replaced.
+- `--cut FROM-TO` removes terminal output, input, snapshots, notifications, hook events, OSC 133 commands and marks recorded between two offsets (seconds, `MM:SS` or `HH:MM:SS`); lifecycle events stay. The cast carries a `cut` marker at the start of each range. The screen after a cut can look wrong until the program redraws it.
+- Every recorded event is in `chain.jsonl` with its hash and fate (`kept`, `redacted`, `cut`), so a receiver sees how many events were edited and where.
+
+What a bundle proves:
+
+- `verify` without anchors shows that the files agree with each other: a kept event that was edited after bundling fails. Whoever made the bundle can still build a consistent bundle from edited data, so without anchors the bundle is self-reported.
+- With anchors that a third party received while the session ran, `verify` shows that the events up to the last anchor are the ones that existed at that time, apart from the ones marked redacted or cut. Events after the last anchor are reported as not anchored.
+- No bundle shows what happened outside the recorded terminal: another terminal, another device or another person.
+
+`bundle` refuses a running session. `anchor` must run with the same `agentrecorder` version that later writes the bundle, because the hash covers the exported JSON line of each event.
 
 ## Recording and retention
 
