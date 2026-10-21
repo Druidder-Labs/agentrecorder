@@ -436,13 +436,14 @@ fn a_stalled_interactive_client_is_detached_and_the_process_keeps_running() {
     frame.extend_from_slice(hello);
     sock.write_all(&frame).unwrap();
     wait_for("process to finish its output", || env.ok(&["replay", &id, "--instant", "--raw"]).contains("finished"));
-    let reasons: Vec<String> = env
-        .events(&id)
-        .iter()
-        .filter(|e| e["event_type"] == "session.detached")
-        .map(|e| e["payload"]["reason"].as_str().unwrap().to_string())
-        .collect();
-    assert!(reasons.contains(&"client_too_slow".to_string()), "{reasons:?}");
+    let reasons = || -> Vec<String> {
+        env.events(&id)
+            .iter()
+            .filter(|e| e["event_type"] == "session.detached")
+            .map(|e| e["payload"]["reason"].as_str().unwrap().to_string())
+            .collect()
+    };
+    wait_for("client_too_slow detach", || reasons().contains(&"client_too_slow".to_string()));
     assert_eq!(env.status(&id), "detached");
     drop(sock);
 }
@@ -1339,4 +1340,55 @@ fn markers_are_recorded_listed_exported_and_replayed_from() {
         assert!(!o.status.success(), "{args:?}");
         assert!(String::from_utf8_lossy(&o.stderr).contains(err), "{args:?}: {o:?}");
     }
+}
+
+#[test]
+fn a_slow_interactive_client_is_resynced_instead_of_detached() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+    let env = Env::new();
+    let id = env.start_detached(&[
+        "sh",
+        "-c",
+        "sleep 1; i=0; while [ $i -lt 60000 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; echo all-output-done; sleep 30",
+    ]);
+    let mut sock = UnixStream::connect(env.path().join("run").join(format!("{id}.sock"))).unwrap();
+    let hello = br#"{"version":1,"mode":"attach","rows":24,"cols":80,"client_pid":1}"#;
+    sock.write_all(&raw_frame(1, hello)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut seen = Vec::new();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(25) {
+        let mut header = [0u8; 5];
+        sock.read_exact(&mut header).unwrap();
+        let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; len];
+        sock.read_exact(&mut payload).unwrap();
+        assert_eq!(header[0], 101, "expected output frames only, got kind {}", header[0]);
+        seen.extend_from_slice(&payload);
+        if seen.windows(15).any(|w| w == b"all-output-done") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(seen.windows(15).any(|w| w == b"all-output-done"), "the redrawn screen never reached the client");
+    let events = env.events(&id);
+    let discarded: Vec<_> = events
+        .iter()
+        .filter(|e| e["event_type"] == "runtime.warning" && e["payload"]["code"] == "client_output_discarded")
+        .collect();
+    assert!(!discarded.is_empty(), "no discard was needed; the client was not slow enough");
+    assert!(discarded.iter().all(|e| e["payload"]["bytes"].as_u64().unwrap() > 0));
+    assert!(!events.iter().any(|e| e["event_type"] == "session.detached"), "the slow client was detached");
+    assert_eq!(env.status(&id), "running");
+    sock.write_all(&raw_frame(4, b"")).unwrap();
+    wait_for("detach", || env.status(&id) == "detached");
+    let reasons: Vec<_> = env
+        .events(&id)
+        .into_iter()
+        .filter(|e| e["event_type"] == "session.detached")
+        .map(|e| e["payload"]["reason"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(reasons, ["client_request"]);
+    env.ok(&["stop", &id]);
 }

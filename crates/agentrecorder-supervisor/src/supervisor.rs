@@ -30,6 +30,7 @@ const CLIENT_QUEUE: usize = 256;
 const CLIENT_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const CLIENT_SEND_SLICE: Duration = Duration::from_millis(100);
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_RESYNC_POLL: Duration = Duration::from_millis(100);
 const CLIENT_CLOSE_GRACE: Duration = Duration::from_secs(1);
 const CLIENT_DRAIN_ON_EXIT: Duration = Duration::from_secs(10);
 const PIPE_CLIENT_DRAIN_ON_EXIT: Duration = Duration::from_secs(120);
@@ -67,6 +68,9 @@ struct Client {
     id: u64,
     tx: Sender<Frame>,
     backpressure: Arc<AtomicBool>,
+    discarding: Arc<AtomicBool>,
+    discarded: Arc<AtomicU64>,
+    stalled: Arc<AtomicBool>,
     sock: UnixStream,
     last: Arc<Mutex<Option<Frame>>>,
     abort: Arc<AtomicBool>,
@@ -549,7 +553,15 @@ fn read_pty(shared: &Shared, mut master: File) {
             let mut term = shared.term();
             let notes = term.screen.process(data);
             maybe_snapshot(shared, &mut term, n as u64);
-            (term.client.as_ref().map(|c| (c.id, c.tx.clone(), c.backpressure.clone())), notes)
+            let target = match term.client.as_ref() {
+                Some(c) if c.backpressure.load(Ordering::SeqCst) => Some((c.id, c.tx.clone(), c.backpressure.clone())),
+                Some(c) => {
+                    offer_interactive(shared, &term, c, data);
+                    None
+                }
+                None => None,
+            };
+            (target, notes)
         };
         for signal in notes {
             match signal {
@@ -569,6 +581,49 @@ fn read_pty(shared: &Shared, mut master: File) {
             }
         }
     }
+}
+
+fn offer_interactive(shared: &Shared, term: &Term, c: &Client, data: &[u8]) {
+    if c.discarding.load(Ordering::SeqCst) {
+        c.discarded.fetch_add(data.len() as u64, Ordering::Relaxed);
+        resync(shared, term, c);
+        return;
+    }
+    if let Err(TrySendError::Full(_)) = c.tx.try_send(Frame::Output(data.to_vec())) {
+        c.discarding.store(true, Ordering::SeqCst);
+        c.discarded.fetch_add(data.len() as u64, Ordering::Relaxed);
+    }
+}
+
+fn resync(shared: &Shared, term: &Term, c: &Client) {
+    if !c.discarding.load(Ordering::SeqCst) || c.tx.len() > CLIENT_QUEUE / 2 {
+        return;
+    }
+    let mut snapshot = String::new();
+    if !term.screen.alternate_screen() {
+        snapshot.push_str("\x1b[?1049l");
+    }
+    snapshot.push_str("\x1b[0m\x1b[H\x1b[2J");
+    snapshot.push_str(&term.screen.state());
+    let chunks: Vec<&[u8]> = snapshot.as_bytes().chunks(SNAPSHOT_CHUNK).collect();
+    if chunks.len() > CLIENT_QUEUE - c.tx.len() {
+        return;
+    }
+    for chunk in chunks {
+        if c.tx.try_send(Frame::Output(chunk.to_vec())).is_err() {
+            return;
+        }
+    }
+    c.discarding.store(false, Ordering::SeqCst);
+    let bytes = c.discarded.swap(0, Ordering::Relaxed);
+    shared.recorder.event(Body::RuntimeWarning(
+        Notice::new(
+            "client_output_discarded",
+            "the attached terminal fell behind; queued output was discarded and the screen was redrawn",
+        )
+        .with("bytes", bytes)
+        .with("client", c.id),
+    ));
 }
 
 fn maybe_snapshot(shared: &Shared, term: &mut Term, bytes: u64) {
@@ -692,7 +747,7 @@ fn control(shared: &Arc<Shared>, c: Control) -> Frame {
     }
 }
 
-fn spawn_client_writer(mut stream: UnixStream, backpressure: bool) -> Result<Client> {
+fn spawn_client_writer(shared: &Arc<Shared>, mut stream: UnixStream, backpressure: bool) -> Result<Client> {
     let (tx, rx) = bounded::<Frame>(CLIENT_QUEUE);
     let (done_tx, done) = bounded::<()>(1);
     let last: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
@@ -701,14 +756,33 @@ fn spawn_client_writer(mut stream: UnixStream, backpressure: bool) -> Result<Cli
         stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
     }
     let sock = stream.try_clone()?;
-    let (w_last, w_abort) = (last.clone(), abort.clone());
+    let discarding = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicBool::new(false));
+    let (w_last, w_abort, w_stalled, w_discarding) = (last.clone(), abort.clone(), stalled.clone(), discarding.clone());
+    let w_shared = shared.clone();
     std::thread::Builder::new().name("client-writer".into()).spawn(move || {
         let mut healthy = true;
-        for frame in rx {
+        loop {
+            let frame = match rx.recv_timeout(CLIENT_RESYNC_POLL) {
+                Ok(f) => f,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if w_discarding.load(Ordering::SeqCst) {
+                        let term = w_shared.term();
+                        if let Some(c) = term.client.as_ref().filter(|c| Arc::ptr_eq(&c.discarding, &w_discarding)) {
+                            resync(&w_shared, &term, c);
+                        }
+                    }
+                    continue;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            };
             if w_abort.load(Ordering::SeqCst) {
                 break;
             }
-            if write_frame(&mut stream, &frame).is_err() {
+            if let Err(e) = write_frame(&mut stream, &frame) {
+                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                    w_stalled.store(true, Ordering::SeqCst);
+                }
                 healthy = false;
                 break;
             }
@@ -719,11 +793,23 @@ fn spawn_client_writer(mut stream: UnixStream, backpressure: bool) -> Result<Cli
         let _ = stream.shutdown(std::net::Shutdown::Both);
         let _ = done_tx.send(());
     })?;
-    Ok(Client { id: 0, tx, backpressure: Arc::new(AtomicBool::new(backpressure)), sock, last, abort, done })
+    Ok(Client {
+        id: 0,
+        tx,
+        backpressure: Arc::new(AtomicBool::new(backpressure)),
+        discarding,
+        discarded: Arc::new(AtomicU64::new(0)),
+        stalled,
+        sock,
+        last,
+        abort,
+        done,
+    })
 }
 
 fn attach(shared: &Arc<Shared>, mut reader: UnixStream, writer: UnixStream, hello: &Hello) -> Result<()> {
-    let mut client = spawn_client_writer(writer, hello.backpressure)?;
+    let mut client = spawn_client_writer(shared, writer, hello.backpressure)?;
+    let stalled = client.stalled.clone();
     let client_id = {
         let mut term = shared.term();
         if shared.exited.load(Ordering::SeqCst) {
@@ -786,6 +872,10 @@ fn attach(shared: &Arc<Shared>, mut reader: UnixStream, writer: UnixStream, hell
             Frame::Detach => break Some(DetachReason::ClientRequest),
             _ => break Some(DetachReason::ProtocolError),
         }
+    };
+    let reason = match reason {
+        Some(DetachReason::ClientDisconnected) if stalled.load(Ordering::SeqCst) => Some(DetachReason::ClientTooSlow),
+        other => other,
     };
     let mut term = shared.term();
     if let Some(reason) = reason
