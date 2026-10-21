@@ -5,12 +5,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use agentrecorder_store::{
-    Body, DetachReason, GitPhase, NewSession, Notice, NotificationSource, SnapshotReason, Store, TerminationReason,
-    now_unix_ns,
+    Body, ChangedPath, DetachReason, GIT_MAX_PATHS, GitPhase, NewSession, Notice, NotificationSource, SnapshotReason,
+    Store, TerminationReason, now_unix_ns,
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TrySendError, bounded};
@@ -303,8 +303,14 @@ fn escalation_warning() -> Body {
     )
 }
 
-fn git_snapshot(cwd: &Path) -> Option<(Option<String>, Option<u64>)> {
-    let run = |args: &[&str]| -> Option<String> {
+struct GitInfo {
+    head: Option<String>,
+    dirty: Vec<String>,
+    changed: Option<Vec<ChangedPath>>,
+}
+
+fn git_snapshot(cwd: &Path, since: Option<&str>) -> Option<GitInfo> {
+    let run = |args: &[&str]| -> Option<Vec<u8>> {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(cwd)
@@ -314,25 +320,95 @@ fn git_snapshot(cwd: &Path) -> Option<(Option<String>, Option<u64>)> {
             .stderr(std::process::Stdio::null())
             .output()
             .ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        out.status.success().then_some(out.stdout)
     };
-    if run(&["rev-parse", "--is-inside-work-tree"])?.trim() != "true" {
+    let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
+    if text(run(&["rev-parse", "--is-inside-work-tree"])?).trim() != "true" {
         return None;
     }
-    let head = run(&["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
-    let dirty = run(&["status", "--porcelain"]).map(|s| s.lines().count() as u64);
-    Some((head, dirty))
+    let head = run(&["rev-parse", "HEAD"]).map(|s| text(s).trim().to_string());
+    let status = run(&["status", "--porcelain=v1", "-z"]);
+    let dirty = status.as_deref().map(parse_porcelain_z).unwrap_or_default();
+    let changed = since.and_then(|base| {
+        let mut changed = parse_name_status_z(&run(&["diff", "--name-status", "-z", base])?);
+        let untracked = text(run(&["ls-files", "--others", "--exclude-standard", "-z"])?);
+        changed.extend(
+            untracked
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(|p| ChangedPath { status: "?".into(), path: p.to_string() }),
+        );
+        changed.sort_by(|a, b| a.path.cmp(&b.path));
+        changed.dedup_by(|a, b| a.path == b.path);
+        Some(changed)
+    });
+    Some(GitInfo { head, dirty, changed })
 }
 
-fn record_git(recorder: &Recorder, cwd: Option<PathBuf>, phase: GitPhase) {
+fn cap<T>(mut v: Vec<T>) -> Vec<T> {
+    v.truncate(GIT_MAX_PATHS);
+    v
+}
+
+fn parse_porcelain_z(out: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut entries = String::from_utf8_lossy(out).split('\0').map(str::to_string).collect::<Vec<_>>().into_iter();
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (xy, path) = entry.split_at(3);
+        if xy.contains('R') || xy.contains('C') {
+            entries.next();
+        }
+        paths.push(path.to_string());
+    }
+    paths.sort();
+    paths
+}
+
+fn parse_name_status_z(out: &[u8]) -> Vec<ChangedPath> {
+    let mut changed = Vec::new();
+    let mut fields = String::from_utf8_lossy(out).split('\0').map(str::to_string).collect::<Vec<_>>().into_iter();
+    while let Some(status) = fields.next() {
+        if status.is_empty() {
+            continue;
+        }
+        let Some(path) = fields.next() else { break };
+        let letter = status.chars().next().unwrap_or('M');
+        let path = if matches!(letter, 'R' | 'C') { fields.next().unwrap_or(path) } else { path };
+        changed.push(ChangedPath { status: letter.to_string(), path });
+    }
+    changed
+}
+
+fn record_git(recorder: &Recorder, cwd: Option<PathBuf>, phase: GitPhase, start_head: &Arc<OnceLock<Option<String>>>) {
     let Some(cwd) = cwd else { return };
     let (tx, rx) = bounded(1);
+    let since = match phase {
+        GitPhase::Start => None,
+        GitPhase::Exit => start_head.get().cloned().flatten(),
+    };
     std::thread::spawn(move || {
-        let _ = tx.send(git_snapshot(&cwd));
+        let _ = tx.send(git_snapshot(&cwd, since.as_deref()));
     });
-    if let Ok(Some((head, dirty_paths))) = rx.recv_timeout(GIT_TIMEOUT) {
-        recorder.event(Body::GitSnapshot { phase, head, dirty_paths });
+    let Ok(Some(info)) = rx.recv_timeout(GIT_TIMEOUT) else {
+        if phase == GitPhase::Start {
+            let _ = start_head.set(None);
+        }
+        return;
+    };
+    if phase == GitPhase::Start {
+        let _ = start_head.set(info.head.clone());
     }
+    recorder.event(Body::GitSnapshot {
+        phase,
+        head: info.head,
+        dirty_paths: Some(info.dirty.len() as u64),
+        dirty: cap(info.dirty),
+        changed_paths: info.changed.as_ref().map(|c| c.len() as u64),
+        changed: info.changed.map(cap).unwrap_or_default(),
+    });
 }
 
 pub fn run(cfg: Config) -> Result<i32> {
@@ -444,10 +520,12 @@ pub fn run(cfg: Config) -> Result<i32> {
     shared.bind()?;
     recorder.meta(Meta::Started { child_pid: child_pid as i64, at_ns: start_ns });
     install_signal_handlers(&shared)?;
+    let start_head = Arc::new(OnceLock::new());
     {
         let recorder = recorder.clone();
         let cwd = cwd.clone();
-        std::thread::spawn(move || record_git(&recorder, cwd, GitPhase::Start));
+        let start_head = start_head.clone();
+        std::thread::spawn(move || record_git(&recorder, cwd, GitPhase::Start, &start_head));
     }
 
     let (reader_done_tx, reader_done_rx) = bounded::<()>(1);
@@ -480,7 +558,7 @@ pub fn run(cfg: Config) -> Result<i32> {
     if let Some(c) = &client {
         recorder.event(Body::SessionDetached { client: c.id, reason: DetachReason::ProcessExited });
     }
-    record_git(&recorder, cwd, GitPhase::Exit);
+    record_git(&recorder, cwd, GitPhase::Exit, &start_head);
     let reason =
         if shared.stop_deadline().is_some() { TerminationReason::Stopped } else { TerminationReason::ProcessExited };
     recorder.event(Body::SessionTerminated {
@@ -955,4 +1033,24 @@ impl Read for Deadline<'_> {
 
 fn is_current(shared: &Shared, client_id: u64) -> bool {
     shared.term().client.as_ref().map(|c| c.id) == Some(client_id)
+}
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+
+    #[test]
+    fn porcelain_paths_skip_rename_sources_and_sort() {
+        let out = b" M b.rs\0R  new.rs\0old.rs\0?? a.txt\0";
+        assert_eq!(parse_porcelain_z(out), ["a.txt", "b.rs", "new.rs"]);
+        assert!(parse_porcelain_z(b"").is_empty());
+    }
+
+    #[test]
+    fn name_status_keeps_the_letter_and_the_new_path_of_a_rename() {
+        let out = b"M\0a.rs\0R100\0old.rs\0new.rs\0D\0gone.rs\0";
+        let got: Vec<(String, String)> = parse_name_status_z(out).into_iter().map(|c| (c.status, c.path)).collect();
+        let want = [("M", "a.rs"), ("R", "new.rs"), ("D", "gone.rs")];
+        assert_eq!(got, want.map(|(s, p)| (s.to_string(), p.to_string())));
+    }
 }

@@ -538,7 +538,11 @@ fn notifications_idle_time_and_git_state_are_measured() {
     if git(&["init", "-q"]).ok() != Some(true) {
         return;
     }
-    git(&["-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]).unwrap();
+    std::fs::write(repo.join("tracked.txt"), "one\n").unwrap();
+    std::fs::write(repo.join("gone.txt"), "bye\n").unwrap();
+    git(&["add", "tracked.txt", "gone.txt"]).unwrap();
+    git(&["-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "-m", "init"]).unwrap();
+    std::fs::write(repo.join("pre-dirty.txt"), "before\n").unwrap();
     let id = env
         .ok(&[
             "run",
@@ -548,7 +552,7 @@ fn notifications_idle_time_and_git_state_are_measured() {
             "--",
             "sh",
             "-c",
-            "printf '\\033]9;build done\\007'; printf '\\007'; touch new-file; sleep 2",
+            "printf '\\033]9;build done\\007'; printf '\\007'; sleep 2; touch new-file; echo two >> tracked.txt; rm gone.txt; sleep 1",
         ])
         .trim()
         .to_string();
@@ -561,10 +565,36 @@ fn notifications_idle_time_and_git_state_are_measured() {
     assert!(info["supervisor"]["output_idle_ms"].as_u64().is_some());
     assert!(info["notifications"].as_array().unwrap().iter().any(|x| x["payload"]["source"] == "bell"));
     env.wait_status(&id, "exited");
-    let git_events = env.inspect(&id)["git"].as_array().unwrap().clone();
+    let info = env.inspect(&id);
+    let git_events = info["git"].as_array().unwrap().clone();
     let exit = git_events.iter().find(|g| g["payload"]["phase"] == "exit").expect("exit snapshot");
     assert!(exit["payload"]["dirty_paths"].as_u64().unwrap() >= 1);
-    assert!(git_events.iter().any(|g| g["payload"]["phase"] == "start" && g["payload"]["head"].is_string()));
+    let start = git_events.iter().find(|g| g["payload"]["phase"] == "start").expect("start snapshot");
+    assert!(start["payload"]["head"].is_string());
+    assert_eq!(start["payload"]["dirty"], serde_json::json!(["pre-dirty.txt"]));
+    let changed: Vec<(String, String)> = exit["payload"]["changed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["status"].as_str().unwrap().into(), c["path"].as_str().unwrap().into()))
+        .collect();
+    let want = [("D", "gone.txt"), ("?", "new-file"), ("?", "pre-dirty.txt"), ("M", "tracked.txt")];
+    assert_eq!(changed, want.map(|(s, p)| (s.to_string(), p.to_string())));
+    assert_eq!(exit["payload"]["changed_paths"], 4);
+    let files = &info["files_changed"];
+    assert_eq!((files["count"].as_u64(), files["already_dirty_at_start"].as_u64()), (Some(4), Some(1)), "{files}");
+    assert_eq!(files["since_head"].as_str().unwrap().len(), 12);
+    assert_eq!(files["paths"][2]["dirty_at_start"], true);
+    assert_eq!(files["paths"][3]["dirty_at_start"], false);
+    let text = env.ok(&["inspect", &id]);
+    assert!(text.contains("Files changed:   4 since HEAD "), "{text}");
+    assert!(text.contains(" at start, 1 already modified when the session started\n"), "{text}");
+    assert!(text.contains("  M tracked.txt\n") && text.contains("  ? pre-dirty.txt (modified at start)\n"), "{text}");
+    let plain = env.start_detached(&["sh", "-c", "true"]);
+    env.wait_status(&plain, "exited");
+    assert!(
+        env.inspect(&plain)["files_changed"].is_null() || env.inspect(&plain)["files_changed"]["count"].is_number()
+    );
 }
 
 #[test]
@@ -997,18 +1027,33 @@ fn fake_claude_running_hooks(env: &Env) -> String {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("claude");
     let script = r#"#!/usr/bin/env python3
-import json, subprocess, sys
+import datetime, json, os, subprocess, sys
 args = sys.argv[1:]
 sid = args[args.index("--session-id") + 1]
 hooks = json.loads(args[args.index("--settings") + 1])["hooks"]
+transcript = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), sid + ".jsonl")
 def fire(name, **fields):
     cmd = hooks[name][0]["hooks"][0]["command"]
-    payload = dict(hook_event_name=name, session_id=sid, transcript_path="/t/" + sid + ".jsonl", **fields)
+    payload = dict(hook_event_name=name, session_id=sid, transcript_path=transcript, **fields)
     r = subprocess.run(["sh", "-c", cmd], input=json.dumps(payload).encode(), capture_output=True)
     print("HOOK %s exit=%d stdout=%r" % (name, r.returncode, r.stdout.decode()), flush=True)
+def line(ts, req, inp, out, read, create):
+    usage = {"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": read, "cache_creation_input_tokens": create}
+    return json.dumps({"type": "assistant", "timestamp": ts, "requestId": req, "message": {"model": "claude-test-1", "usage": usage}})
+now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+with open(transcript, "w") as f:
+    f.write(line(now, "req_1", 2, 100, 500, 50) + "\n")
+    f.write(line(now, "req_1", 2, 100, 500, 50) + "\n")
+    f.write(line("2000-01-01T00:00:00.000Z", "req_0", 9, 9, 9, 9) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": now, "message": {"content": "the-secret-prompt"}}) + "\n")
+    f.write(line(now, "req_2", 3, 10, 600, 0) + "\n")
 fire("SessionStart", source="startup", model="haiku")
 fire("UserPromptSubmit", prompt="the-secret-prompt", permission_mode="default")
 fire("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+fire("PostToolUse", tool_name="Bash", tool_input={"command": "the-secret-command"})
+fire("PostToolUse", tool_name="Edit")
+fire("PostToolUseFailure", tool_name="Bash")
+fire("PostToolUse", tool_name="Bash")
 fire("Stop", last_assistant_message="the-secret-reply")
 "#;
     std::fs::write(&path, script).unwrap();
@@ -1027,10 +1072,23 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     for name in ["SessionStart", "UserPromptSubmit", "Notification", "Stop"] {
         assert!(out.contains(&format!("HOOK {name} exit=0 stdout=''")), "{out}");
     }
-    let agent = env.inspect(&id)["session"]["agent_session_id"].as_str().unwrap().to_string();
+    let info = env.inspect(&id);
+    let agent = info["session"]["agent_session_id"].as_str().unwrap().to_string();
     let hooks: Vec<_> = env.events(&id).into_iter().filter(|e| e["event_type"] == "agent.hook").collect();
     let names: Vec<_> = hooks.iter().map(|e| e["payload"]["hook_event_name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["SessionStart", "UserPromptSubmit", "Notification", "Stop"]);
+    assert_eq!(
+        names,
+        [
+            "SessionStart",
+            "UserPromptSubmit",
+            "Notification",
+            "PostToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PostToolUse",
+            "Stop"
+        ]
+    );
     for e in &hooks {
         assert_eq!(e["payload"]["agent"], "claude");
         assert_eq!(e["payload"]["session_id"], agent.as_str());
@@ -1038,10 +1096,65 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     assert_eq!(hooks[0]["payload"]["source"], "startup");
     assert_eq!(hooks[2]["payload"]["notification_type"], "permission_prompt");
     assert_eq!(hooks[2]["payload"]["message"], "Claude needs your permission");
+    assert_eq!(hooks[3]["payload"]["tool_name"], "Bash");
+    assert!(hooks[3]["payload"]["tool_input"].is_null());
     let all = env.ok(&["export", &id, "--format", "jsonl"]);
-    assert!(!all.contains("the-secret-prompt") && !all.contains("the-secret-reply"));
+    for secret in ["the-secret-prompt", "the-secret-reply", "the-secret-command"] {
+        assert!(!all.contains(secret), "{secret}");
+    }
     let db = std::fs::read(env.db()).unwrap();
     assert!(!db.windows(17).any(|w| w == b"the-secret-prompt"));
+
+    let tools = &info["tool_calls"];
+    assert_eq!((tools["count"].as_u64(), tools["failed"].as_u64()), (Some(4), Some(1)), "{tools}");
+    assert_eq!(tools["source"], "claude hooks");
+    let by: Vec<(String, u64, u64)> = tools["by_tool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["tool"].as_str().unwrap().into(), c["count"].as_u64().unwrap(), c["failed"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(by, [("Bash".to_string(), 3, 1), ("Edit".to_string(), 1, 0)]);
+    let tokens = &info["tokens"];
+    assert_eq!(tokens["source"], "claude transcript", "{tokens}");
+    assert_eq!(
+        tokens["transcript_path"].as_str().unwrap(),
+        env.path().join("hookbin").join(format!("{agent}.jsonl")).to_str().unwrap()
+    );
+    let n = |k: &str| tokens[k].as_u64().unwrap();
+    assert_eq!(
+        (
+            n("api_calls"),
+            n("input"),
+            n("output"),
+            n("cache_read"),
+            n("cache_creation"),
+            n("total"),
+            n("outside_session")
+        ),
+        (2, 5, 110, 1100, 50, 1265, 1)
+    );
+    assert_eq!(tokens["models"], serde_json::json!(["claude-test-1"]));
+    let unavailable = info["unavailable"].as_array().unwrap();
+    assert!(!unavailable.iter().any(|u| u == "tokens" || u == "tool_calls"), "{unavailable:?}");
+    assert!(unavailable.iter().any(|u| u == "cost"));
+    let text = env.ok(&["inspect", &id]);
+    assert!(text.contains("Tool calls:      4 (1 failed; claude hooks: Bash 3, Edit 1)"), "{text}");
+    assert!(
+        text.contains("Tokens:          input 5, output 110, cache read 1100, cache write 50 (2 API calls, claude-test-1; claude transcript; 1 line outside the session skipped)"),
+        "{text}"
+    );
+    assert!(text.contains("Cost:            unavailable (no price table)"), "{text}");
+
+    std::fs::remove_file(tokens["transcript_path"].as_str().unwrap()).unwrap();
+    let gone = env.inspect(&id);
+    assert!(gone["tokens"].is_null());
+    assert!(gone["unavailable"].as_array().unwrap().iter().any(|u| u == "tokens"));
+    assert!(
+        env.ok(&["inspect", &id]).contains("Tokens:          unavailable (opening "),
+        "{}",
+        env.ok(&["inspect", &id])
+    );
 }
 
 #[test]

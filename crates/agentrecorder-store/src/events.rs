@@ -71,7 +71,17 @@ pub enum Body {
     #[serde(rename = "terminal.notification")]
     TerminalNotification { source: NotificationSource, text: String },
     #[serde(rename = "git.snapshot")]
-    GitSnapshot { phase: GitPhase, head: Option<String>, dirty_paths: Option<u64> },
+    GitSnapshot {
+        phase: GitPhase,
+        head: Option<String>,
+        dirty_paths: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dirty: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed_paths: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<ChangedPath>,
+    },
     #[serde(rename = "runtime.warning")]
     RuntimeWarning(Notice),
     #[serde(rename = "runtime.error")]
@@ -159,6 +169,14 @@ pub enum NotificationSource {
 pub enum GitPhase {
     Start,
     Exit,
+}
+
+pub const GIT_MAX_PATHS: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedPath {
+    pub status: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,7 +280,25 @@ mod tests {
             Body::TerminalResized { rows: 50, cols: 132 },
             Body::TerminalSnapshot { rows: 24, cols: 80, reason: SnapshotReason::AfterDrop },
             Body::TerminalNotification { source: NotificationSource::Osc9, text: "done".into() },
-            Body::GitSnapshot { phase: GitPhase::Start, head: Some("abc".into()), dirty_paths: Some(2) },
+            Body::GitSnapshot {
+                phase: GitPhase::Start,
+                head: Some("abc".into()),
+                dirty_paths: Some(2),
+                dirty: vec!["a.rs".into(), "b.rs".into()],
+                changed_paths: None,
+                changed: Vec::new(),
+            },
+            Body::GitSnapshot {
+                phase: GitPhase::Exit,
+                head: Some("def".into()),
+                dirty_paths: Some(1),
+                dirty: vec!["a.rs".into()],
+                changed_paths: Some(2),
+                changed: vec![
+                    ChangedPath { status: "M".into(), path: "a.rs".into() },
+                    ChangedPath { status: "?".into(), path: "new.rs".into() },
+                ],
+            },
             Body::RuntimeWarning(Notice::new("events_dropped", "x").with("dropped_events", 3)),
             Body::RuntimeError(Notice::new("spawn_failed", "y")),
             Body::AgentHook(Box::new(AgentHook {

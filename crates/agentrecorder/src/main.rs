@@ -8,6 +8,7 @@ mod procinfo;
 mod render;
 mod sanitize;
 mod state;
+mod transcript;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

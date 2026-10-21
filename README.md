@@ -1,23 +1,25 @@
 # agentrecorder
 
-Run it. Inspect it. Recover it. Replay it.
+A flight recorder for coding agents.
 
-A flight recorder for coding agents. When an agent misbehaves, the output has already scrolled away; after a crash or a reboot, nothing says what survived. `agentrecorder` runs the agent, records every byte it prints with timing, and answers what happened afterwards:
+When an agent misbehaves, the output has already scrolled away. After a crash or a reboot, nothing says what survived. When someone asks what the agent did, there is nothing to show. `agentrecorder` runs the agent, records every byte it prints with timing, and answers afterwards:
 
-- **Run.** The agent keeps running when you close the tab, lose SSH or your client crashes. Reattach from any terminal and the screen comes back.
-- **Inspect.** Process tree, CPU, memory, time since the last output, git HEAD before and after, command and failure counts when the shell emits OSC 133 marks, and for Claude Code whether the agent is working, idle or waiting for you, as reported by its hooks. Measured or reported values only; anything else is marked `unavailable`.
-- **Recover.** After a crash or reboot it states what is left (a live process, an exit code and the last screen, or only the recording) and offers the agent's own resume command. It never restarts anything on its own.
 - **Replay.** Play the session back with its original timing, or export it as asciicast. Replay renders recorded bytes; it never re-executes a command.
+- **Inspect.** Tool calls and token usage from the agent's hooks and transcript, files changed in the git work tree, process tree, CPU, memory, time since the last output, command and failure counts when the shell emits OSC 133 marks, and for Claude Code whether the agent is working, idle or waiting for you. Measured or reported values only; anything else is marked `unavailable`.
+- **Share.** Bundle a session into a dashboard that opens offline, with a hash chain over every event. Anchors streamed to a third party while the session ran let a reviewer verify that nothing was edited afterwards.
+- **Recover.** After a crash or reboot it states what is left (a live process, an exit code and the last screen, or only the recording) and offers the agent's own resume command. It never restarts anything on its own.
+- **Run.** The supervisor keeps the agent running when you close the tab, lose SSH or your client crashes; reattach from any terminal and the screen comes back. tmux, Zellij or the agent's own background mode cover this part too; the recording is what they lack.
 
 Works with Claude Code, Codex CLI, Gemini CLI, OpenCode and any other program, inside the terminal you already use. One binary, a local SQLite file, no daemon to configure, no account.
 
 ## When to use it
 
-- You need to review what an agent did after the fact: a timed recording, markers, exit status, git HEAD before and after, and a JSON Lines or asciicast export.
-- You run agents without tmux, or several agents at once, and want each one isolated in its own supervisor.
+- You need to review what an agent did after the fact: a timed recording, markers, exit status, tool calls, tokens, files changed, git HEAD before and after, and a JSON Lines or asciicast export.
+- You need to show a session to someone else, such as an interviewer or a pull request reviewer, and they need to trust that it was not edited.
 - You build tooling that needs a machine-readable event stream of a terminal session.
+- You run agents without tmux, or several agents at once, and want each one isolated in its own supervisor.
 
-If an agent only has to survive a closed tab, tmux, Zellij or the agent's own background mode already do that, and `agentrecorder` adds little. Claude Code has the deepest integration (exact resume, agent state from hooks); Codex CLI, Gemini CLI and OpenCode resume their most recent session, which can be a different conversation.
+If an agent only has to survive a closed tab, tmux, Zellij or the agent's own background mode already do that, and `agentrecorder` adds little. Claude Code has the deepest integration (exact resume, agent state, tool calls and tokens from its hooks and transcript); Codex CLI, Gemini CLI and OpenCode are recorded the same way but resume their most recent session, which can be a different conversation, and report no hook events unless their hooks are configured by hand.
 
 ## Install
 
@@ -56,7 +58,7 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `sessions` | List sessions and their status |
 | `attach ID`, `detach ID` | Connect this terminal to a session, or disconnect the attached one |
 | `mark ID [LABEL]` | Mark a moment in a running session; `replay --from-mark` starts there |
-| `inspect ID` | Measured process, terminal and git data; `--json` for scripts |
+| `inspect ID` | Measured process, terminal, git, tool call and token data; `--json` for scripts |
 | `recover ID` | Reattach if alive; otherwise report what is left and offer `--restart` or `--resume` |
 | `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |

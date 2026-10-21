@@ -1,6 +1,10 @@
-use agentrecorder_store::{format_rfc3339, kind, now_unix_ns};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use agentrecorder_store::{AgentHook, Body, ChangedPath, GIT_MAX_PATHS, GitPhase, format_rfc3339, kind, now_unix_ns};
 use agentrecorder_supervisor::Layout;
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::agent_state;
@@ -8,6 +12,104 @@ use crate::fmt;
 use crate::procinfo::{self, ProcNode};
 use crate::state;
 use crate::state::{duration_ms, open_and_resolve, program};
+use crate::transcript;
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ToolCalls {
+    pub count: u64,
+    pub failed: u64,
+    pub source: String,
+    pub by_tool: Vec<ToolCount>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ToolCount {
+    pub tool: String,
+    pub count: u64,
+    pub failed: u64,
+}
+
+pub fn tool_calls<'a>(hooks: impl IntoIterator<Item = &'a AgentHook>) -> Option<ToolCalls> {
+    let mut by: BTreeMap<String, ToolCount> = BTreeMap::new();
+    let mut out = ToolCalls::default();
+    for h in hooks {
+        let failed = match h.hook_event_name.as_str() {
+            "PostToolUse" => false,
+            "PostToolUseFailure" => true,
+            _ => continue,
+        };
+        let tool = h.tool_name.clone().unwrap_or_else(|| "(unnamed)".into());
+        let e = by.entry(tool.clone()).or_insert_with(|| ToolCount { tool, ..ToolCount::default() });
+        e.count += 1;
+        out.count += 1;
+        if failed {
+            e.failed += 1;
+            out.failed += 1;
+        }
+        out.source = format!("{} hooks", h.agent);
+    }
+    if out.count == 0 {
+        return None;
+    }
+    out.by_tool = by.into_values().collect();
+    out.by_tool.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tool.cmp(&b.tool)));
+    Some(out)
+}
+
+#[derive(Debug, Serialize)]
+pub struct FilesChanged {
+    pub count: u64,
+    pub since_head: String,
+    pub already_dirty_at_start: u64,
+    pub capped: bool,
+    pub paths: Vec<FileChange>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileChange {
+    pub status: String,
+    pub path: String,
+    pub dirty_at_start: bool,
+}
+
+pub fn files_changed(snapshots: &[Body]) -> Result<FilesChanged, &'static str> {
+    let find = |want: GitPhase| {
+        snapshots.iter().find_map(|b| match b {
+            Body::GitSnapshot { phase, head, dirty, changed_paths, changed, .. } if *phase == want => {
+                Some((head, dirty, changed_paths, changed))
+            }
+            _ => None,
+        })
+    };
+    let Some((start_head, start_dirty, _, _)) = find(GitPhase::Start) else {
+        return Err("no git snapshot at start");
+    };
+    let Some((_, _, changed_paths, changed)) = find(GitPhase::Exit) else {
+        return Err("no git snapshot at exit (session still running, or lost)");
+    };
+    let (Some(count), Some(head)) = (changed_paths, start_head) else {
+        return Err("no HEAD at start to compare against");
+    };
+    let paths: Vec<FileChange> = changed
+        .iter()
+        .map(|ChangedPath { status, path }| FileChange {
+            status: status.clone(),
+            path: path.clone(),
+            dirty_at_start: start_dirty.binary_search(path).is_ok(),
+        })
+        .collect();
+    Ok(FilesChanged {
+        count: *count,
+        since_head: head.chars().take(12).collect(),
+        already_dirty_at_start: paths.iter().filter(|p| p.dirty_at_start).count() as u64,
+        capped: *count as usize > GIT_MAX_PATHS || start_dirty.len() >= GIT_MAX_PATHS,
+        paths,
+    })
+}
+
+fn session_window(s: &agentrecorder_store::Session) -> (i64, i64) {
+    (s.started_at_ns.unwrap_or(s.created_at_ns), s.ended_at_ns.unwrap_or_else(now_unix_ns))
+}
 
 const RULE: &str = "----------------------------------------";
 
@@ -39,17 +141,50 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     let running = live.is_some_and(|l| !l.exited);
     let agent = agent_state::from_store(&store, &s.id, running)?;
     let resume = agent_state::resume_check(&store, &s, running, now_unix_ns())?;
+    let mut hooks: Vec<AgentHook> = Vec::new();
+    store.for_each_event(&s.id, Some(&[kind::AGENT_HOOK]), |e| {
+        if let Some(Body::AgentHook(h)) = e.body() {
+            hooks.push(*h);
+        }
+        Ok(())
+    })?;
+    let tools = tool_calls(&hooks);
+    let transcript = hooks.iter().rev().find_map(|h| h.transcript_path.clone().map(|p| (h.agent.clone(), p)));
+    let (win_from, win_to) = session_window(&s);
+    let tokens: Result<(String, String, transcript::Usage), String> = match &transcript {
+        None if hooks.is_empty() => Err("no agent hook events".into()),
+        None => Err("the agent hooks reported no transcript path".into()),
+        Some((agent, path)) => transcript::usage(Path::new(path), win_from, win_to)
+            .map(|u| (format!("{agent} transcript"), path.clone(), u))
+            .map_err(|e| format!("{e:#}")),
+    };
     let mut notifications: Vec<Value> = Vec::new();
     let mut git: Vec<Value> = Vec::new();
+    let mut snapshots: Vec<Body> = Vec::new();
     store.for_each_event(&s.id, Some(&[kind::TERMINAL_NOTIFICATION, kind::GIT_SNAPSHOT]), |e| {
         let entry = json!({"timestamp": format_rfc3339(e.ts_ns), "payload": e.payload});
         if e.kind == kind::GIT_SNAPSHOT {
+            snapshots.extend(e.body());
             git.push(entry)
         } else {
             notifications.push(entry)
         }
         Ok(())
     })?;
+    let files = files_changed(&snapshots);
+    let mut unavailable = vec!["model_latency", "cost"];
+    if commands.is_none() {
+        unavailable.extend(["commands", "failures"]);
+    }
+    if tools.is_none() {
+        unavailable.push("tool_calls");
+    }
+    if tokens.is_err() {
+        unavailable.push("tokens");
+    }
+    if files.is_err() {
+        unavailable.push("files_changed");
+    }
 
     if as_json {
         println!(
@@ -83,11 +218,21 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
                     "exit_unknown": unknown,
                     "source": "osc133",
                 })),
-                "unavailable": if commands.is_some() {
-                    json!(["tokens", "model_latency", "tool_calls", "cost"])
-                } else {
-                    json!(["commands", "failures", "tokens", "model_latency", "tool_calls", "cost"])
-                },
+                "tool_calls": tools,
+                "tokens": tokens.as_ref().ok().map(|(source, path, u)| json!({
+                    "source": source,
+                    "transcript_path": path,
+                    "api_calls": u.api_calls,
+                    "input": u.input,
+                    "output": u.output,
+                    "cache_read": u.cache_read,
+                    "cache_creation": u.cache_creation,
+                    "total": u.total(),
+                    "models": u.models,
+                    "outside_session": u.outside_session,
+                })),
+                "files_changed": files.as_ref().ok(),
+                "unavailable": unavailable,
             }))?
         );
         return Ok(0);
@@ -177,6 +322,25 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
         );
     }
     println!("Git:             {}", git_line(&git));
+    match &files {
+        Ok(f) => {
+            let mut line = format!("Files changed:   {} since HEAD {} at start", f.count, f.since_head);
+            if f.already_dirty_at_start > 0 {
+                line.push_str(&format!(", {} already modified when the session started", f.already_dirty_at_start));
+            }
+            if f.capped {
+                line.push_str(&format!(" (first {GIT_MAX_PATHS} paths recorded)"));
+            }
+            println!("{line}");
+            for p in f.paths.iter().take(10) {
+                println!("  {} {}{}", p.status, p.path, if p.dirty_at_start { " (modified at start)" } else { "" });
+            }
+            if f.paths.len() > 10 {
+                println!("  ... {} more in --json", f.paths.len() - 10);
+            }
+        }
+        Err(why) => println!("Files changed:   {na} ({why})"),
+    }
     println!();
     println!("RECORDING");
     println!("Output recorded: {}", if s.record_output { "yes" } else { "no (--no-record)" });
@@ -208,7 +372,30 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
             println!("Failures:        {na} (no OSC 133 command marks)");
         }
     }
-    println!("Tokens / cost:   {na} (not collected)");
+    match &tools {
+        Some(t) => {
+            let top: Vec<String> = t.by_tool.iter().take(8).map(|c| format!("{} {}", c.tool, c.count)).collect();
+            let more = if t.by_tool.len() > 8 { ", ..." } else { "" };
+            println!("Tool calls:      {} ({} failed; {}: {}{more})", t.count, t.failed, t.source, top.join(", "));
+        }
+        None => println!("Tool calls:      {na} (no PostToolUse hook events)"),
+    }
+    match &tokens {
+        Ok((source, _, u)) => {
+            let models = if u.models.is_empty() { String::new() } else { format!(", {}", u.models.join(" ")) };
+            let skipped = match u.outside_session {
+                0 => String::new(),
+                1 => "; 1 line outside the session skipped".to_string(),
+                n => format!("; {n} lines outside the session skipped"),
+            };
+            println!(
+                "Tokens:          input {}, output {}, cache read {}, cache write {} ({} API calls{models}; {source}{skipped})",
+                u.input, u.output, u.cache_read, u.cache_creation, u.api_calls
+            );
+        }
+        Err(why) => println!("Tokens:          {na} ({why})"),
+    }
+    println!("Cost:            {na} (no price table)");
     println!("Warnings:        {}", count_of(kind::RUNTIME_WARNING));
     println!("Errors:          {}", count_of(kind::RUNTIME_ERROR));
     for n in notices.iter().rev().take(5) {
@@ -251,5 +438,66 @@ fn git_line(git: &[Value]) -> String {
             }
             line
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hook(name: &str, tool: Option<&str>) -> AgentHook {
+        AgentHook {
+            agent: "claude".into(),
+            hook_event_name: name.into(),
+            tool_name: tool.map(str::to_string),
+            ..AgentHook::default()
+        }
+    }
+
+    #[test]
+    fn tool_calls_count_post_tool_use_per_tool_with_failures() {
+        let hooks = [
+            hook("SessionStart", None),
+            hook("PostToolUse", Some("Bash")),
+            hook("PostToolUse", Some("Edit")),
+            hook("PostToolUseFailure", Some("Bash")),
+            hook("PostToolUse", Some("Bash")),
+            hook("PostToolUse", None),
+            hook("Stop", None),
+        ];
+        let t = tool_calls(&hooks).unwrap();
+        assert_eq!((t.count, t.failed, t.source.as_str()), (5, 1, "claude hooks"));
+        let by: Vec<(String, u64, u64)> = t.by_tool.into_iter().map(|c| (c.tool, c.count, c.failed)).collect();
+        assert_eq!(by, [("Bash", 3, 1), ("(unnamed)", 1, 0), ("Edit", 1, 0)].map(|(t, c, f)| (t.to_string(), c, f)));
+        assert!(tool_calls(&[hook("SessionStart", None)]).is_none());
+    }
+
+    fn snapshot(phase: GitPhase, head: Option<&str>, dirty: &[&str], changed: Option<&[(&str, &str)]>) -> Body {
+        Body::GitSnapshot {
+            phase,
+            head: head.map(str::to_string),
+            dirty_paths: Some(dirty.len() as u64),
+            dirty: dirty.iter().map(|p| p.to_string()).collect(),
+            changed_paths: changed.map(|c| c.len() as u64),
+            changed: changed
+                .unwrap_or_default()
+                .iter()
+                .map(|(s, p)| ChangedPath { status: s.to_string(), path: p.to_string() })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn files_changed_marks_paths_that_were_dirty_at_start() {
+        let start = snapshot(GitPhase::Start, Some("abcdef0123456789"), &["pre.txt"], None);
+        let exit = snapshot(GitPhase::Exit, Some("abcdef0123456789"), &[], Some(&[("M", "a.rs"), ("?", "pre.txt")]));
+        let f = files_changed(&[start.clone(), exit]).unwrap();
+        assert_eq!((f.count, f.since_head.as_str(), f.already_dirty_at_start, f.capped), (2, "abcdef012345", 1, false));
+        assert_eq!(f.paths.iter().map(|p| p.dirty_at_start).collect::<Vec<_>>(), [false, true]);
+        assert_eq!(files_changed(&[start]).unwrap_err(), "no git snapshot at exit (session still running, or lost)");
+        assert_eq!(files_changed(&[]).unwrap_err(), "no git snapshot at start");
+        let no_head = snapshot(GitPhase::Start, None, &[], None);
+        let exit = snapshot(GitPhase::Exit, Some("a"), &[], None);
+        assert_eq!(files_changed(&[no_head, exit]).unwrap_err(), "no HEAD at start to compare against");
     }
 }
