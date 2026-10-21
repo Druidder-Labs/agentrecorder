@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.0](https://github.com/Druidder-Labs/agentrecorder/compare/v0.2.0...v0.3.0) (2026-10-21)
+
+
+### Features
+
+* **bundle:** verification panel, token totals and clearer verify results ([fba29b2](https://github.com/Druidder-Labs/agentrecorder/commit/fba29b227f87094ef79cd55fa6a93bbaf6d0729a))
+* **bundle:** write zip bundles and bind the hash chain to a reviewer token ([10af4b5](https://github.com/Druidder-Labs/agentrecorder/commit/10af4b5c15899c4f7488c6de5f03c01d1be7f589))
+* **inspect:** report tool calls, token usage and files changed ([89001ce](https://github.com/Druidder-Labs/agentrecorder/commit/89001ce7dae0d1d409d9f2410f478cbcec263b32))
+* **inspect:** split token usage per prompt with opt-in prompt text ([f1c17c6](https://github.com/Druidder-Labs/agentrecorder/commit/f1c17c6572bec73472bfa0b5967b78a3532713ee))
+
 ## [0.2.0](https://github.com/Druidder-Labs/agentrecorder/compare/v0.1.0...v0.2.0) (2026-10-21)
 
 
