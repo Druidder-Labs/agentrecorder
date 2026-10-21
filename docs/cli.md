@@ -16,7 +16,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `sessions [--json]` (alias `ls`) | List sessions and their status (see below) |
 | `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
 | `detach ID` | Detach whichever client is attached |
-| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded |
+| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded, and the agent state reported by its hooks |
 | `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise explain what was lost and offer an explicit restart (same command, working directory and recording cap) or the agent's resume command |
 | `replay ID [--speed N] [--from HH:MM:SS] [--max-idle S] [--instant] [--raw]` | Play back recorded output; never re-executes commands |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
@@ -61,9 +61,22 @@ Claude Code rejects a `--session-id` that was already used (`Session ID ... is a
 
 ### Hooks
 
-For the same `claude` commands, `run` also inserts `--settings '<json>'` with command hooks for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `Stop`, `StopFailure` and `SessionEnd`. Each hook runs `agentrecorder hook --agent claude` with a 5 s timeout. Hooks passed with `--settings` are added to the user's own hooks for that run; nothing is written to the user's settings files. Hooks are not inserted when the arguments already contain `--settings` (a second one would replace either the user's or agentrecorder's), ask for `--help` or `--version`, or name a subcommand. They are inserted with `--resume` and `--continue`.
+For the same `claude` commands, `run` also inserts `--settings '<json>'` with command hooks for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure` and `SessionEnd`. Each hook runs `agentrecorder hook --agent claude` with a 5 s timeout. Hooks passed with `--settings` are added to the user's own hooks for that run; nothing is written to the user's settings files. Hooks are not inserted when the arguments already contain `--settings` (a second one would replace either the user's or agentrecorder's), ask for `--help` or `--version`, or name a subcommand. They are inserted with `--resume` and `--continue`.
 
 `agentrecorder hook` reads the event JSON from stdin and sends it to the supervisor of the session named by `AGENTRECORDER_SESSION`, which every managed process inherits. It records only `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message` and `tool_name`, each with a length cap. The prompt, tool input and assistant reply are never recorded. It exits 0 and prints nothing on stdout in every case, including outside a session, so it never changes what the agent does; errors go to stderr.
+
+### Agent state
+
+`inspect` shows `Agent state` (`agent_state` in `--json`) from the last `agent.hook` event that changes it, with the source, the event and its age. It is never inferred from screen output or inactivity.
+
+| Hook event | State |
+| --- | --- |
+| `SessionStart`, `Stop`, `StopFailure` | `idle` |
+| `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | `working` |
+| `PermissionRequest`, `Notification` with `notification_type` `permission_prompt` | `needs_input` |
+| `SessionEnd` | `ended` |
+
+Other events leave the state unchanged. When the process is no longer running and no `SessionEnd` arrived, the state is `ended` with the source `<agent> hooks and session status`. Without hook events the state is `unavailable`. Claude Code fires no hook when a permission prompt is dismissed with Esc or a turn is interrupted, so the state stays `needs_input` or `working` until the next hook; the age shows how old the evidence is.
 
 The command is agent-neutral: another agent's command hook can call `agentrecorder hook --agent <name>` if it passes the same fields. Installing hooks for Codex CLI, Gemini CLI or OpenCode is not automated and has not been tested.
 

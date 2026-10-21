@@ -1,8 +1,9 @@
-use agentrecorder_store::{format_rfc3339, kind};
+use agentrecorder_store::{format_rfc3339, kind, now_unix_ns};
 use agentrecorder_supervisor::Layout;
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use crate::agent_state;
 use crate::fmt;
 use crate::procinfo::{self, ProcNode};
 use crate::state;
@@ -23,6 +24,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
         Ok(())
     })?;
     let tree = live.and_then(|l| procinfo::sample_tree(l.child_pid as u32));
+    let agent = agent_state::from_store(&store, &s.id, live.is_some_and(|l| !l.exited))?;
     let mut notifications: Vec<Value> = Vec::new();
     let mut git: Vec<Value> = Vec::new();
     store.for_each_event(&s.id, Some(&[kind::TERMINAL_NOTIFICATION, kind::GIT_SNAPSHOT]), |e| {
@@ -49,6 +51,13 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
                 "notices": notices,
                 "notifications": notifications,
                 "git": git,
+                "agent_state": agent.as_ref().map(|a| json!({
+                    "state": a.state,
+                    "source": a.source,
+                    "event": a.event,
+                    "detail": a.detail,
+                    "timestamp": format_rfc3339(a.at_ns),
+                })),
                 "unavailable": ["commands", "failures", "tokens", "model_latency", "tool_calls", "cost"],
             }))?
         );
@@ -78,6 +87,14 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     }
     if let Some(a) = &s.agent_session_id {
         println!("Agent session:   {a}");
+    }
+    match &agent {
+        Some(a) => {
+            let ago = fmt::duration_ms((now_unix_ns() - a.at_ns) / 1_000_000);
+            let detail = a.detail.as_ref().map(|d| format!(" {d}")).unwrap_or_default();
+            println!("Agent state:     {} ({}: {}{detail}, {ago} ago)", a.state.as_str(), a.source, a.event);
+        }
+        None => println!("Agent state:     {na} (no agent hook events)"),
     }
     println!();
     println!("PROCESS");
@@ -146,7 +163,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     println!("EXECUTION");
     println!("Commands:        {na} (no shell or agent integration)");
     println!("Failures:        {na} (no shell or agent integration)");
-    println!("Tokens / cost:   {na} (no agent integration)");
+    println!("Tokens / cost:   {na} (not collected)");
     println!("Warnings:        {}", count_of(kind::RUNTIME_WARNING));
     println!("Errors:          {}", count_of(kind::RUNTIME_ERROR));
     for n in notices.iter().rev().take(5) {

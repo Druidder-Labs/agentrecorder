@@ -1065,3 +1065,59 @@ fn the_hook_command_never_fails_the_agent() {
     assert_eq!(hooks, 1);
     env.ok(&["stop", &id]);
 }
+
+fn fake_claude_that_stays(env: &Env) -> String {
+    let dir = env.path().join("statebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("claude");
+    let script = r#"#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+args = sys.argv[1:]
+hooks = json.loads(args[args.index("--settings") + 1])["hooks"]
+events = [a for a in args if a[:1].isupper()]
+for spec in events:
+    name, _, ntype = spec.partition(":")
+    payload = {"hook_event_name": name, "session_id": "s"}
+    if ntype:
+        payload["notification_type"] = ntype
+    subprocess.run(["sh", "-c", hooks[name][0]["hooks"][0]["command"]], input=json.dumps(payload).encode())
+print("FIRED", " ".join(events), flush=True)
+time.sleep(60)
+"#;
+    std::fs::write(&path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn agent_state_follows_hook_events_and_ends_with_the_process() {
+    let env = Env::new();
+    let claude = fake_claude_that_stays(&env);
+    let cases: [(&[&str], &str, &str); 4] = [
+        (&["SessionStart"], "idle", "SessionStart"),
+        (&["SessionStart", "UserPromptSubmit"], "working", "UserPromptSubmit"),
+        (&["UserPromptSubmit", "PermissionRequest", "Notification:permission_prompt"], "needs_input", "Notification"),
+        (&["UserPromptSubmit", "PermissionRequest", "PostToolUse"], "working", "PostToolUse"),
+    ];
+    for (events, want, event) in cases {
+        let mut cmd = vec![claude.as_str()];
+        cmd.extend_from_slice(events);
+        let id = env.start_detached(&cmd);
+        wait_for("hooks fired", || env.ok(&["replay", &id, "--instant"]).contains("FIRED"));
+        let info = env.inspect(&id);
+        assert_eq!(info["agent_state"]["state"], want, "{events:?}: {}", info["agent_state"]);
+        assert_eq!(info["agent_state"]["event"], event);
+        assert_eq!(info["agent_state"]["source"], "claude hooks");
+        let text = env.ok(&["inspect", &id]);
+        assert!(text.contains(&format!("Agent state:     {want} (claude hooks: {event}")), "{text}");
+        env.ok(&["stop", &id]);
+        let after = env.inspect(&id);
+        assert_eq!(after["agent_state"]["state"], "ended", "{}", after["agent_state"]);
+        assert_eq!(after["agent_state"]["source"], "claude hooks and session status");
+    }
+    let plain = env.start_detached(&["sh", "-c", "echo no-agent"]);
+    env.wait_status(&plain, "exited");
+    assert!(env.inspect(&plain)["agent_state"].is_null());
+    assert!(env.ok(&["inspect", &plain]).contains("Agent state:     unavailable (no agent hook events)"));
+}

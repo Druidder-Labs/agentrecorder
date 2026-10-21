@@ -1,4 +1,5 @@
 mod adapters;
+mod agent_state;
 mod attach;
 mod commands;
 mod fmt;

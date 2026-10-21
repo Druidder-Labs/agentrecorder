@@ -35,8 +35,17 @@ const CLAUDE_SUBCOMMANDS: &[&str] = &[
     "update",
 ];
 
-pub const CLAUDE_HOOK_EVENTS: &[&str] =
-    &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop", "StopFailure", "SessionEnd"];
+pub const CLAUDE_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "Notification",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+];
 const HOOK_TIMEOUT_S: u64 = 5;
 const HOOK_SUFFIX: &str = " hook --agent claude";
 
