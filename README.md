@@ -45,6 +45,7 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `run -- CMD...` | Start CMD in a supervised session and attach; `-d` starts it detached |
 | `sessions` | List sessions and their status |
 | `attach ID`, `detach ID` | Connect this terminal to a session, or disconnect the attached one |
+| `mark ID [LABEL]` | Mark a moment in a running session; `replay --from-mark` starts there |
 | `inspect ID` | Measured process, terminal and git data; `--json` for scripts |
 | `recover ID` | Reattach if alive; otherwise report what is left and offer `--restart` or `--resume` |
 | `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |

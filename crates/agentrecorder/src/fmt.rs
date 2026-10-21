@@ -12,6 +12,12 @@ pub fn duration_ms(ms: i64) -> String {
     }
 }
 
+pub fn offset_ms(ms: i64) -> String {
+    let tenths = ms.max(0) / 100;
+    let (s, t) = (tenths / 10, tenths % 10);
+    format!("{:02}:{:02}:{:02}.{t}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut v = n as f64;
@@ -53,6 +59,13 @@ pub fn parse_age(s: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offsets_round_trip_through_parse_offset() {
+        assert_eq!(offset_ms(312), "00:00:00.3");
+        assert_eq!(offset_ms(3_723_950), "01:02:03.9");
+        assert_eq!(parse_offset(&offset_ms(3_723_950)).unwrap(), 3_723_900_000_000);
+    }
 
     #[test]
     fn formats_and_parses() {

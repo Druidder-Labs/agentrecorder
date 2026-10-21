@@ -20,6 +20,7 @@ const CAST_KINDS: &[&str] = &[
     kind::SESSION_STOP_REQUESTED,
     kind::TERMINAL_NOTIFICATION,
     kind::PROCESS_EXITED,
+    kind::USER_MARK,
 ];
 
 #[derive(clap::Args)]
@@ -118,6 +119,8 @@ fn marker(e: &Event) -> Option<String> {
         Body::SessionDetached { reason, .. } => format!("detached ({})", reason.as_str()),
         Body::StopRequested { signal, .. } => format!("stop requested (signal {signal})"),
         Body::TerminalNotification { text, .. } => format!("notification: {text}"),
+        Body::UserMark { label } if label.is_empty() => "mark".into(),
+        Body::UserMark { label } => format!("mark: {label}"),
         _ => return None,
     })
 }

@@ -19,6 +19,7 @@ pub mod kind {
     pub const RUNTIME_ERROR: &str = "runtime.error";
     pub const AGENT_HOOK: &str = "agent.hook";
     pub const SHELL_COMMAND_FINISHED: &str = "shell.command_finished";
+    pub const USER_MARK: &str = "user.mark";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +80,8 @@ pub enum Body {
     AgentHook(Box<AgentHook>),
     #[serde(rename = "shell.command_finished")]
     ShellCommandFinished { exit_code: Option<i32> },
+    #[serde(rename = "user.mark")]
+    UserMark { label: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +208,7 @@ impl Body {
             Body::RuntimeError(_) => kind::RUNTIME_ERROR,
             Body::AgentHook(_) => kind::AGENT_HOOK,
             Body::ShellCommandFinished { .. } => kind::SHELL_COMMAND_FINISHED,
+            Body::UserMark { .. } => kind::USER_MARK,
         }
     }
 
@@ -271,6 +275,7 @@ mod tests {
             })),
             Body::ShellCommandFinished { exit_code: Some(2) },
             Body::ShellCommandFinished { exit_code: None },
+            Body::UserMark { label: "tests green".into() },
         ]
     }
 

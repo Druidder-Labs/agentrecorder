@@ -113,6 +113,17 @@ pub fn agent_hook(layout: &Layout, id: &str, event: agentrecorder_store::AgentHo
     control(layout, id, Control::AgentHook { event: Box::new(event) }).map(|_| ())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Marked {
+    pub label: String,
+    pub uptime_ms: u64,
+}
+
+pub fn mark(layout: &Layout, id: &str, label: &str) -> Result<Marked, ConnectError> {
+    serde_json::from_value(control(layout, id, Control::Mark { label: label.to_string() })?)
+        .map_err(|e| ConnectError::Rejected(format!("malformed mark reply: {e}")))
+}
+
 pub fn detach(layout: &Layout, id: &str) -> Result<bool, ConnectError> {
     let reply: DetachReply = serde_json::from_value(control(layout, id, Control::Detach)?)
         .map_err(|e| ConnectError::Rejected(format!("malformed detach reply: {e}")))?;

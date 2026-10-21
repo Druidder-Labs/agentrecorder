@@ -46,6 +46,7 @@ const MEMBER_POLL: Duration = Duration::from_millis(50);
 const NOTIFICATION_INTERVAL_MS: u64 = 1000;
 const GIT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_TERM: &str = "xterm-256color";
+const MAX_MARK_LABEL: usize = 256;
 
 pub struct Config {
     pub layout: Layout,
@@ -678,6 +679,11 @@ fn control(shared: &Arc<Shared>, c: Control) -> Frame {
             let had = term.client.is_some();
             shared.detach_client(&mut term, DetachReason::DetachRequested);
             Frame::Reply(serde_json::json!({"detached": had}))
+        }
+        Control::Mark { label } => {
+            let label: String = label.chars().filter(|c| !c.is_control()).take(MAX_MARK_LABEL).collect();
+            shared.recorder.event(Body::UserMark { label: label.clone() });
+            Frame::Reply(serde_json::json!({"label": label, "uptime_ms": shared.uptime_ms()}))
         }
         Control::AgentHook { event } => {
             let recorded = shared.recorder.best_effort(Body::AgentHook(event));

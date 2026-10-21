@@ -21,6 +21,13 @@ pub struct ReplayArgs {
     pub speed: f64,
     #[arg(long, help = "Start at an offset: seconds, MM:SS or HH:MM:SS")]
     pub from: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "from",
+        value_name = "N|LABEL",
+        help = "Start at a marker: its number (1 is the first) or its exact label"
+    )]
+    pub from_mark: Option<String>,
     #[arg(long, default_value_t = 3.0, help = "Cap idle gaps at this many seconds (0 keeps original gaps)")]
     pub max_idle: f64,
     #[arg(long, help = "Write all output immediately, without timing")]
@@ -43,7 +50,10 @@ pub fn replay(layout: &Layout, args: ReplayArgs) -> Result<i32> {
     if !s.record_output {
         bail!("session {} was started with --no-record; there is no output to replay", s.id);
     }
-    let from_ns = args.from.as_deref().map(fmt::parse_offset).transpose()?.unwrap_or(0);
+    let from_ns = match &args.from_mark {
+        Some(m) => mark_offset(&store, &s.id, m)?,
+        None => args.from.as_deref().map(fmt::parse_offset).transpose()?.unwrap_or(0),
+    };
     let max_idle_ns = (args.max_idle > 0.0).then_some((args.max_idle * 1e9) as i64);
 
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -71,7 +81,14 @@ pub fn replay(layout: &Layout, args: ReplayArgs) -> Result<i32> {
     let mut frames = 0u64;
     let mut resync_pending = false;
     let mut buf = Vec::with_capacity(64 << 10);
-    let kinds = [kind::TERMINAL_OUTPUT, kind::TERMINAL_RESIZED, kind::TERMINAL_SNAPSHOT, kind::RUNTIME_WARNING];
+    let kinds = [
+        kind::TERMINAL_OUTPUT,
+        kind::TERMINAL_RESIZED,
+        kind::TERMINAL_SNAPSHOT,
+        kind::RUNTIME_WARNING,
+        kind::USER_MARK,
+    ];
+    let mut marks_seen = marks_before(&store, &s.id, from_ns)?;
 
     let follow = Follow { layout, follow: args.follow, interrupted: &interrupted };
     follow
@@ -97,6 +114,14 @@ pub fn replay(layout: &Layout, args: ReplayArgs) -> Result<i32> {
                 Some(Body::TerminalResized { rows, cols }) => {
                     if tty {
                         eprintln!("\r\n[agentrecorder] the recorded terminal was resized to {cols}x{rows}\r");
+                    }
+                    return Ok(());
+                }
+                Some(Body::UserMark { label }) => {
+                    marks_seen += 1;
+                    if tty {
+                        let shown = if label.is_empty() { String::new() } else { format!(": {label}") };
+                        eprintln!("\r\n[agentrecorder] mark {marks_seen}{shown}\r");
                     }
                     return Ok(());
                 }
@@ -135,6 +160,34 @@ pub fn replay(layout: &Layout, args: ReplayArgs) -> Result<i32> {
         return Ok(130);
     }
     Ok(0)
+}
+
+pub fn marks(store: &agentrecorder_store::Store, id: &str) -> Result<Vec<(i64, String)>> {
+    let mut out = Vec::new();
+    store.for_each_event(id, Some(&[kind::USER_MARK]), |e| {
+        if let Some(Body::UserMark { label }) = e.body() {
+            out.push((e.mono_ns, label));
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn marks_before(store: &agentrecorder_store::Store, id: &str, from_ns: i64) -> Result<u64> {
+    Ok(marks(store, id)?.iter().filter(|(t, _)| *t < from_ns).count() as u64)
+}
+
+fn mark_offset(store: &agentrecorder_store::Store, id: &str, wanted: &str) -> Result<i64> {
+    let all = marks(store, id)?;
+    if all.is_empty() {
+        bail!("session {id} has no markers; add one with `agentrecorder mark {id} LABEL` while it runs");
+    }
+    let by_label = all.iter().find(|(_, l)| l == wanted);
+    let by_index = wanted.parse::<usize>().ok().filter(|n| *n >= 1).and_then(|n| all.get(n - 1));
+    match by_label.or(by_index) {
+        Some((t, _)) => Ok((*t).max(1)),
+        None => bail!("no marker {wanted:?} in session {id}; it has {} (see `agentrecorder inspect {id}`)", all.len()),
+    }
 }
 
 struct Clock {

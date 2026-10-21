@@ -35,6 +35,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
         }
         Ok(())
     })?;
+    let marks = super::replay::marks(&store, &s.id)?;
     let running = live.is_some_and(|l| !l.exited);
     let agent = agent_state::from_store(&store, &s.id, running)?;
     let resume = agent_state::resume_check(&store, &s, running, now_unix_ns())?;
@@ -72,6 +73,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
                     "detail": a.detail,
                     "timestamp": format_rfc3339(a.at_ns),
                 })),
+                "markers": marks
+                    .iter()
+                    .map(|(t, label)| json!({"offset_ms": t / 1_000_000, "label": label}))
+                    .collect::<Vec<_>>(),
                 "commands": commands.map(|(count, failed, unknown)| json!({
                     "count": count,
                     "failed": failed,
@@ -181,6 +186,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
         count_of(kind::TERMINAL_OUTPUT),
         fmt::bytes(bytes_of(kind::TERMINAL_OUTPUT) as u64)
     );
+    println!("Markers:         {}", marks.len());
+    for (i, (t, label)) in marks.iter().enumerate().take(10) {
+        println!("  {} at {} {label}", i + 1, fmt::offset_ms(t / 1_000_000));
+    }
     println!("Attaches:        {}", count_of(kind::SESSION_ATTACHED));
     println!("Resizes:         {}", count_of(kind::TERMINAL_RESIZED));
     if let Some(v) = live {

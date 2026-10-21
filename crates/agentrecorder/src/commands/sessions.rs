@@ -72,6 +72,17 @@ pub fn attach(layout: &Layout, id: &str, detach_key: &str) -> Result<i32> {
     Ok(attach::report_outcome(&s.id, &outcome))
 }
 
+pub fn mark(layout: &Layout, id: &str, label: &str) -> Result<i32> {
+    let (_, s, st) = open_and_resolve(layout, id)?;
+    if st.live().is_none_or(|l| l.exited) {
+        bail!("session {} is {}; markers can only be added while it runs", s.id, st.label());
+    }
+    let m = client::mark(layout, &s.id, label)?;
+    let shown = if m.label.is_empty() { String::new() } else { format!(": {}", m.label) };
+    println!("marked session {} at {}{shown}", s.id, crate::fmt::offset_ms(m.uptime_ms as i64));
+    Ok(0)
+}
+
 pub fn detach(layout: &Layout, id: &str) -> Result<i32> {
     let (_, s, st) = open_and_resolve(layout, id)?;
     if st.live().is_none() {

@@ -1284,3 +1284,59 @@ fn follow_stops_on_interrupt_and_returns_immediately_for_finished_sessions() {
     assert!(lines.iter().any(|(_, l)| l.contains("session.created")), "{lines:?}");
     env.ok(&["stop", &id]);
 }
+
+#[test]
+fn markers_are_recorded_listed_exported_and_replayed_from() {
+    let env = Env::new();
+    let unmarked = env.start_detached(&["sh", "-c", "echo nothing"]);
+    let id = env.start_detached(&[
+        "sh",
+        "-c",
+        "echo step-a; sleep 0.7; echo step-b; sleep 0.7; echo step-c; sleep 0.7; echo step-d; sleep 1.2; echo final-line",
+    ]);
+    let seen = |needle: &str| {
+        wait_for(needle, || env.ok(&["replay", &id, "--instant"]).contains(needle));
+    };
+    seen("step-b");
+    assert!(env.ok(&["mark", &id, "first"]).contains(": first"));
+    seen("step-c");
+    env.ok(&["mark", &id]);
+    seen("step-d");
+    env.ok(&["mark", &id, "build\x1b done"]);
+    env.wait_status(&id, "exited");
+
+    let markers = env.inspect(&id)["markers"].as_array().unwrap().clone();
+    let labels: Vec<_> = markers.iter().map(|m| m["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["first", "", "build done"]);
+    let offsets: Vec<_> = markers.iter().map(|m| m["offset_ms"].as_i64().unwrap()).collect();
+    assert!(offsets.windows(2).all(|w| w[0] < w[1]), "{offsets:?}");
+    let text = env.ok(&["inspect", &id]);
+    assert!(text.contains("Markers:         3") && text.contains(" build done"), "{text}");
+
+    let cast = env.ok(&["export", &id, "--format", "asciicast-v3"]);
+    for m in [r#""m","mark: first""#, r#""m","mark""#, r#""m","mark: build done""#] {
+        assert!(cast.contains(m), "{m}: {cast}");
+    }
+
+    let timed = |args: &[&str]| {
+        let t = Instant::now();
+        let out = env.ok(args);
+        (t.elapsed(), out)
+    };
+    let (full, _) = timed(&["replay", &id]);
+    let (from_last, out) = timed(&["replay", &id, "--from-mark", "build done"]);
+    let (from_third, _) = timed(&["replay", &id, "--from-mark", "3"]);
+    assert!(out.contains("final-line"), "{out}");
+    assert!(full >= Duration::from_millis(3000), "{full:?}");
+    assert!(from_last < Duration::from_millis(2500) && from_third < Duration::from_millis(2500), "{from_last:?}");
+
+    for (args, err) in [
+        (vec!["replay", id.as_str(), "--from-mark", "nope"], "no marker \"nope\""),
+        (vec!["replay", unmarked.as_str(), "--from-mark", "1"], "has no markers"),
+        (vec!["mark", id.as_str(), "late"], "markers can only be added while it runs"),
+    ] {
+        let o = env.run(&args);
+        assert!(!o.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&o.stderr).contains(err), "{args:?}: {o:?}");
+    }
+}

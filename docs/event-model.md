@@ -51,6 +51,7 @@ Schema version: 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib
 | `runtime.warning` | `code`, `message`, code-specific fields | Codes: `events_dropped` (`dropped_events`, `dropped_bytes`), `recording_limit_reached` (`limit_bytes`), `stop_escalated` (`signal`), `input_dropped` (`bytes`). |
 | `runtime.error` | `code`, `message` | Codes: `spawn_failed`, `resize_failed`. |
 | `shell.command_finished` | `exit_code` | One per OSC 133 `D` mark that follows a `C` mark (see `cli.md`, Shell integration). `exit_code` is `null` when the mark carries none. Recorded best effort, like `agent.hook`. |
+| `user.mark` | `label` | Written by `agentrecorder mark` while the session runs; `label` may be empty. Listed by `inspect`, used by `replay --from-mark`, exported to asciicast as an `m` event `mark: LABEL`. |
 | `agent.hook` | `agent`, `hook_event_name`, and when the agent sent them `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message`, `tool_name` | Reported by the agent through `agentrecorder hook` (see `cli.md`, Agent integration) and not verified. Recorded best effort: dropped and counted like output when the recorder queue is near full. |
 
 A session that ends without `session.terminated` was lost: the supervisor was killed or the host stopped. `agentrecorder sessions` reports it as `lost`; `sessions --json` and `inspect` show `lost_reason` (`host_restarted` or `supervisor_terminated`).

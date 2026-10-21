@@ -32,6 +32,7 @@ pub enum Control {
     Stop { signal: i32, grace_ms: u64 },
     Detach,
     AgentHook { event: Box<AgentHook> },
+    Mark { label: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

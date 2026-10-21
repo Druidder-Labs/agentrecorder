@@ -53,6 +53,13 @@ enum Command {
     },
     #[command(about = "Detach whichever client is attached to a session")]
     Detach { session: String },
+    #[command(about = "Record a marker in a running session; replay --from-mark starts there")]
+    Mark {
+        #[arg(help = "Session id or a unique prefix of it")]
+        session: String,
+        #[arg(default_value = "", help = "Label shown by inspect, replay and asciicast export")]
+        label: String,
+    },
     #[command(about = "Show measured process, terminal and event data for a session")]
     Inspect {
         #[arg(help = "Session id or a unique prefix of it")]
@@ -143,6 +150,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Command::Sessions { json } => commands::sessions::list(&layout, json),
         Command::Attach { session, detach_key } => commands::sessions::attach(&layout, &session, &detach_key),
         Command::Detach { session } => commands::sessions::detach(&layout, &session),
+        Command::Mark { session, label } => commands::sessions::mark(&layout, &session, &label),
         Command::Inspect { session, json } => commands::inspect::inspect(&layout, &session, json),
         Command::Recover(args) => commands::recover::recover(&layout, args),
         Command::Replay(args) => commands::replay::replay(&layout, args),
