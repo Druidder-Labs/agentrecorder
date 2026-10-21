@@ -63,6 +63,10 @@ dd { margin: 0; word-break: break-all; }
 .bar .name { position: relative; padding: 0 6px; font-size: 12px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar .n { text-align: right; font-family: var(--mono); font-size: 12px; }
 .caveat { color: var(--muted); font-size: 12px; margin-top: 10px; }
+.vstatus { display: flex; flex-wrap: wrap; gap: 6px; }
+pre.cmdline { margin: 6px 0; padding: 8px 10px; background: var(--chip); border-radius: 6px; font-family: var(--mono); font-size: 12px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+ul.files { margin: 4px 0 0; padding: 0; list-style: none; max-height: 240px; overflow: auto; font-size: 12px; }
+ul.files li { word-break: break-all; }
 code { font-family: var(--mono); font-size: 12px; background: var(--chip); padding: 1px 4px; border-radius: 4px; }
 @media (max-width: 900px) {
   header, main { padding-left: 16px; padding-right: 16px; }
@@ -78,6 +82,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--chip); paddi
   <div class="cmd" id="cmd"></div>
 </header>
 <main>
+  <section class="panel"><h2>Verification</h2><div class="body" id="verify"></div></section>
   <section class="tiles" id="tiles"></section>
   <div class="grid">
     <div class="col">
@@ -176,13 +181,29 @@ const hooks = rows.filter(r => r.type === "agent.hook");
 const shell = rows.filter(r => r.type === "shell.command_finished");
 const failed = shell.filter(r => r.payload && r.payload.exit_code != null && r.payload.exit_code !== 0).length;
 const marks = rows.filter(r => r.type === "user.mark");
+const toolCalls = hooks.filter(h => h.payload.hook_event_name === "PostToolUse" || h.payload.hook_event_name === "PostToolUseFailure");
+const toolFailed = hooks.filter(h => h.payload.hook_event_name === "PostToolUseFailure").length;
+const edited = (M.fates.redacted || 0) + (M.fates.cut || 0);
+const usageHook = hooks.slice().reverse().find(h => h.payload.usage);
+const usage = usageHook ? usageHook.payload.usage : null;
+const bundleName = D.bundle_name || `agentrecorder-${S.id}`;
+document.getElementById("verify").append(
+  el("div", { class: "vstatus" },
+    el("span", { class: `pill ${M.chain.token_bound ? "ok" : "warn"}` }, M.chain.token_bound ? "chain bound to a reviewer token" : "not bound to a token"),
+    el("span", { class: `pill ${edited ? "warn" : "ok"}` }, edited ? `${M.fates.redacted || 0} events redacted, ${M.fates.cut || 0} cut` : "no events redacted or cut"),
+    el("span", { class: "pill" }, `${M.chain.events} events in the hash chain`)),
+  el("div", { class: "caveat" }, "This page cannot check itself. On a machine with agentrecorder, run:"),
+  el("pre", { class: "cmdline" }, `agentrecorder verify ${bundleName} --anchors anchors.jsonl${M.chain.token_bound ? " --token TOKEN" : ""}`),
+  el("div", { class: "caveat" }, "consistent: the files were not edited after bundling. anchored: the events up to the last anchor existed while the session ran, as the anchors you received show. token matched: the session was started with the token you issued. None of this shows what happened outside the recorded terminal."),
+);
 const exitText = S.exit_code != null ? `code ${S.exit_code}` : S.exit_signal != null ? `signal ${S.exit_signal}` : S.status;
 const exitClass = S.exit_code === 0 ? "ok" : "bad";
 const tiles = [
   ["Duration", dur(M.duration_ms), new Date(S.created_at_ns / 1e6).toISOString().replace("T", " ").slice(0, 19) + " UTC"],
   ["Exit", el("span", { class: `pill ${exitClass}` }, exitText), S.status],
   ["Commands", shell.length ? shell.length : "unavailable", shell.length ? `${failed} failed (OSC 133)` : "no OSC 133 marks"],
-  ["Agent events", hooks.length || "unavailable", hooks.length ? `${hooks.filter(h => h.payload.hook_event_name === "PreToolUse").length} tool calls` : "no agent hooks"],
+  ["Tool calls", hooks.length ? toolCalls.length : "unavailable", hooks.length ? `${toolFailed} failed, ${hooks.length} hook events` : "no agent hooks"],
+  ["Tokens", usage ? (usage.input + usage.output + usage.cache_read + usage.cache_creation).toLocaleString("en-US") : "unavailable", usage ? `${usage.output.toLocaleString("en-US")} output, ${usage.api_calls} API calls` : hooks.length ? "no usage summary in the hooks" : "no agent hooks"],
   ["Markers", marks.length, "user marks"],
   ["Edited for sharing", (M.fates.redacted || 0) + (M.fates.cut || 0), `${M.fates.redacted || 0} redacted, ${M.fates.cut || 0} cut`],
 ];
@@ -251,11 +272,19 @@ document.getElementById("session").append(kv([
   ["Recorder", `${M.generator.name} ${M.generator.version}`],
   ["Bundled", M.created_at],
 ]));
+const changed = gitPhase("exit")?.payload.changed || [];
+if (changed.length) {
+  const dirtyAtStart = new Set(gitPhase("start")?.payload.dirty || []);
+  const total = gitPhase("exit").payload.changed_paths;
+  document.getElementById("session").append(
+    el("div", { class: "caveat" }, `Changed since the start HEAD (${changed.length}${total > changed.length ? ` of ${total}` : ""}; status letter from git diff --name-status, ? untracked):`),
+    el("ul", { class: "files" }, changed.map(c => el("li", {}, el("span", { class: "mono" }, c.status), " ", c.path, dirtyAtStart.has(c.path) ? el("span", { class: "caveat" }, " (already modified at start)") : null))));
+}
 
 const agent = document.getElementById("agent");
 if (!hooks.length) {
   agent.append(el("div", {}, "No agent hook events. Claude Code reports them when started as ", el("code", {}, "agentrecorder run -- claude"), "."));
-  agent.append(el("div", { class: "caveat" }, "Tokens are read by agentrecorder inspect from the agent transcript and are not part of a bundle; cost and model latency are not collected."));
+  agent.append(el("div", { class: "caveat" }, "Tokens come from the agent transcript, summed by the Stop hook; cost and model latency are not collected."));
 } else {
   const by = {};
   for (const h of hooks) { const k = h.payload.tool_name ? `tool: ${h.payload.tool_name}` : h.payload.hook_event_name; by[k] = (by[k] || 0) + 1; }
@@ -264,7 +293,18 @@ if (!hooks.length) {
   agent.append(el("div", { class: "bars" }, top.map(([k, n]) => el("div", { class: "bar" },
     el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(100 * n / max).toFixed(1)}%` }), el("div", { class: "name" }, k)),
     el("div", { class: "n" }, n)))));
-  agent.append(el("div", { class: "caveat" }, "Counts of hook events by type and tool. Tokens are read by agentrecorder inspect from the agent transcript and are not part of a bundle; cost and model latency are not collected."));
+  if (usage) {
+    agent.append(el("div", { class: "caveat" }, `Tokens reported by the agent at ${usageHook.payload.hook_event_name}, summed from its transcript for this session${usage.outside_session ? ` (${usage.outside_session} transcript lines outside the session skipped)` : ""}:`),
+      kv([
+        ["Input", usage.input.toLocaleString("en-US")],
+        ["Output", usage.output.toLocaleString("en-US")],
+        ["Cache read", usage.cache_read.toLocaleString("en-US")],
+        ["Cache write", usage.cache_creation.toLocaleString("en-US")],
+        ["API calls", usage.api_calls],
+        ["Models", usage.models && usage.models.length ? usage.models.join(", ") : "unavailable"],
+      ]));
+  }
+  agent.append(el("div", { class: "caveat" }, `Counts of hook events by type and tool.${usage ? "" : " No token summary: the agent sent no Stop or SessionEnd hook with a readable transcript."} Cost and model latency are not collected.`));
 }
 
 const files = Object.entries(M.files).map(([name, f]) => [name, el("span", { class: "mono" }, `${f.sha256.slice(0, 16)}... ${f.bytes} B`)]);

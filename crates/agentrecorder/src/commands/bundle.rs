@@ -220,23 +220,34 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     } else {
         prepare_dir(&out, args.force)?;
     }
-    let (files, summary) = write_bundle(&store, &s, &items, &patterns, &cut_report, matches.len() as u64)?;
-    if args.zip {
+    let name = out.file_name().map_or_else(|| format!("agentrecorder-{}", s.id), |n| n.to_string_lossy().into_owned());
+    let (files, summary) = write_bundle(&store, &s, &name, &items, &patterns, &cut_report, matches.len() as u64)?;
+    let bytes: u64 = if args.zip {
         write_zip(&out, &files)?;
+        fs::metadata(&out).map(|m| m.len()).unwrap_or(0)
     } else {
         write_dir(&out, &files)?;
-    }
+        files.iter().map(|(_, b)| b.len() as u64).sum()
+    };
     if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(
-                &json!({"session": s.id, "path": out, "zip": args.zip, "summary": summary, "warnings": warnings})
+                &json!({"session": s.id, "path": out, "zip": args.zip, "bytes": bytes, "summary": summary, "warnings": warnings})
             )?
         );
         return Ok(0);
     }
     println!("wrote bundle for session {} to {}", s.id, out.display());
     println!("  {}", summary_line(&summary));
+    if args.zip {
+        println!(
+            "  {} in one zip file; send it to the reviewer, who checks it against the anchors received while the session ran",
+            crate::fmt::bytes(bytes)
+        );
+    } else {
+        println!("  {} in 5 files; send the directory, or run again with --zip for one file", crate::fmt::bytes(bytes));
+    }
     println!("  open it with: agentrecorder view {}", out.display());
     println!("  check it with: agentrecorder verify {}", out.display());
     Ok(0)
@@ -391,6 +402,9 @@ impl Source {
         if path.is_dir() {
             return Ok(Source::Dir(path.to_path_buf()));
         }
+        if !path.exists() {
+            bail!("{} does not exist; pass the bundle directory or zip file", path.display());
+        }
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let archive = ZipArchive::new(file)
             .with_context(|| format!("{} is neither a directory nor a zip file", path.display()))?;
@@ -536,6 +550,7 @@ type Files = Vec<(&'static str, String)>;
 fn write_bundle(
     store: &Store,
     s: &Session,
+    bundle_name: &str,
     items: &[Item],
     patterns: &[Regex],
     cut_report: &[Value],
@@ -607,7 +622,7 @@ fn write_bundle(
         mask_value(&mut manifest[field], patterns);
     }
     let manifest_text = serde_json::to_string_pretty(&manifest)? + "\n";
-    let data = json!({"manifest": manifest, "timeline": timeline, "cast": files[2].1});
+    let data = json!({"manifest": manifest, "timeline": timeline, "cast": files[2].1, "bundle_name": bundle_name});
     let html = dashboard(&data);
     files.push(("manifest.json", manifest_text));
     files.push(("index.html", html));
@@ -840,6 +855,9 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     let mut anchored = None;
     if let Some(path) = &args.anchors {
         let mut count = 0;
+        if !path.is_file() {
+            bail!("anchors file {} not found", path.display());
+        }
         let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         for (_, a) in parse_json_lines(&path.display().to_string(), &text)? {
             let seq = a["seq"].as_i64().unwrap_or(-1);
@@ -867,6 +885,22 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
         }
     }
 
+    let token_ok = token_bound && token_checked && !failures.iter().any(|f| f.starts_with("token:"));
+    let mut proves: Vec<&str> = Vec::new();
+    let mut gaps: Vec<&str> = Vec::new();
+    if failures.is_empty() {
+        proves.push("consistent");
+        if anchored.is_some() {
+            proves.push("anchored");
+        } else {
+            gaps.push("not anchored");
+        }
+        if token_ok {
+            proves.push("token matched");
+        } else if token_bound {
+            gaps.push("token not checked");
+        }
+    }
     if args.json {
         println!(
             "{}",
@@ -874,6 +908,8 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
                 "bundle": dir,
                 "session": session_id,
                 "ok": failures.is_empty(),
+                "proves": proves,
+                "gaps": gaps,
                 "events": entries.len(),
                 "kept": kept,
                 "redacted": redacted,
@@ -901,7 +937,11 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     match (&args.anchors, anchored) {
         (Some(_), Some(seq)) => {
             let tail = entries.len() as i64 - 1 - seq;
-            println!("anchors:  events 0-{seq} match the anchors; {tail} later events are not anchored");
+            if tail == 0 {
+                println!("anchors:  all {} events match the anchors", entries.len());
+            } else {
+                println!("anchors:  events 0-{seq} match the anchors; {tail} later events are not anchored");
+            }
         }
         (Some(_), None) => println!("anchors:  none matched"),
         (None, _) => println!(
@@ -909,7 +949,8 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
         ),
     }
     if failures.is_empty() {
-        println!("result:   ok");
+        let gaps = if gaps.is_empty() { String::new() } else { format!("; {}", gaps.join(", ")) };
+        println!("result:   ok: {}{gaps}", proves.join(", "));
         return Ok(0);
     }
     println!("result:   FAILED");
@@ -941,7 +982,7 @@ pub fn view(layout: &Layout, args: ViewArgs) -> Result<i32> {
         let dir = layout.view_dir(&s.id);
         prepare_dir(&dir, true)?;
         let items = load(&store, &s.id)?;
-        let (files, _) = write_bundle(&store, &s, &items, &[], &[], 0)?;
+        let (files, _) = write_bundle(&store, &s, &format!("agentrecorder-{}", s.id), &items, &[], &[], 0)?;
         write_dir(&dir, &files)?;
         dir.join("index.html")
     };

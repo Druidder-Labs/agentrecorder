@@ -1,6 +1,8 @@
 use std::io::Read;
 
-use agentrecorder_store::AgentHook;
+use std::path::Path;
+
+use agentrecorder_store::{AgentHook, HookUsage, Store, now_unix_ns};
 use agentrecorder_supervisor::{Layout, client};
 use serde_json::Value;
 
@@ -27,10 +29,31 @@ fn forward(args: &HookArgs) -> anyhow::Result<()> {
     };
     let mut input = Vec::new();
     std::io::stdin().take(MAX_INPUT).read_to_end(&mut input)?;
-    let event = parse(&args.agent, &input)?;
+    let mut event = parse(&args.agent, &input)?;
     let layout = Layout::from_env()?;
+    if SUMMARIZE_AT.contains(&event.hook_event_name.as_str())
+        && let Some(path) = event.transcript_path.as_deref()
+    {
+        event.usage = summarize(&layout, &id, Path::new(path));
+    }
     client::agent_hook(&layout, &id, event)?;
     Ok(())
+}
+
+const SUMMARIZE_AT: &[&str] = &["Stop", "SessionEnd"];
+
+fn summarize(layout: &Layout, id: &str, transcript: &Path) -> Option<HookUsage> {
+    let from_ns = Store::open(&layout.db_path()).ok()?.session(id).ok()??.created_at_ns;
+    let u = crate::transcript::usage(transcript, from_ns, now_unix_ns()).ok()?;
+    Some(HookUsage {
+        api_calls: u.api_calls,
+        input: u.input,
+        output: u.output,
+        cache_read: u.cache_read,
+        cache_creation: u.cache_creation,
+        models: u.models,
+        outside_session: u.outside_session,
+    })
 }
 
 fn is_session_id(v: &str) -> bool {
@@ -54,6 +77,7 @@ pub fn parse(agent: &str, input: &[u8]) -> anyhow::Result<AgentHook> {
         notification_type: text("notification_type", 64),
         message: text("message", MAX_TEXT),
         tool_name: text("tool_name", 128),
+        usage: None,
     })
 }
 

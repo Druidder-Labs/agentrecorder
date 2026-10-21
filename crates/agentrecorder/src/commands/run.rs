@@ -160,15 +160,19 @@ pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     if let Some(file) = &args.anchor {
         start_anchor(&started.id, file)?;
     }
+    let sharing = sharing_note(&args);
     if args.detached {
         println!("{}", started.id);
+        if !sharing.is_empty() {
+            eprintln!("[agentrecorder] session {}{sharing}", started.id);
+        }
         return Ok(0);
     }
     if started.finished {
         return print_finished(layout, &started.id);
     }
     eprintln!(
-        "[agentrecorder] session {} started{}; detach with {}",
+        "[agentrecorder] session {} started{}{sharing}; detach with {}",
         started.id,
         if args.no_record { " (output not recorded)" } else { " (recording output)" },
         key.label
@@ -177,6 +181,17 @@ pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         attach::Outcome::Ended => print_finished(layout, &started.id),
         outcome => Ok(attach::report_outcome(&started.id, &outcome)),
     }
+}
+
+fn sharing_note(args: &RunArgs) -> String {
+    let mut note = String::new();
+    if let Some(file) = &args.anchor {
+        note.push_str(&format!("; anchors -> {}", file.display()));
+    }
+    if args.anchor_token.is_some() {
+        note.push_str("; chain bound to a token");
+    }
+    note
 }
 
 fn start_anchor(id: &str, file: &PathBuf) -> Result<()> {

@@ -1099,6 +1099,21 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     assert_eq!(hooks[2]["payload"]["message"], "Claude needs your permission");
     assert_eq!(hooks[3]["payload"]["tool_name"], "Bash");
     assert!(hooks[3]["payload"]["tool_input"].is_null());
+    assert!(hooks[3]["payload"]["usage"].is_null());
+    let stop_usage = &hooks[7]["payload"]["usage"];
+    assert_eq!(
+        (
+            stop_usage["api_calls"].as_u64(),
+            stop_usage["input"].as_u64(),
+            stop_usage["output"].as_u64(),
+            stop_usage["cache_read"].as_u64(),
+            stop_usage["cache_creation"].as_u64(),
+            stop_usage["outside_session"].as_u64()
+        ),
+        (Some(2), Some(5), Some(110), Some(1100), Some(50), Some(1)),
+        "{stop_usage}"
+    );
+    assert_eq!(stop_usage["models"], serde_json::json!(["claude-test-1"]));
     let all = env.ok(&["export", &id, "--format", "jsonl"]);
     for secret in ["the-secret-prompt", "the-secret-reply", "the-secret-command"] {
         assert!(!all.contains(secret), "{secret}");
@@ -1795,7 +1810,11 @@ fn bundle_zip_holds_the_same_files_and_verify_and_view_read_it() {
     let out = env.run(&["bundle", &id, "--zip", "-o", dir.to_str().unwrap(), "--force"]);
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("is a directory"));
     let out = env.run(&["verify", env.path().join("missing.zip").to_str().unwrap()]);
-    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("opening"));
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("does not exist"));
+    let html = std::fs::read_to_string(&path).unwrap();
+    assert!(html.contains("Verification") && html.contains("\"bundle_name\":\"review.zip\""), "{path}");
+    let out = env.run(&["verify", zip_s, "--anchors", env.path().join("none.jsonl").to_str().unwrap()]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("anchors file"));
 }
 
 #[test]
@@ -1816,6 +1835,13 @@ fn anchor_token_binds_the_chain_and_verify_checks_it() {
         "echo a; sleep 0.3; echo b",
     ]);
     let id = out.trim().to_string();
+    let note = env
+        .command(&["run", "-d", "--anchor", "a2.jsonl", "--anchor-token", "t", "--", "true"])
+        .current_dir(env.path())
+        .output()
+        .unwrap();
+    let note = String::from_utf8_lossy(&note.stderr).into_owned();
+    assert!(note.contains("anchors -> a2.jsonl; chain bound to a token"), "{note}");
     env.wait_status(&id, "exited");
     wait_for("anchor file to be written", || std::fs::read_to_string(&file).is_ok_and(|s| s.contains("\"seq\"")));
     std::thread::sleep(Duration::from_millis(300));
@@ -1847,9 +1873,15 @@ fn anchor_token_binds_the_chain_and_verify_checks_it() {
         (v["ok"].as_bool(), v["token_bound"].as_bool(), v["token_checked"].as_bool()),
         (Some(true), Some(true), Some(true))
     );
+    assert_eq!(v["proves"], serde_json::json!(["consistent", "anchored", "token matched"]));
     assert_eq!(v["anchored_through_seq"], last["seq"]);
     let report = env.ok(&["verify", dir_s, "--anchors", file.to_str().unwrap()]);
-    assert!(report.contains("pass --token to check it") && report.contains("result:   ok"), "{report}");
+    assert!(report.contains("pass --token to check it") && report.contains("match the anchors"), "{report}");
+    assert!(report.contains("result:   ok: consistent, anchored; token not checked"), "{report}");
+    let report = env.ok(&["verify", dir_s, "--anchors", file.to_str().unwrap(), "--token", "invite-42"]);
+    assert!(report.contains("result:   ok: consistent, anchored, token matched"), "{report}");
+    let report = env.ok(&["verify", dir_s]);
+    assert!(report.contains("result:   ok: consistent; not anchored, token not checked"), "{report}");
     let out = env.run(&["verify", dir_s, "--token", "invite-43"]);
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stdout);

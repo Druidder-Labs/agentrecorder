@@ -240,6 +240,8 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     }
 
     let na = "unavailable";
+    let mut missing: Vec<String> = Vec::new();
+    let mut na_line = |label: &str, reason: &str| missing.push(format!("{label:<17}unavailable ({reason})"));
     println!("EXECUTION PROFILE");
     println!("{RULE}");
     println!("Session:         {}", s.id);
@@ -269,7 +271,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
             let detail = a.detail.as_ref().map(|d| format!(" {d}")).unwrap_or_default();
             println!("Agent state:     {} ({}: {}{detail}, {ago} ago)", a.state.as_str(), a.source, a.event);
         }
-        None => println!("Agent state:     {na} (no agent hook events)"),
+        None => na_line("Agent state:", "no agent hook events"),
     }
     if let Some(r) = &resume {
         println!("Resume:          {} ({})", r.verdict.as_str(), r.reason);
@@ -286,10 +288,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
             print_tree(t, 0);
         }
         None => {
-            let why = if live.is_some() { na } else { "unavailable (process not running)" };
-            println!("CPU:             {why}");
-            println!("Memory:          {why}");
-            println!("Child processes: {why}");
+            let why = if live.is_some() { "no sample" } else { "process not running" };
+            for label in ["CPU:", "Memory:", "Child processes:"] {
+                na_line(label, why);
+            }
         }
     }
     println!();
@@ -322,7 +324,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
             p["text"].as_str().unwrap_or("")
         );
     }
-    println!("Git:             {}", git_line(&git));
+    match git_line(&git) {
+        Some(line) => println!("Git:             {line}"),
+        None => na_line("Git:", "not a git work tree, or git not installed"),
+    }
     match &files {
         Ok(f) => {
             let mut line = format!("Files changed:   {} since HEAD {} at start", f.count, f.since_head);
@@ -340,7 +345,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
                 println!("  ... {} more in --json", f.paths.len() - 10);
             }
         }
-        Err(why) => println!("Files changed:   {na} ({why})"),
+        Err(why) => na_line("Files changed:", why),
     }
     println!();
     println!("RECORDING");
@@ -369,8 +374,8 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
             println!("Failures:        {failed} (non-zero exit code{unknown})");
         }
         None => {
-            println!("Commands:        {na} (no OSC 133 command marks; the shell has no integration enabled)");
-            println!("Failures:        {na} (no OSC 133 command marks)");
+            na_line("Commands:", "no OSC 133 command marks; the shell has no integration enabled");
+            na_line("Failures:", "no OSC 133 command marks");
         }
     }
     match &tools {
@@ -379,7 +384,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
             let more = if t.by_tool.len() > 8 { ", ..." } else { "" };
             println!("Tool calls:      {} ({} failed; {}: {}{more})", t.count, t.failed, t.source, top.join(", "));
         }
-        None => println!("Tool calls:      {na} (no PostToolUse hook events)"),
+        None => na_line("Tool calls:", "no PostToolUse hook events"),
     }
     match &tokens {
         Ok((source, _, u)) => {
@@ -394,22 +399,29 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
                 u.input, u.output, u.cache_read, u.cache_creation, u.api_calls
             );
         }
-        Err(why) => println!("Tokens:          {na} ({why})"),
+        Err(why) => na_line("Tokens:", why),
     }
     match &tokens {
         Ok((source, _, u)) if !u.interactions.is_empty() => {
             print_interactions(&u.interactions, win_from, prompts, source)
         }
         Ok((source, _, _)) => println!("Interactions:    0 (no prompts in the {source} during the session)"),
-        Err(_) => println!("Interactions:    {na} (no transcript)"),
+        Err(_) => na_line("Interactions:", "no transcript"),
     }
-    println!("Cost:            {na} (no price table)");
+    na_line("Cost:", "no price table");
     println!("Warnings:        {}", count_of(kind::RUNTIME_WARNING));
     println!("Errors:          {}", count_of(kind::RUNTIME_ERROR));
     for n in notices.iter().rev().take(5) {
         let code = n["payload"]["code"].as_str().unwrap_or("");
         let msg = n["payload"]["message"].as_str().unwrap_or("");
         println!("  {} {} {code} {msg}", n["timestamp"].as_str().unwrap_or(""), n["type"].as_str().unwrap_or(""));
+    }
+    if !missing.is_empty() {
+        println!();
+        println!("NOT MEASURED");
+        for line in &missing {
+            println!("{line}");
+        }
     }
     println!("{RULE}");
     Ok(0)
@@ -493,11 +505,11 @@ fn print_tree(node: &ProcNode, depth: usize) {
     }
 }
 
-fn git_line(git: &[Value]) -> String {
+fn git_line(git: &[Value]) -> Option<String> {
     let short = |v: &Value| v["payload"]["head"].as_str().map(|h| h.chars().take(12).collect::<String>());
     let phase = |p: &str| git.iter().find(|g| g["payload"]["phase"] == p);
     match (phase("start"), phase("exit")) {
-        (None, None) => "unavailable (not a git work tree, or git not installed)".into(),
+        (None, None) => None,
         (start, exit) => {
             let head = |v: Option<&Value>| v.and_then(short).unwrap_or_else(|| "-".into());
             let dirty = exit.or(start).and_then(|v| v["payload"]["dirty_paths"].as_u64());
@@ -506,7 +518,7 @@ fn git_line(git: &[Value]) -> String {
             if let Some(d) = dirty {
                 line.push_str(&format!(", {d} paths modified or untracked"));
             }
-            line
+            Some(line)
         }
     }
 }
