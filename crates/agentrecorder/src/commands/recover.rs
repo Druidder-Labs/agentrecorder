@@ -94,7 +94,7 @@ pub fn recover(layout: &Layout, args: RecoverArgs) -> Result<i32> {
 
 fn describe(store: &Store, s: &Session) -> Result<()> {
     println!();
-    println!("  Command:   {}", s.command.join(" "));
+    println!("  Command:   {}", adapters::display(&s.command));
     println!("  Directory: {}", s.cwd.as_deref().unwrap_or("unknown"));
     println!("  Created:   {}", format_rfc3339(s.created_at_ns));
     if let Some(e) = s.ended_at_ns {

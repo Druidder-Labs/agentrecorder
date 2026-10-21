@@ -71,7 +71,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     println!("EXECUTION PROFILE");
     println!("{RULE}");
     println!("Session:         {}", s.id);
-    println!("Command:         {}", s.command.join(" "));
+    println!("Command:         {}", crate::adapters::display(&s.command));
     println!("Program:         {}", program(&s));
     println!("Working dir:     {}", s.cwd.as_deref().unwrap_or(na));
     println!("Status:          {st}");

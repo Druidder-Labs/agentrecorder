@@ -138,6 +138,17 @@ pub fn claude_hook_settings(hook_program: &str) -> String {
     serde_json::json!({ "hooks": hooks }).to_string()
 }
 
+pub const HOOKS_PLACEHOLDER: &str = "<agentrecorder hooks>";
+
+pub fn display(argv: &[String]) -> String {
+    let mut out = Vec::with_capacity(argv.len());
+    for (i, a) in argv.iter().enumerate() {
+        let injected = i > 0 && argv[i - 1] == "--settings" && is_injected_settings(a);
+        out.push(if injected { HOOKS_PLACEHOLDER } else { a.as_str() });
+    }
+    out.join(" ")
+}
+
 fn is_injected_settings(value: &str) -> bool {
     let Ok(serde_json::Value::Object(top)) = serde_json::from_str::<serde_json::Value>(value) else { return false };
     let Some(serde_json::Value::Object(hooks)) = top.get("hooks").filter(|_| top.len() == 1) else { return false };
@@ -382,6 +393,16 @@ mod tests {
         assert_eq!(without_injected(&users, None), users);
         let file = v(&["claude", "--settings", "./settings.json"]);
         assert_eq!(without_injected(&file, None), file);
+    }
+
+    #[test]
+    fn display_abbreviates_only_injected_hook_settings() {
+        let ours = claude_hook_settings(HOOK);
+        let argv = v(&["claude", "--session-id", "x", "--settings", &ours, "--model", "haiku"]);
+        assert_eq!(display(&argv), "claude --session-id x --settings <agentrecorder hooks> --model haiku");
+        let users = v(&["claude", "--settings", "./mine.json", "-p", "hi"]);
+        assert_eq!(display(&users), "claude --settings ./mine.json -p hi");
+        assert_eq!(display(&v(&[&ours])), ours);
     }
 
     #[test]

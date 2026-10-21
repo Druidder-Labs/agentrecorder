@@ -941,7 +941,13 @@ fn claude_sessions_get_a_pre_assigned_id_used_for_exact_resume_and_fresh_on_rest
     let created = env.events(&id).into_iter().find(|e| e["event_type"] == "session.created").unwrap();
     assert_eq!(created["payload"]["agent_session_id"], agent.as_str());
     assert!(env.ok(&["replay", &id, "--instant"]).contains(&format!("--session-id {agent} --settings")));
-    assert!(env.ok(&["inspect", &id]).contains(&format!("Agent session:   {agent}")));
+    let text = env.ok(&["inspect", &id]);
+    assert!(text.contains(&format!("Agent session:   {agent}")));
+    assert!(text.contains(&format!("--session-id {agent} --settings <agentrecorder hooks> --model haiku")), "{text}");
+    assert!(!text.contains("hook --agent claude"), "{text}");
+    let described = env.ok(&["recover", &id]);
+    let line = described.lines().find(|l| l.trim_start().starts_with("Command:")).unwrap();
+    assert!(line.contains("--settings <agentrecorder hooks>") && !line.contains("hook --agent"), "{line}");
 
     let offer = env.ok(&["recover", &id]);
     assert!(offer.contains(&format!("run `env A=1 {claude} --resume {agent}`")), "{offer}");
