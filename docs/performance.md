@@ -50,6 +50,25 @@ The supervisor's ceiling on this machine is about 70 MiB/s with recording and 77
 
 The first ceiling run showed the pipe client receiving 49 to 141 KB fewer bytes than were recorded, in three runs of a 50 MiB file; v0.1.0 lost data the same way. `run` starts the process about 10 ms before its own client attaches, and the attach sent a screen snapshot with at most 1000 lines of history, so earlier output reached the recording but not the client. Since the fix, the supervisor of an attached `run` holds up to 4 MiB of output until the first attach and sends it instead of the snapshot. The rerun delivered 211,833,628 of 211,833,628 recorded bytes to the pipe client. Covered by `a_pipe_client_gets_output_produced_before_it_attached`.
 
+## Events table layout
+
+Measured on 2026-10-21 with `cargo run --release -p agentrecorder-store --example layout_bench`, median of three runs. Three sessions per database, with the store's pragmas (WAL, `synchronous=NORMAL`, `secure_delete=ON`, incremental auto-vacuum) and batches of 512 events per transaction. Reads, scans and deletes act on the middle session.
+
+| Workload | Layout | Insert, 3 sessions | Read one session | Kind scan | Delete one session | DB size | After delete |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3,200 output events of 64 KiB per session | `WITHOUT ROWID`, primary key `(session_id, seq)` (current) | 1.887 s | 0.044 s | 0.023 s | 0.907 s | 622.9 MB | 415.3 MB |
+| | rowid table, unique index `(session_id, seq)` | 1.367 s | 0.025 s | 0.000 s | 0.851 s | 622.8 MB | 415.2 MB |
+| | `WITHOUT ROWID` metadata, blobs in a rowid side table | 1.378 s | 0.026 s | 0.000 s | 0.861 s | 623.0 MB | 415.4 MB |
+| 200,000 output events of 200 bytes per session | current | 0.971 s | 0.023 s | 0.011 s | 0.344 s | 193.4 MB | 128.9 MB |
+| | rowid table, unique index | 0.961 s | 0.026 s | 0.001 s | 0.358 s | 190.6 MB | 127.2 MB |
+| | blobs in a side table | 0.980 s | 0.025 s | 0.006 s | 0.351 s | 183.8 MB | 122.5 MB |
+
+Decision: keep the current layout. With 64 KiB blobs it inserts 38 percent slower and reads 76 percent slower than a rowid table, as SQLite's `withoutrowid.html` predicts for large rows, but its slowest rate here is about 325 MiB/s of inserts and 4.5 GiB/s of reads, against a supervisor ceiling of about 70 MiB/s (see Throughput ceiling) and a replay that is bound by the terminal. With small events it is 1 percent faster to insert and at most 5 percent larger. A switch would need a schema migration that rewrites every recorded event. Revisit when the supervisor ceiling approaches the store's insert rate.
+
+### Space returned by `rm` and `prune`
+
+The measurement found that `rm`, `prune` and retention do not shrink `state.db`. `Store::checkpoint` runs `PRAGMA incremental_vacuum` through `execute_batch`, which steps the statement once, and the pragma frees one page per step. After `rm` of a 60 MB session the file stayed at 62 MB with 15,142 free pages; the `sqlite3` shell, which steps to completion, freed all of them and left 24 KiB. Freed pages are overwritten (`secure_delete`) and reused by new recordings, so the file stays at its high-water mark instead of growing without bound. This is an open defect; the benchmark above steps the pragma to completion.
+
 ## Interpretation
 
 - The throughput test is bound by the producer pipeline, not by the PTY or by `agentrecorder`: direct and managed runs finish in the same time within noise. The ceiling is measured separately (see Throughput ceiling).
