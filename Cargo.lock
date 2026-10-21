@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentrecorder"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentrecorder-store",
  "agentrecorder-supervisor",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "agentrecorder-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "agentrecorder-supervisor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentrecorder-store",
  "anyhow",
