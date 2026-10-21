@@ -79,7 +79,7 @@ Details: `security.md`.
 
 ## Platform notes
 
-- Linux and macOS only.
+- Linux and macOS only. CI runs the test suite on Linux; on macOS it runs only where a developer runs `just check`.
 - On macOS, when output is produced faster than it is read, the kernel PTY can emit `\r\r\n` for a newline; recordings contain what the kernel delivered.
 - CPU and memory figures cover the session's process tree as reported by the OS at inspection time.
 - The end-to-end test for the main workflow is `cargo test -p agentrecorder --test e2e mvp_workflow`.
