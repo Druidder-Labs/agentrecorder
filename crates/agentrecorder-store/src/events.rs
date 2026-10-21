@@ -18,6 +18,7 @@ pub mod kind {
     pub const RUNTIME_WARNING: &str = "runtime.warning";
     pub const RUNTIME_ERROR: &str = "runtime.error";
     pub const AGENT_HOOK: &str = "agent.hook";
+    pub const SHELL_COMMAND_FINISHED: &str = "shell.command_finished";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,6 +77,8 @@ pub enum Body {
     RuntimeError(Notice),
     #[serde(rename = "agent.hook")]
     AgentHook(Box<AgentHook>),
+    #[serde(rename = "shell.command_finished")]
+    ShellCommandFinished { exit_code: Option<i32> },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +204,7 @@ impl Body {
             Body::RuntimeWarning(_) => kind::RUNTIME_WARNING,
             Body::RuntimeError(_) => kind::RUNTIME_ERROR,
             Body::AgentHook(_) => kind::AGENT_HOOK,
+            Body::ShellCommandFinished { .. } => kind::SHELL_COMMAND_FINISHED,
         }
     }
 
@@ -265,6 +269,8 @@ mod tests {
                 message: Some("Claude needs your permission".into()),
                 ..AgentHook::default()
             })),
+            Body::ShellCommandFinished { exit_code: Some(2) },
+            Body::ShellCommandFinished { exit_code: None },
         ]
     }
 

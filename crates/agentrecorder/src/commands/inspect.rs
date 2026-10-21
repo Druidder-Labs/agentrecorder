@@ -24,6 +24,17 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
         Ok(())
     })?;
     let tree = live.and_then(|l| procinfo::sample_tree(l.child_pid as u32));
+    let mut commands: Option<(u64, u64, u64)> = None;
+    store.for_each_event(&s.id, Some(&[kind::SHELL_COMMAND_FINISHED]), |e| {
+        let c = commands.get_or_insert((0, 0, 0));
+        c.0 += 1;
+        match e.payload.get("exit_code").and_then(Value::as_i64) {
+            Some(0) => {}
+            Some(_) => c.1 += 1,
+            None => c.2 += 1,
+        }
+        Ok(())
+    })?;
     let running = live.is_some_and(|l| !l.exited);
     let agent = agent_state::from_store(&store, &s.id, running)?;
     let resume = agent_state::resume_check(&store, &s, running, now_unix_ns())?;
@@ -61,7 +72,17 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
                     "detail": a.detail,
                     "timestamp": format_rfc3339(a.at_ns),
                 })),
-                "unavailable": ["commands", "failures", "tokens", "model_latency", "tool_calls", "cost"],
+                "commands": commands.map(|(count, failed, unknown)| json!({
+                    "count": count,
+                    "failed": failed,
+                    "exit_unknown": unknown,
+                    "source": "osc133",
+                })),
+                "unavailable": if commands.is_some() {
+                    json!(["tokens", "model_latency", "tool_calls", "cost"])
+                } else {
+                    json!(["commands", "failures", "tokens", "model_latency", "tool_calls", "cost"])
+                },
             }))?
         );
         return Ok(0);
@@ -167,8 +188,17 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     }
     println!();
     println!("EXECUTION");
-    println!("Commands:        {na} (no shell or agent integration)");
-    println!("Failures:        {na} (no shell or agent integration)");
+    match commands {
+        Some((count, failed, unknown)) => {
+            println!("Commands:        {count} (OSC 133 shell integration marks)");
+            let unknown = if unknown > 0 { format!(", {unknown} without an exit code") } else { String::new() };
+            println!("Failures:        {failed} (non-zero exit code{unknown})");
+        }
+        None => {
+            println!("Commands:        {na} (no OSC 133 command marks; the shell has no integration enabled)");
+            println!("Failures:        {na} (no OSC 133 command marks)");
+        }
+    }
     println!("Tokens / cost:   {na} (not collected)");
     println!("Warnings:        {}", count_of(kind::RUNTIME_WARNING));
     println!("Errors:          {}", count_of(kind::RUNTIME_ERROR));

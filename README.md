@@ -5,7 +5,7 @@ Run it. Inspect it. Recover it. Replay it.
 A coding agent started in a terminal dies with that terminal. When it misbehaves, the output has already scrolled away. After a crash or a reboot, nothing says what survived. `agentrecorder` runs the agent for you and keeps the answers:
 
 - **Run.** The agent keeps running when you close the tab, lose SSH or your client crashes. Reattach from any terminal and the screen comes back.
-- **Inspect.** Process tree, CPU, memory, time since the last output, git HEAD before and after, and for Claude Code whether the agent is working, idle or waiting for you, as reported by its hooks. Measured or reported values only; anything else is marked `unavailable`.
+- **Inspect.** Process tree, CPU, memory, time since the last output, git HEAD before and after, command and failure counts when the shell emits OSC 133 marks, and for Claude Code whether the agent is working, idle or waiting for you, as reported by its hooks. Measured or reported values only; anything else is marked `unavailable`.
 - **Recover.** After a crash or reboot it states what is left (a live process, an exit code and the last screen, or only the recording) and offers the agent's own resume command. It never restarts anything on its own.
 - **Replay.** Play the session back with its original timing, or export it as asciicast. Replay renders recorded bytes; it never re-executes a command.
 

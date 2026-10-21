@@ -19,6 +19,7 @@ use nix::unistd::{Pid, geteuid};
 
 use crate::client::SessionStatus;
 use crate::layout::Layout;
+use crate::modes::Observed;
 use crate::peer::peer_uid;
 use crate::protocol::{Control, ExitInfo, Frame, Hello, Mode, PROTOCOL_VERSION, read_frame, write_frame};
 use crate::pty;
@@ -549,8 +550,13 @@ fn read_pty(shared: &Shared, mut master: File) {
             maybe_snapshot(shared, &mut term, n as u64);
             (term.client.as_ref().map(|c| (c.id, c.tx.clone(), c.backpressure.clone())), notes)
         };
-        for (source, text) in notes {
-            shared.note(source, text);
+        for signal in notes {
+            match signal {
+                Observed::Notification(source, text) => shared.note(source, text),
+                Observed::CommandFinished { exit_code } => {
+                    shared.recorder.best_effort(Body::ShellCommandFinished { exit_code });
+                }
+            }
         }
         let Some((id, tx, backpressure)) = target else { continue };
         let delivered = deliver(&tx, Frame::Output(data.to_vec()), &backpressure);

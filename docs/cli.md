@@ -16,7 +16,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `sessions [--json]` (alias `ls`) | List sessions and their status (see below) |
 | `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
 | `detach ID` | Detach whichever client is attached |
-| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded, the agent state reported by its hooks, and for a `claude --resume <uuid>` session whether the resume was confirmed |
+| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded, the agent state reported by its hooks, command and failure counts from OSC 133 shell integration marks, and for a `claude --resume <uuid>` session whether the resume was confirmed |
 | `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise explain what was lost and offer an explicit restart (same command, working directory and recording cap) or the agent's resume command |
 | `replay ID [--speed N] [--from HH:MM:SS] [--max-idle S] [--instant] [--raw]` | Play back recorded output; never re-executes commands |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
@@ -92,6 +92,19 @@ A session whose command resumes a Claude Code UUID (`claude --resume <uuid>` or 
 Other events leave the state unchanged. When the process is no longer running and no `SessionEnd` arrived, the state is `ended` with the source `<agent> hooks and session status`. Without hook events the state is `unavailable`. Claude Code fires no hook when a permission prompt is dismissed with Esc or a turn is interrupted, so the state stays `needs_input` or `working` until the next hook; the age shows how old the evidence is.
 
 The command is agent-neutral: another agent's command hook can call `agentrecorder hook --agent <name>` if it passes the same fields. Installing hooks for Codex CLI, Gemini CLI or OpenCode is not automated and has not been tested.
+
+## Shell integration
+
+When the shell emits OSC 133 marks (the FinalTerm semantic prompt protocol), `inspect` fills `Commands` and `Failures`. A command is counted when `133;D` follows `133;C`; `D` without a preceding `C` (the first prompt, an empty Enter) is ignored. The exit code is the first parameter of `D` (`133;D;2`); a non-zero code is a failure, and a `D` without a code is counted as a command with an unknown exit code. Each counted command is recorded as `shell.command_finished`. Without marks, both lines are `unavailable`.
+
+A minimal zsh setup that produces the marks:
+
+```
+precmd()  { local s=$?; print -n "\e]133;D;$s\a\e]133;A\a" }
+preexec() { print -n "\e]133;C\a" }
+```
+
+The marks come from the output stream, so any program in the session can emit them; the counts describe what the session printed, not what the kernel ran. Claude Code runs its tools outside the terminal, so agent sessions have no marks.
 
 ## Recording and retention
 

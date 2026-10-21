@@ -1196,3 +1196,34 @@ fn resume_is_confirmed_only_when_the_agent_reports_the_expected_session() {
     std::fs::remove_file(known.join(&agent)).unwrap();
     resume("unconfirmed", "exited with code 1 before the agent reported SessionStart");
 }
+
+#[test]
+fn osc_133_marks_fill_commands_and_failures() {
+    let env = Env::new();
+    let script = r"printf '\033]133;A\007$ \033]133;D\007'; \
+        printf '\033]133;C\007ok\r\n\033]133;D;0\007'; \
+        printf '\033]133;C\007bad\r\n\033]133;D;3\007'; \
+        printf '\033]133;C\033\\\033]133;D\007'; \
+        printf '\033]133;D;9\007'";
+    let id = env.start_detached(&["sh", "-c", script]);
+    env.wait_status(&id, "exited");
+    let info = env.inspect(&id);
+    assert_eq!(info["commands"]["count"], 3, "{}", info["commands"]);
+    assert_eq!(info["commands"]["failed"], 1);
+    assert_eq!(info["commands"]["exit_unknown"], 1);
+    assert!(!info["unavailable"].as_array().unwrap().iter().any(|v| v == "commands"));
+    let text = env.ok(&["inspect", &id]);
+    assert!(text.contains("Commands:        3 (OSC 133 shell integration marks)"), "{text}");
+    assert!(text.contains("Failures:        1 (non-zero exit code, 1 without an exit code)"), "{text}");
+    let exits: Vec<_> = env
+        .events(&id)
+        .into_iter()
+        .filter(|e| e["event_type"] == "shell.command_finished")
+        .map(|e| e["payload"]["exit_code"].clone())
+        .collect();
+    assert_eq!(exits, [serde_json::json!(0), serde_json::json!(3), serde_json::Value::Null]);
+
+    let plain = env.start_detached(&["sh", "-c", "echo no-marks"]);
+    env.wait_status(&plain, "exited");
+    assert!(env.inspect(&plain)["commands"].is_null());
+}

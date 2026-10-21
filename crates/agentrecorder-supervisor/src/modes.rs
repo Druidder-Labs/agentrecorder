@@ -5,6 +5,12 @@ const MAX_TITLE: usize = 256;
 const MAX_NOTIFICATION: usize = 512;
 const MAX_KITTY_STACK: usize = 16;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observed {
+    Notification(NotificationSource, String),
+    CommandFinished { exit_code: Option<i32> },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Ground,
@@ -52,12 +58,13 @@ impl Modes {
 pub struct ModeTracker {
     state: State,
     buf: Vec<u8>,
+    command_running: bool,
     pub modes: Modes,
 }
 
 impl Default for ModeTracker {
     fn default() -> Self {
-        ModeTracker { state: State::Ground, buf: Vec::new(), modes: Modes::default() }
+        ModeTracker { state: State::Ground, buf: Vec::new(), command_running: false, modes: Modes::default() }
     }
 }
 
@@ -69,12 +76,12 @@ fn params(body: &[u8]) -> Vec<Option<u16>> {
 }
 
 impl ModeTracker {
-    pub fn scan(&mut self, data: &[u8], notes: &mut Vec<(NotificationSource, String)>) {
+    pub fn scan(&mut self, data: &[u8], notes: &mut Vec<Observed>) {
         for &b in data {
             match self.state {
                 State::Ground => match b {
                     0x1b => self.state = State::Esc,
-                    0x07 => notes.push((NotificationSource::Bell, String::new())),
+                    0x07 => notes.push(Observed::Notification(NotificationSource::Bell, String::new())),
                     _ => {}
                 },
                 State::Esc => {
@@ -84,6 +91,7 @@ impl ModeTracker {
                         b']' => State::Osc,
                         b'c' => {
                             self.modes = Modes::default();
+                            self.command_running = false;
                             State::Ground
                         }
                         0x1b => State::Esc,
@@ -186,22 +194,35 @@ impl ModeTracker {
         }
     }
 
-    fn osc(&mut self, notes: &mut Vec<(NotificationSource, String)>) {
+    fn osc(&mut self, notes: &mut Vec<Observed>) {
         let buf = std::mem::take(&mut self.buf);
         let text = String::from_utf8_lossy(&buf);
         let (num, rest) = text.split_once(';').unwrap_or((&text, ""));
         let clean = |s: &str, max: usize| -> String { s.chars().filter(|c| !c.is_control()).take(max).collect() };
         match num {
             "0" | "2" => self.modes.title = Some(clean(rest, MAX_TITLE)),
-            "9" if !rest.starts_with("4;") => notes.push((NotificationSource::Osc9, clean(rest, MAX_NOTIFICATION))),
+            "9" if !rest.starts_with("4;") => {
+                notes.push(Observed::Notification(NotificationSource::Osc9, clean(rest, MAX_NOTIFICATION)))
+            }
             "777" => {
                 if let Some(body) = rest.strip_prefix("notify;") {
-                    notes.push((NotificationSource::Osc777, clean(&body.replace(';', ": "), MAX_NOTIFICATION)));
+                    notes.push(Observed::Notification(
+                        NotificationSource::Osc777,
+                        clean(&body.replace(';', ": "), MAX_NOTIFICATION),
+                    ));
                 }
             }
+            "133" => match rest.split(';').next() {
+                Some("C") => self.command_running = true,
+                Some("D") if std::mem::take(&mut self.command_running) => {
+                    let exit_code = rest.split(';').nth(1).and_then(|c| c.parse().ok());
+                    notes.push(Observed::CommandFinished { exit_code });
+                }
+                _ => {}
+            },
             "99" => {
                 let payload = rest.split_once(';').map_or(rest, |(_, p)| p);
-                notes.push((NotificationSource::Osc99, clean(payload, MAX_NOTIFICATION)));
+                notes.push(Observed::Notification(NotificationSource::Osc99, clean(payload, MAX_NOTIFICATION)));
             }
             _ => {}
         }
@@ -212,7 +233,7 @@ impl ModeTracker {
 mod tests {
     use super::*;
 
-    fn scan(chunks: &[&[u8]]) -> (Modes, Vec<(NotificationSource, String)>) {
+    fn scan(chunks: &[&[u8]]) -> (Modes, Vec<Observed>) {
         let mut t = ModeTracker::default();
         let mut notes = Vec::new();
         for c in chunks {
@@ -248,7 +269,13 @@ mod tests {
     fn detects_notifications_across_chunks_and_ignores_progress() {
         let (_, notes) =
             scan(&[b"a\x07b\x1b]9;build ", b"done\x07\x1b]9;4;1;50\x07\x1b]777;notify;Claude;needs input\x1b\\"]);
-        let got: Vec<_> = notes.iter().map(|(s, t)| (*s, t.as_str())).collect();
+        let got: Vec<_> = notes
+            .iter()
+            .filter_map(|n| match n {
+                Observed::Notification(s, t) => Some((*s, t.as_str())),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -264,5 +291,23 @@ mod tests {
         let (m, _) = scan(&[format!("\x1b]2;a\x01b{}\x07", "x".repeat(1000)).as_bytes()]);
         let t = m.title.unwrap();
         assert!(t.starts_with("ab") && t.len() == MAX_TITLE);
+    }
+
+    #[test]
+    fn counts_finished_commands_from_osc_133_marks() {
+        let (_, sig) = scan(&[
+            b"\x1b]133;A\x07$ \x1b]133;D\x07",
+            b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+            b"\x1b]133;C\x1b\\boom\x1b]133;D;",
+            b"2;aid=7\x1b\\\x1b]133;C\x07\x1b]133;D\x07\x1b]133;D;1\x07",
+        ]);
+        assert_eq!(
+            sig,
+            vec![
+                Observed::CommandFinished { exit_code: Some(0) },
+                Observed::CommandFinished { exit_code: Some(2) },
+                Observed::CommandFinished { exit_code: None },
+            ]
+        );
     }
 }

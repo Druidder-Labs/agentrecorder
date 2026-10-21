@@ -1,8 +1,6 @@
 use std::num::NonZeroU16;
 
-use agentrecorder_store::NotificationSource;
-
-use crate::modes::ModeTracker;
+use crate::modes::{ModeTracker, Observed};
 
 pub struct ScreenModel {
     parser: vt100::Parser,
@@ -21,7 +19,7 @@ impl ScreenModel {
         }
     }
 
-    pub fn process(&mut self, data: &[u8]) -> Vec<(NotificationSource, String)> {
+    pub fn process(&mut self, data: &[u8]) -> Vec<Observed> {
         let mut notes = Vec::new();
         self.modes.scan(data, &mut notes);
         self.parser.process(data);
