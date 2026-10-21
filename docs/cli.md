@@ -1,174 +1,153 @@
 # Command reference
 
-Every command prints its flags with `--help`. Session ids accept unique prefixes, and `last` (or `latest`) names the most recent session. `agentrecorder completions bash|zsh|fish|elvish` prints a completion script for the shell.
+Session ids accept unique prefixes; `last` (or `latest`) is the newest session. Every command has `--help`.
 
 ## State directory
 
-State lives in `$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`. It holds `state.db` (SQLite, compiled in), `run/` (one Unix socket per live session) and `logs/` (supervisor stderr per session) and `views/` (dashboards written by `view ID`; `rm` deletes a session's copy). Directories are created 0700 and files 0600. A newer binary migrates `state.db` in place on first open and an older binary refuses it, naming both versions and the fix (update the binary; the store is not changed), so one machine should run one version, for example `~/.local/bin` from `install.sh` or `~/.cargo/bin` from `cargo install`, not both.
+`$AGENTRECORDER_HOME`, default `$XDG_STATE_HOME/agentrecorder` or `~/.local/state/agentrecorder`: `state.db` (SQLite), `run/` (one socket per live session), `logs/` (supervisor stderr per session), `views/` (dashboards written by `view ID`). Directories are 0700, files 0600.
 
-Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from crates.io and needs Rust 1.95 or newer, because of `sysinfo` 0.39. No Docker, database server, account or API key.
+A newer binary migrates `state.db` in place. An older binary refuses it, naming both versions and the update command, and leaves the file untouched. Keep one installation per machine.
+
+Requirements: Linux or macOS. Building needs Rust 1.95 or newer.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-integration] [--detach-key K] [--cwd DIR] [--anchor FILE] [--anchor-token TOKEN] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d`. `--anchor FILE` appends hash-chain anchor lines to FILE every 30 s while the session runs; `--anchor-token TOKEN` (or `AGENTRECORDER_ANCHOR_TOKEN`) binds the chain to a token the reviewer issued, storing only its SHA-256 (see Sharing a session) |
-| `sessions [--json]` (alias `ls`) | List sessions: id, when they started, status, duration, exit, working directory and the command (see below) |
-| `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
+| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-integration] [--detach-key K] [--cwd DIR] [--anchor FILE] [--anchor-token T] -- CMD...` | Start CMD supervised and attach; `-d` prints the id instead. `--anchor` appends an anchor line to FILE every 30 s; `--anchor-token` (or `AGENTRECORDER_ANCHOR_TOKEN`) seeds the hash chain with the token's SHA-256 |
+| `sessions [--json]` (alias `ls`) | List sessions: id, start, status, duration, exit, directory, command |
+| `attach ID [--detach-key K]` | Attach this terminal. Detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or `AGENTRECORDER_DETACH_KEY`) |
 | `detach ID` | Detach whichever client is attached |
-| `mark ID [LABEL]` | Record a `user.mark` event in a running session, at the current time; the label loses control characters and is capped at 256 characters. Prints the offset in the `HH:MM:SS.s` form that `replay --from` accepts |
-| `inspect ID [--json] [--prompts]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit and the files changed between them, byte and event counts, warnings, the agent session id when one is recorded, the agent state reported by its hooks, tool calls counted from its `PostToolUse` hooks, token usage read from its transcript, split per prompt (the prompt text only with `--prompts`), command and failure counts from OSC 133 shell integration marks, the markers with their offsets, and for a `claude --resume <uuid>` session whether the resume was confirmed. Values that could not be measured are listed together under NOT MEASURED, each with the reason |
-| `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise explain what was lost and offer an explicit restart (same command, working directory and recording cap) or the agent's resume command |
-| `replay ID [--speed N] [--from HH:MM:SS\|--from-mark N\|LABEL] [--max-idle S] [--instant] [--raw] [-f\|--follow]` | Play back recorded output; never re-executes commands. `--follow` keeps playing new output while the session runs. `--from-mark` starts at a marker, by number (1 is the first) or exact label; on a terminal, replay prints `[agentrecorder] mark N: LABEL` on stderr as it passes each one |
-| `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
-| `export ID [--format jsonl\|asciicast-v2\|asciicast-v3] [-f\|--follow]` | Events as JSON Lines, or output as an asciicast file with markers (v3 also carries the exit status). `--follow` keeps writing new events while the session runs |
-| `bundle ID [-o DIR\|FILE] [--zip] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--dry-run] [--json]` | Write a shareable directory (default `./agentrecorder-ID`) for a finished session: `index.html` (dashboard), `session.cast` (asciicast v3), `events.jsonl`, `chain.jsonl` and `manifest.json`. `--zip` writes the same five files into one zip file instead (default `./agentrecorder-ID.zip`). `--dry-run` lists what the redactions and cuts would change and writes nothing (see Sharing a session) |
-| `anchor ID [--interval S]` | Print one hash-chain anchor line every S seconds (default 30) while the session runs and a last one when it ends; for a finished session, one line. Exit 130 on Ctrl-C |
-| `verify DIR\|FILE.zip [--anchors FILE] [--token TOKEN] [--json]` | Check a bundle's file digests and hash chain, that every anchor in FILE matches, and with `--token` that the chain genesis is the SHA-256 of the token; exit 0 when everything matches, 1 otherwise |
-| `view DIR\|FILE.zip\|ID [--no-open]` | Open the dashboard of a bundle (a zip bundle's `index.html` is extracted to `views/ID` first), or write one for a finished session to `views/ID` and open it; `--no-open` prints the path only |
-| `rm ID...` | Delete finished sessions and their recordings |
-| `prune --older-than 30d` | Delete finished sessions older than the given age |
-| `completions SHELL` | Print a completion script for bash, zsh, fish or elvish; for example `agentrecorder completions zsh > "${fpath[1]}/_agentrecorder"` |
-| `hook [--agent NAME]` | Read an agent hook event as JSON on stdin and record it as `agent.hook` in the session named by `AGENTRECORDER_SESSION`; always exits 0 and prints nothing on stdout (see Agent integration) |
+| `mark ID [LABEL]` | Record a `user.mark` now (label capped at 256 characters); prints the offset `replay --from` accepts |
+| `inspect ID [--json] [--prompts]` | Measured values: process tree, CPU, RSS, terminal size, idle time, notifications, git HEAD at start and exit, files changed, agent session id, agent state, tool calls, tokens per prompt, OSC 133 command counts, markers, resume verdict. Unmeasured values are listed under NOT MEASURED with the reason |
+| `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise show what is left and offer a restart or the agent's resume command |
+| `replay ID [--speed N] [--from T\|--from-mark N\|LABEL] [--max-idle S] [--instant] [--raw] [--follow]` | Play back recorded output. `--follow` keeps playing while the session runs; `--from-mark` takes a number (1 is first) or an exact label |
+| `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, SIGKILL after the timeout (default 5 s) |
+| `export ID [--format jsonl\|asciicast-v2\|asciicast-v3] [--follow]` | Events as JSON Lines, or an asciicast with markers (v3 carries the exit status) |
+| `bundle ID [-o DIR\|FILE] [--zip] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--dry-run] [--json]` | Write `agentrecorder-ID/` (or `agentrecorder-ID.zip`): `index.html`, `session.cast`, `events.jsonl`, `chain.jsonl`, `manifest.json`. `--dry-run` lists what would change and writes nothing |
+| `anchor ID [--interval S]` | Print one anchor line every S seconds (default 30) and one at exit; a finished session prints one line |
+| `verify DIR\|FILE.zip [--anchors FILE] [--token T] [--json]` | Check file digests, the hash chain, every anchor, and that the genesis is the token's SHA-256. Exit 0 when all pass |
+| `view DIR\|FILE.zip\|ID [--no-open]` | Open a bundle's dashboard, or write one for a finished session to `views/ID` |
+| `rm ID...`, `prune --older-than 30d` | Delete finished sessions and their recordings |
+| `completions SHELL` | bash, zsh, fish or elvish |
+| `hook [--agent NAME]` | Record a hook event read from stdin in the session named by `AGENTRECORDER_SESSION`; always exits 0, prints nothing |
 
 ## Session states
 
 | Status | Meaning |
 | --- | --- |
-| `running` | The process is alive and a client is attached |
-| `detached` | The process is alive and no client is attached |
-| `starting` | The supervisor has not bound its socket yet (first 10 s) |
-| `exited` | The process ended; exit code or signal is recorded |
-| `lost` | The supervisor ended without recording an exit: the host restarted, or the supervisor was killed |
-| `unreachable` | The socket is missing or not answering, but the supervisor process for this id still exists |
+| `running` | Process alive, client attached |
+| `detached` | Process alive, no client |
+| `starting` | Supervisor has not bound its socket yet (first 10 s) |
+| `exited` | Process ended; exit code or signal recorded |
+| `lost` | Supervisor ended without recording an exit (host restarted, supervisor killed) |
+| `unreachable` | Socket missing or silent, but the supervisor process still exists |
 
-## What recovery means
+## Recovery
 
-| Situation | What `agentrecorder recover` does |
+| Situation | `recover` |
 | --- | --- |
-| The client disconnected (terminal closed, SSH dropped, client killed) | The process is still running; it reattaches and redraws the screen. |
-| The process exited or crashed | Shows exit code or signal and the last recorded screen. `--restart` starts a new session with the same command after confirmation, minus the `--session-id` and hook settings that `run` inserted, so Claude Code gets a new id; for Claude Code, Codex, Gemini CLI and OpenCode, `--resume` runs the agent's own resume command instead (see Agent integration). Process memory is gone. |
-| The supervisor was killed or the host rebooted | Shows persisted metadata and history and offers the same `--restart` and `--resume` options. Arbitrary processes are not restored. |
-| The socket file was deleted but the supervisor still runs | The CLI asks the supervisor to recreate it (SIGUSR1) and the session works again. If the supervisor cannot answer (for example it is stopped), the session is `unreachable`, not `lost`: `rm` refuses to delete it, and `stop` sends SIGTERM to the supervisor. |
+| Client disconnected | Reattaches and redraws the screen |
+| Process exited | Shows the exit and the last screen. `--restart` runs the same command as a new session (Claude Code gets a new session id); `--resume` runs the agent's resume command |
+| Supervisor killed or host rebooted | Shows the metadata and offers `--restart` and `--resume` |
+| Socket deleted, supervisor alive | Asks the supervisor to recreate it (SIGUSR1). If it does not answer the session is `unreachable`: `rm` refuses it, `stop` sends SIGTERM to the supervisor |
+
+Both options ask for confirmation unless `-y` is given and refuse without a TTY. The environment is not stored; the new session uses the current shell's.
 
 ## Scripting
 
-`agentrecorder run -- CMD` behaves like a pipe when it is not on a terminal. When stdin is not a terminal and reaches end of file, the client sends Ctrl-D to the session, so a shell fed from a file ends on its own. When stdout is not a terminal, output waits for the reader instead of being dropped. The client exits with CMD's exit code, and the recording is complete before it exits, so `export` can follow `run` directly. Use `run -d` to start a session and return immediately with its id.
+`run` off a terminal behaves like a pipe: stdin at end of file sends Ctrl-D, stdout waits for the reader, the exit code is CMD's, and the recording is complete before `run` returns. `run -d` prints the id and returns.
 
-`replay --follow` and `export --follow` read the recording, then poll it every 100 ms for new events while the session runs. They return when the session is `exited` or `lost`, after one last read, or on Ctrl-C (exit code 130). New output appears about 0.1 s after the program wrote it (100 ms poll plus the recorder's 20 ms batch). `export --follow` flushes after every line, so `agentrecorder export ID --follow | jq` streams. On a finished session both behave as without `--follow`.
+`replay --follow` and `export --follow` poll every 100 ms, return when the session ends or on Ctrl-C (exit 130), and lag about 0.1 s behind the program. `export --follow | jq` streams.
 
 ## Agent integration
 
-### Session ids
+### Claude Code
 
-When the command is `claude` (directly or behind `env`), `run` generates a UUID v4 and inserts `--session-id <uuid>` right after the program name, so `recover --resume` runs `claude --resume <uuid>` and reopens that exact conversation. The id is stored on the session and shown by `inspect` as `Agent session`; the recorded command line includes the inserted flag.
+For a `claude` command (also behind `env`), `run` inserts:
 
-No id is inserted when the arguments already pick or skip a session (`--session-id`, `--resume`, `-r`, `--continue`, `-c`, `--fork-session`, `--from-pr`, `--teleport`, `--no-session-persistence`), start elsewhere (`--bg`, `--cloud`, `--desktop`, `--tmux`), ask for `--help` or `--version`, or name a subcommand such as `mcp`. A UUID the user passed with `--session-id`, `--resume` or `-r` is recorded as is. `--no-agent-integration` turns insertion of the id and of the hooks off. Without a recorded id, `--resume` falls back to `claude --continue`, the most recent conversation in the working directory.
+- `--session-id <uuid>`, so `recover --resume` reopens that exact conversation. Skipped when the arguments already pick or skip a session (`--session-id`, `--resume`, `-r`, `--continue`, `-c`, `--fork-session`, `--from-pr`, `--teleport`, `--no-session-persistence`), start elsewhere (`--bg`, `--cloud`, `--desktop`, `--tmux`), ask for `--help` or `--version`, or name a subcommand. A uuid the user passed is recorded as is.
+- `--settings '<json>'` with command hooks for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure` and `SessionEnd`, each running `agentrecorder hook --agent claude` with a 5 s timeout. Skipped when `--settings` is already present. The user's settings files are not touched. Text output shows the value as `--settings <agentrecorder hooks>`; `--json` and `export` keep the full argv.
 
-Claude Code rejects a `--session-id` that was already used (`Session ID ... is already in use`), so `recover --restart` removes the recorded id and `run` inserts a new one. Codex CLI, Gemini CLI and OpenCode keep their "most recent session" resume commands; their session flags are not inserted.
+`--no-agent-integration` turns both off. Without a recorded id, `--resume` falls back to `claude --continue`. Codex CLI, Gemini CLI and OpenCode resume their most recent session; no flags are inserted for them.
 
-### Hooks
+`agentrecorder hook` records `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message` and `tool_name`, each length-capped. Prompt, tool input and assistant reply are never recorded. At `Stop` and `SessionEnd` it also sums the transcript and records `usage` (tokens, API calls, models). Another agent's hook can call `agentrecorder hook --agent NAME` with the same fields; installing hooks for other agents is not automated.
 
-For the same `claude` commands, `run` also inserts `--settings '<json>'` with command hooks for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure` and `SessionEnd`. Each hook runs `agentrecorder hook --agent claude` with a 5 s timeout. The text output of `inspect` and `recover` shows the inserted value as `--settings <agentrecorder hooks>`; `inspect --json`, `sessions --json` and `export` keep the full argv. Hooks passed with `--settings` are added to the user's own hooks for that run; nothing is written to the user's settings files. Hooks are not inserted when the arguments already contain `--settings` (a second one would replace either the user's or agentrecorder's), ask for `--help` or `--version`, or name a subcommand. They are inserted with `--resume` and `--continue`.
+### Resume verdict
 
-`agentrecorder hook` reads the event JSON from stdin and sends it to the supervisor of the session named by `AGENTRECORDER_SESSION`, which every managed process inherits. It records only `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message` and `tool_name`, each with a length cap. The prompt, tool input and assistant reply are never recorded. It exits 0 and prints nothing on stdout in every case, including outside a session, so it never changes what the agent does; errors go to stderr.
-
-### Resume confirmation
-
-A session whose command resumes a Claude Code UUID (`claude --resume <uuid>` or `-r <uuid>`, as `recover --resume` runs it) gets a verdict from its first `SessionStart` hook:
-
-| Verdict | Condition |
-| --- | --- |
-| `confirmed` | `SessionStart` arrived with `source` `resume` and the expected session id |
-| `mismatch` | `SessionStart` arrived with another session id or source |
-| `pending` | No `SessionStart` yet, less than 90 s after the process started |
-| `unconfirmed` | No `SessionStart` and the process ended (the exit code is named), or 90 s passed |
-
-`inspect` shows it as `Resume` (`resume` in `--json`). `recover --resume --detached` waits up to 15 s for a verdict other than `pending`, and for an ended process until its exit code is recorded, and prints it on stderr before the new session id; attached, the verdict is printed after the client detaches or the agent exits. Claude Code reports `No conversation found` and exits with code 1 for an unknown id, which gives `unconfirmed`.
+A session that runs `claude --resume <uuid>` gets a verdict from its first `SessionStart` hook: `confirmed` (source `resume`, expected id), `mismatch`, `pending` (less than 90 s, no hook yet) or `unconfirmed` (process ended or 90 s passed). `inspect` shows it as `Resume`; `recover --resume --detached` waits up to 15 s for it.
 
 ### Agent state
 
-`inspect` shows `Agent state` (`agent_state` in `--json`) from the last `agent.hook` event that changes it, with the source, the event and its age. It is never inferred from screen output or inactivity.
+From the last hook that changes it, never from screen inactivity:
 
-| Hook event | State |
+| Hook | State |
 | --- | --- |
 | `SessionStart`, `Stop`, `StopFailure` | `idle` |
 | `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | `working` |
-| `PermissionRequest`, `Notification` with `notification_type` `permission_prompt` | `needs_input` |
-| `SessionEnd` | `ended` |
+| `PermissionRequest`, `Notification` with `permission_prompt` | `needs_input` |
+| `SessionEnd`, or process gone | `ended` |
 
-Other events leave the state unchanged. When the process is no longer running and no `SessionEnd` arrived, the state is `ended` with the source `<agent> hooks and session status`. Without hook events the state is `unavailable`. Claude Code fires no hook when a permission prompt is dismissed with Esc or a turn is interrupted, so the state stays `needs_input` or `working` until the next hook; the age shows how old the evidence is.
+Claude Code fires no hook when a prompt is dismissed with Esc or a turn is interrupted, so the state can lag; `inspect` shows the age of the evidence.
 
-The command is agent-neutral: another agent's command hook can call `agentrecorder hook --agent <name>` if it passes the same fields. Installing hooks for Codex CLI, Gemini CLI or OpenCode is not automated and has not been tested.
+### Tool calls, tokens, interactions, files
 
-### Tool calls, tokens and interactions
-
-`inspect` shows `Tool calls` (`tool_calls` in `--json`) from the `PostToolUse` and `PostToolUseFailure` hook events: the total, how many failed, and a count per `tool_name`, with the source named (`claude hooks`). A call that was denied, interrupted or still running when the session ended fires neither hook and is not counted. Without those events the line is `unavailable`.
-
-`Tokens` (`tokens` in `--json`) is read when `inspect` runs, from the transcript file named by the last hook event that carried a `transcript_path`. Each `assistant` line's `message.usage` is summed once per `requestId` (Claude Code writes one line per content block of the same response), giving `input`, `output`, `cache_read`, `cache_creation`, `total`, the number of API calls and the models seen. Lines whose `timestamp` falls outside the session (before the process started or after it ended) are skipped and counted as `outside_session`, so a resumed conversation's earlier turns are not attributed to this session. The transcript is the agent's own file: it is not recorded, and `inspect` reports `unavailable` with the reason when it was deleted, moved or written by an agent on another host. At `Stop` and `SessionEnd`, `agentrecorder hook` sums the same transcript once and records the sums and model names as `usage` in that hook event, so a bundle carries the token totals without the transcript. Subagent transcripts in other files are not included. Cost stays `unavailable`: agentrecorder carries no price table.
-
-`Interactions` (`tokens.interactions` in `--json`) splits the same tokens by prompt. An interaction starts at each `user` line of the transcript that is something the user sent: typed text, pasted content, images, a slash command (shown as `/name args`), or a message the agent was handed, such as a background task notification. Tool results, local command output, meta lines and compaction summaries do not start one. Each interaction lists its offset from the session start, its origin (`human`, `command`, `task-notification`, `peer` or `user` as the transcript reports or as recognized), the prompt length in characters, the image count, and the API calls and tokens of the replies that followed it until the next interaction; tokens reported before the first prompt in the session go to an interaction with origin `none`. The interaction totals add up to `Tokens`. The prompt text is hidden by default; `inspect --prompts` prints it on one line per interaction with control characters replaced by spaces and cut at 100 characters, and `--json --prompts` adds the full `text`. The text line lists the first 50 interactions; `--json` has all of them.
-
-`Files changed` (`files_changed` in `--json`) compares the work tree at exit with the HEAD recorded at start (`git diff --name-status` plus untracked files), with the git status letter per path (`M`, `A`, `D`, `R`, `?` for untracked) and whether the path was already modified or untracked when the session started. The start snapshot runs beside the first moments of the process, so a change made in the first second can appear as already modified. Up to 500 paths are recorded per snapshot; the count is exact. The line is `unavailable` while the session runs, when it was lost before the exit snapshot, or when the repository had no commit at start.
+- `Tool calls`: counted from `PostToolUse` and `PostToolUseFailure`, total, failed and per tool. Denied, interrupted or still-running calls fire no hook and are not counted.
+- `Tokens`: read at `inspect` time from the transcript named by the last hook. `message.usage` of `assistant` lines is summed once per `requestId`; lines timestamped outside the session are skipped and counted as `outside_session`. Gives input, output, cache read, cache creation, API calls and models. Subagent transcripts are not included. Cost is always `unavailable` (no price table).
+- `Interactions`: the same tokens split by prompt. An interaction starts at each `user` line the user sent (text, paste, image, slash command, task notification); tool results, meta lines and compaction summaries do not start one. Each lists offset, origin, prompt length, image count and the tokens of the replies until the next one. Prompt text is hidden unless `--prompts` (100 characters in text output, full in `--json`).
+- `Files changed`: work tree at exit against the HEAD recorded at start (`git diff --name-status` plus untracked), with the status letter and whether the path was already dirty at start. Capped at 500 paths; the count is exact. `unavailable` while running, when lost, or without a commit at start.
 
 ## Shell integration
 
-When the shell emits OSC 133 marks (the FinalTerm semantic prompt protocol), `inspect` fills `Commands` and `Failures`. A command is counted when `133;D` follows `133;C`; `D` without a preceding `C` (the first prompt, an empty Enter) is ignored. The exit code is the first parameter of `D` (`133;D;2`); a non-zero code is a failure, and a `D` without a code is counted as a command with an unknown exit code. Each counted command is recorded as `shell.command_finished`. Without marks, both lines are `unavailable`.
-
-A minimal zsh setup that produces the marks:
+When the shell emits OSC 133 marks, `inspect` counts `Commands` and `Failures`: a `D` after a `C`, with the exit code as the first parameter of `D`. Each one is a `shell.command_finished` event. A minimal zsh setup:
 
 ```
 precmd()  { local s=$?; print -n "\e]133;D;$s\a\e]133;A\a" }
 preexec() { print -n "\e]133;C\a" }
 ```
 
-The marks come from the output stream, so any program in the session can emit them; the counts describe what the session printed, not what the kernel ran. Claude Code runs its tools outside the terminal, so agent sessions have no marks.
+Claude Code runs its tools outside the terminal, so agent sessions have no marks.
 
 ## Sharing a session
 
-`bundle` turns a finished session into a directory that someone without `agentrecorder` can open, for example a technical interview reviewer, a bug report or a pull request:
-
 ```
-agentrecorder run --anchor anchors.jsonl --anchor-token "$TOKEN" -- claude   # work as usual; anchors are appended every 30 s
-agentrecorder bundle last --redact-secrets --dry-run # see what would be redacted, with offsets
-agentrecorder bundle last --redact-secrets --redact-literal 'hunter2' --cut 00:12:03-00:12:09 --zip
-agentrecorder view agentrecorder-3f9a1c.zip          # dashboard in the browser
-agentrecorder verify agentrecorder-3f9a1c.zip --anchors anchors.jsonl --token "$TOKEN"   # what the receiver runs
+agentrecorder run --anchor anchors.jsonl --anchor-token "$TOKEN" -- claude
+agentrecorder bundle last --redact-secrets --dry-run
+agentrecorder bundle last --redact-secrets --redact-literal 'hunter2' --cut 12:03-12:09 --zip
+agentrecorder view agentrecorder-3f9a1c.zip
+agentrecorder verify agentrecorder-3f9a1c.zip --anchors anchors.jsonl --token "$TOKEN"   # the reviewer runs this
 ```
 
-What to send a reviewer: the bundle (a directory, or one zip file with `--zip`) and, when integrity matters, the `anchors.jsonl` the reviewer received during the session (for example through a synced folder or `tail -f anchors.jsonl | curl -T - URL`). The reviewer opens `index.html` and runs `verify`.
+Send the reviewer the bundle and, when integrity matters, the `anchors.jsonl` they received while the session ran (synced folder, `tail -f anchors.jsonl | curl -T - URL`). A reviewer who issues one token per session passes it to the candidate; the token is never stored, its SHA-256 is the chain genesis, so `verify --token` fails for a bundle made without it. The token identifies the session, not the person.
 
-A reviewer who hands out one token per session (for example a technical interview invite) passes it to the candidate, who runs with `--anchor-token TOKEN` or `AGENTRECORDER_ANCHOR_TOKEN`. The token itself is never stored: its SHA-256 becomes the first link of the hash chain (the genesis), so every anchor line and the bundle's `manifest.json` depend on it, and `verify --token TOKEN` fails for a bundle made without that token. The token names the session the reviewer issued it for; it does not identify the person who typed.
+- `index.html` opens offline and makes no requests: verification panel with the exact `verify` command, summary tiles, player (`asciinema-player` 3.17.0, vendored), timeline of markers, hook events, commands, git snapshots and warnings (click to seek), files changed, activity per tool with token totals, integrity data.
+- `--redact REGEX` (Rust regex on bytes), `--redact-literal TEXT`, `--redact-secrets` (OpenAI and Anthropic keys, GitHub and GitLab tokens, AWS key ids, Google API keys, Slack tokens, bearer tokens, JWTs, private key blocks; `SECRET_PATTERNS` in `bundle.rs`) replace matches with `*` of the same length in output, input, snapshots, payload strings, metadata and the cast header. Patterns are not written to the bundle. `--dry-run` prints each match with offset, event type, first four characters and length. A pattern that matches nothing warns.
+- `--cut FROM-TO` (seconds, `MM:SS` or `HH:MM:SS`) removes output, input, snapshots, notifications, hooks, commands and marks in the range; lifecycle events stay. The screen after a cut can look wrong until the program redraws.
+- `--zip` writes the same five files into one deflate zip under a directory named after the file; `verify` and `view` read it directly.
+- `chain.jsonl` lists every event with its hash and fate (`kept`, `redacted`, `cut`).
 
-- `index.html` is a single file with everything inline, including the terminal player (`asciinema-player` 3.17.0, Apache-2.0, vendored in `crates/agentrecorder/src/vendor/`): a verification panel first (token binding, redacted and cut counts, and the exact `verify` command to run, since the page cannot check itself), summary tiles (duration, exit, commands, tool calls, tokens, markers, edits), the player, a timeline of markers, agent hook events, OSC 133 commands, git snapshots, notifications and warnings (click a row to seek), the files changed since the start HEAD with their status letters, agent activity by tool with the token totals the `Stop` hook recorded, and the integrity data. It opens from disk without network access and makes no requests.
-- `--redact REGEX` (Rust `regex` syntax, matched on bytes), `--redact-literal TEXT` (exact text) and `--redact-secrets` (built-in shapes: OpenAI and Anthropic `sk-` keys, GitHub and GitLab tokens, AWS access key ids, Google API keys, Slack tokens, bearer tokens, JWTs, private key blocks; the list is `SECRET_PATTERNS` in `bundle.rs`) replace every match with `*` of the same length in output and input (matched across event boundaries), screen snapshots, every string in event payloads including the command line, the stored session metadata and the asciicast header. The patterns are not written to the bundle; the manifest records how many there were and how many matches they replaced. `--dry-run` prints each match with its offset, event type, the first four characters and the length, so the result can be checked before anything is written. A pattern that matches nothing, and a cut that removes nothing or starts after the session ended, print a warning.
-- `--zip` writes `events.jsonl`, `chain.jsonl`, `session.cast`, `manifest.json` and `index.html` into one deflate-compressed zip file under a directory named after the file, so `unzip agentrecorder-3f9a1c.zip` unpacks the same bundle; `verify` and `view` read the zip directly.
-- `--cut FROM-TO` removes terminal output, input, snapshots, notifications, hook events, OSC 133 commands and marks recorded between two offsets (seconds, `MM:SS` or `HH:MM:SS`); lifecycle events stay. The cast carries a `cut` marker at the start of each range. The screen after a cut can look wrong until the program redraws it.
-- Every recorded event is in `chain.jsonl` with its hash and fate (`kept`, `redacted`, `cut`), so a receiver sees how many events were edited and where.
+What `verify` proves:
 
-What a bundle proves:
+| `result` | Meaning |
+| --- | --- |
+| `ok: consistent; not anchored, token not checked` | The files agree with each other. Whoever made the bundle could still have built it from edited data |
+| `ok: consistent, anchored` | Events up to the last anchor are the ones that existed when the anchor was received, except those marked redacted or cut |
+| `ok: consistent, anchored, token matched` | Plus the session was started with that token |
+| `FAILED` | Named file, event or anchor differs |
 
-- `verify` without anchors shows that the files agree with each other: a kept event that was edited after bundling fails. Whoever made the bundle can still build a consistent bundle from edited data, so without anchors the bundle is self-reported.
-- With anchors that a third party received while the session ran, `verify` shows that the events up to the last anchor are the ones that existed at that time, apart from the ones marked redacted or cut. Events after the last anchor are reported as not anchored.
-- With `--token`, `verify` shows that the session was started with that token; anchors made for another token, or a bundle made without one, fail.
-- The `result` line names what passed and what was not checked: `ok: consistent, anchored, token matched` is the full check; `ok: consistent; not anchored, token not checked` means only the files agree with each other. `--json` carries the same as `proves` and `gaps`.
-- No bundle shows what happened outside the recorded terminal: another terminal, another device or another person.
+`--json` carries `proves` and `gaps`. No bundle shows what happened outside the recorded terminal.
 
-`bundle` refuses a running session and a non-empty output directory or an existing zip file unless `--force` is given. `anchor` must run with the same `agentrecorder` version that later writes the bundle, because the hash covers the exported JSON line of each event.
+`bundle` refuses a running session and an existing output unless `--force`. `anchor` and `bundle` must run the same `agentrecorder` version.
 
 ## Recording and retention
 
-- Terminal output is recorded by default; `--no-record` disables it and `--max-record-mb` caps it (default 256 MiB).
-- Keyboard input is not recorded unless `--record-input` is given.
-- Environment variables are never stored. The command line and working directory are.
-- Finished sessions older than `AGENTRECORDER_RETENTION_DAYS` (default 30; 0 disables) are deleted when a new session starts.
-- Replay strips terminal sequences that could write the clipboard, query the terminal or inject input; `--raw` keeps them. Exported asciicast files are not filtered.
-
-Details: `security.md`.
+- Output recorded by default; `--no-record` disables, `--max-record-mb` caps (default 256 MiB). Input only with `--record-input`.
+- Environment variables are never stored; the command line and working directory are.
+- Finished sessions older than `AGENTRECORDER_RETENTION_DAYS` (default 30, 0 disables) are deleted when a session starts.
+- Replay strips sequences that could write the clipboard, query the terminal or inject input; `--raw` keeps them. Exported casts are not filtered.
 
 ## Platform notes
 
-- Linux and macOS only. CI runs the test suite on both.
-- On macOS, when output is produced faster than it is read, the kernel PTY can emit `\r\r\n` for a newline; recordings contain what the kernel delivered.
-- CPU and memory figures cover the session's process tree as reported by the OS at inspection time.
-- The end-to-end test for the main workflow is `cargo test -p agentrecorder --test e2e mvp_workflow`.
+- Linux and macOS; CI tests both.
+- On macOS a PTY read that falls behind can deliver `\r\r\n` for a newline; recordings keep what the kernel delivered.
+- CPU and memory cover the session's process tree at inspection time.

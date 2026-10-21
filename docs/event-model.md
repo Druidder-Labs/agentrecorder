@@ -1,94 +1,69 @@
 # Event model
 
-Schema version: 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib.rs`).
+Schema version 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib.rs`). Adding a type or a field keeps the version; removing, renaming or changing a meaning increments it.
 
 ## Envelope
 
 `agentrecorder export SESSION` writes one JSON object per line:
 
 ```json
-{
-  "schema_version": 1,
-  "event_id": "a91f2c-1",
-  "session_id": "a91f2c",
-  "seq": 1,
-  "timestamp": "2026-10-20T12:00:00.123456789Z",
-  "mono_ns": 2305208,
-  "event_type": "process.started",
-  "payload": {"pid": 18420, "command": ["claude"]}
-}
+{"schema_version": 1, "event_id": "a91f2c-1", "session_id": "a91f2c", "seq": 1,
+ "timestamp": "2026-10-20T12:00:00.123456789Z", "mono_ns": 2305208,
+ "event_type": "process.started", "payload": {"pid": 18420, "command": ["claude"]}}
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Envelope version. Consumers reject versions they do not know. |
-| `event_id` | `<session_id>-<seq>`; unique within a store. |
-| `session_id` | 6 lowercase hex characters. |
-| `seq` | Per-session sequence number starting at 0, contiguous, assigned by the supervisor when the event is persisted. This is the ordering key. |
-| `timestamp` | Wall clock (UTC, RFC 3339, nanoseconds) when the event was created. It can jump if the system clock changes. |
-| `mono_ns` | Nanoseconds since the supervisor started, from a monotonic clock. Use it for durations and replay timing. Events from different threads can arrive a few microseconds out of `mono_ns` order; `seq` is authoritative and replay clamps negative gaps to zero. |
-| `event_type` | One of the types below. |
-| `payload` | Type-specific JSON object, or `null`. |
-| `data_b64` | Present on `terminal.output` and `terminal.input`: the raw bytes, base64 encoded. Bytes are not assumed to be UTF-8. |
+| `event_id` | `<session_id>-<seq>` |
+| `seq` | Per-session, contiguous from 0, assigned when persisted. The ordering key |
+| `timestamp` | Wall clock, UTC RFC 3339 with nanoseconds; can jump with the system clock |
+| `mono_ns` | Nanoseconds since the supervisor started; use for durations. Can be a few microseconds out of `seq` order across threads |
+| `payload` | Type-specific object or `null` |
+| `data_b64` | Raw bytes, base64, on `terminal.output` and `terminal.input` |
 
 ## Types
 
-| Type | Payload | Notes |
-| --- | --- | --- |
-| `session.created` | `command`, `cwd`, `rows`, `cols`, `record_output`, `record_input`, `supervisor_pid`, `restarted_from`, `max_record_bytes`, `term`, `agent_session_id` | First event of every session. `max_record_bytes` and `term` are absent in recordings made before they were added; `agent_session_id` is present only when the agent's own session id is known (see `cli.md`, Agent integration); `recover --restart` reuses the cap and asciicast export uses `term`. |
-| `process.started` | `pid`, `command` | |
-| `session.attached` | `client`, `client_pid`, `rows`, `cols` | `client_pid` is reported by the client and not verified. |
-| `session.detached` | `client`, `reason` | Reasons: `client_request`, `client_disconnected`, `detach_requested`, `attached_elsewhere`, `client_too_slow`, `process_exited`, `pty_write_failed`, `protocol_error`. |
-| `terminal.output` | `null` | Data in `data_b64`. Chunks within 5 ms are merged up to 64 KiB. |
-| `terminal.input` | `null` | Only with `--record-input`. |
-| `terminal.resized` | `rows`, `cols` | |
-| `session.stop_requested` | `signal`, `grace_ms`, `origin` | `origin` is `client` or `supervisor_signal_<n>`. |
-| `process.exited` | `pid`, `exit_code`, `signal`, `duration_ms` | Exactly one of `exit_code` and `signal` is non-null. |
-| `session.terminated` | `reason`, `exit_code`, `signal`, `dropped_events` | Last event; the recorder discards anything sent after it. `reason` is `process_exited`, `stopped` or `spawn_failed` (exit code 127). |
-| `terminal.snapshot` | `rows`, `cols`, `reason` (`interval` or `after_drop`) | Data in `data_b64`: escape sequences that redraw the screen and restore modes. Written every 8 MiB of output and after dropped events; used for seeking, `recover` and resync. Not part of the output stream. |
-| `terminal.notification` | `source` (`osc9`, `osc99`, `osc777`, `bell`), `text` | Text has control characters removed and is capped at 512 characters. Repeats of one source within 1 s are not recorded. |
-| `git.snapshot` | `phase` (`start` or `exit`), `head`, `dirty_paths`, `dirty`, and at exit `changed_paths`, `changed` | Only when the working directory is a git work tree. `head` is null before the first commit. `dirty` lists the paths behind `dirty_paths` (modified, staged or untracked, sorted). At exit, `changed` lists `{status, path}` for every path that differs from the start HEAD (`git diff --name-status`, letter only, the new path of a rename) plus untracked files as `?`, and `changed_paths` is their count; both are absent when no HEAD was recorded at start. The lists are capped at 500 entries; the counts are not. |
-| `runtime.warning` | `code`, `message`, code-specific fields | Codes: `events_dropped` (`dropped_events`, `dropped_bytes`), `recording_limit_reached` (`limit_bytes`), `stop_escalated` (`signal`), `input_dropped` (`bytes`), `client_output_discarded` (`bytes`, `client`: output an attached terminal did not keep up with; the screen was redrawn), `pre_attach_output_dropped` (`limit_bytes`: more output arrived before the first attach of `run` than the 4 MiB the supervisor holds). |
-| `runtime.error` | `code`, `message` | Codes: `spawn_failed`, `resize_failed`. |
-| `shell.command_finished` | `exit_code` | One per OSC 133 `D` mark that follows a `C` mark (see `cli.md`, Shell integration). `exit_code` is `null` when the mark carries none. Recorded best effort, like `agent.hook`. |
-| `user.mark` | `label` | Written by `agentrecorder mark` while the session runs; `label` may be empty. Listed by `inspect`, used by `replay --from-mark`, exported to asciicast as an `m` event `mark: LABEL`. |
-| `agent.hook` | `agent`, `hook_event_name`, and when the agent sent them `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message`, `tool_name`, and at `Stop` and `SessionEnd` `usage` (`api_calls`, `input`, `output`, `cache_read`, `cache_creation`, `models`, `outside_session`, summed from the transcript the hook names) | Reported by the agent through `agentrecorder hook` (see `cli.md`, Agent integration) and not verified. Recorded best effort: dropped and counted like output when the recorder queue is near full. |
+| Type | Payload |
+| --- | --- |
+| `session.created` | `command`, `cwd`, `rows`, `cols`, `record_output`, `record_input`, `supervisor_pid`, `restarted_from`, `max_record_bytes`, `term`, `agent_session_id` (when known) |
+| `process.started` | `pid`, `command` |
+| `session.attached` | `client`, `client_pid` (self-reported), `rows`, `cols` |
+| `session.detached` | `client`, `reason`: `client_request`, `client_disconnected`, `detach_requested`, `attached_elsewhere`, `client_too_slow`, `process_exited`, `pty_write_failed`, `protocol_error` |
+| `terminal.output` | bytes in `data_b64`; chunks within 5 ms merged up to 64 KiB |
+| `terminal.input` | bytes; only with `--record-input` |
+| `terminal.resized` | `rows`, `cols` |
+| `terminal.snapshot` | `rows`, `cols`, `reason` (`interval`, `after_drop`); bytes that redraw the screen. Every 8 MiB and after drops; not part of the output stream |
+| `terminal.notification` | `source` (`osc9`, `osc99`, `osc777`, `bell`), `text` (control characters removed, 512 max) |
+| `session.stop_requested` | `signal`, `grace_ms`, `origin` (`client` or `supervisor_signal_<n>`) |
+| `process.exited` | `pid`, `exit_code` or `signal`, `duration_ms` |
+| `session.terminated` | `reason` (`process_exited`, `stopped`, `spawn_failed`), `exit_code`, `signal`, `dropped_events`. Always last |
+| `git.snapshot` | `phase` (`start`, `exit`), `head`, `dirty_paths`, `dirty`; at exit `changed_paths` and `changed` (`{status, path}` against the start HEAD plus untracked as `?`). Lists capped at 500, counts exact. Only in a git work tree |
+| `runtime.warning` | `code`, `message`: `events_dropped`, `recording_limit_reached`, `stop_escalated`, `input_dropped`, `client_output_discarded`, `pre_attach_output_dropped`, with code-specific counts |
+| `runtime.error` | `code` (`spawn_failed`, `resize_failed`), `message` |
+| `shell.command_finished` | `exit_code` (null when the OSC 133 mark has none) |
+| `user.mark` | `label` |
+| `agent.hook` | `agent`, `hook_event_name`, and when sent: `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message`, `tool_name`; at `Stop` and `SessionEnd` `usage` (`api_calls`, `input`, `output`, `cache_read`, `cache_creation`, `models`, `outside_session`). Self-reported, recorded best effort |
 
-A session that ends without `session.terminated` was lost: the supervisor was killed or the host stopped. `agentrecorder sessions` reports it as `lost`; `sessions --json` and `inspect` show `lost_reason` (`host_restarted` or `supervisor_terminated`).
+A session without `session.terminated` was lost; `sessions` shows `lost` and `inspect` shows `lost_reason`.
 
 ## Storage
 
-Events live in the `events` table of `state.db` (`crates/agentrecorder-store/src/lib.rs`), keyed by `(session_id, seq)`. `payload` is stored as JSON text, `data` as a BLOB and `data_len` as its length, so counting bytes does not read the blobs. Session metadata (status, pids, exit data, boot time) lives in the `sessions` table; the supervisor updates it, and CLI commands may only mark a session `lost` or delete it. `PRAGMA user_version` holds the database schema version (5); older stores are migrated in place the first time a newer binary opens it (version 2 added `data_len`, version 3 the `events_by_kind` index, version 4 the `sessions.agent_session_id` column, version 5 the `sessions.anchor_token_digest` column, the SHA-256 of the token given to `run --anchor-token`). There is no downgrade: a binary that reads up to an older schema refuses the store with an error naming the store schema, its own version and the update command, and leaves the file as it was.
-
-The payload shapes in the table above are defined once, as the `Body` enum in `crates/agentrecorder-store/src/events.rs`; a unit test round-trips every variant through its stored form.
+`state.db`, table `events` keyed by `(session_id, seq)`; `payload` as JSON text, `data` as a BLOB with `data_len` beside it. `PRAGMA user_version` is 5 (2: `data_len`; 3: kind index; 4: `agent_session_id`; 5: `anchor_token_digest`). Older stores migrate in place on first open. There is no downgrade: an older binary refuses a newer store, naming both versions and the update command, and leaves the file as it was. The payload shapes are the `Body` enum in `events.rs`; a unit test round-trips every variant.
 
 ## Other formats
 
-- `agentrecorder export SESSION --format asciicast-v2` (or `asciicast`) writes asciicast v2 and `--format asciicast-v3` writes asciicast v3 for asciinema players. Both carry `o` (output), `r` (resize) and `m` (markers for warnings, attach, detach, stop requests and notifications); v3 also carries `x` (exit status) and intervals rounded to milliseconds without cumulative drift. The header carries the command and the recorded `TERM`. Bytes that are not valid UTF-8 become U+FFFD in these formats only; DEL and C1 characters are escaped as `\uXXXX`. Exported casts are not sanitized: `asciinema play` writes them to the terminal unfiltered.
-- OpenTelemetry export is not implemented. A possible mapping is one span per session with lifecycle events as span events; terminal bytes are never exported to OTel.
+`export --format asciicast-v2|asciicast-v3` writes `o` (output), `r` (resize) and `m` (markers for warnings, attach, detach, stop requests, notifications); v3 adds `x` (exit) and millisecond intervals without drift. Invalid UTF-8 becomes U+FFFD; DEL and C1 are escaped. Casts are not sanitized. OpenTelemetry export is not implemented.
 
 ## Bundle format
 
-`agentrecorder bundle` writes a directory, or with `--zip` one zip file holding the same entries under a directory named after the file (`bundle_version` 1 in `manifest.json`):
+`bundle` writes a directory, or with `--zip` one file with the same entries under a directory named after it (`bundle_version` 1):
 
 | File | Content |
 | --- | --- |
-| `manifest.json` | `format` (`agentrecorder-bundle`), `bundle_version`, `generator`, `created_at`, `session` (the stored session row), `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `genesis`, `token_bound`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts` (`from_ms`, `to_ms`, `events`) and `files` (`sha256` and `bytes` of `events.jsonl`, `chain.jsonl` and `session.cast`) |
-| `events.jsonl` | The export envelope above, one line per event that was not cut; redacted events carry the redacted bytes |
-| `chain.jsonl` | One line per recorded event, cut or not: `seq`, `leaf`, `chain`, `fate` (`kept`, `redacted` or `cut`) |
-| `session.cast` | asciicast v3 built from the bundled events, with a `cut FROM-TO` marker per cut range |
-| `index.html` | The dashboard, with the manifest, the cast and the non-byte events inline. It is not listed in `files` |
+| `manifest.json` | `format`, `bundle_version`, `generator`, `created_at`, `session`, `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `genesis`, `token_bound`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts`, `files` (`sha256`, `bytes` of the three data files) |
+| `events.jsonl` | The envelope above, one line per event not cut; redacted events carry redacted bytes |
+| `chain.jsonl` | One line per recorded event: `seq`, `leaf`, `chain`, `fate` (`kept`, `redacted`, `cut`) |
+| `session.cast` | asciicast v3 with a `cut FROM-TO` marker per range |
+| `index.html` | The dashboard with everything inline; not listed in `files` |
 
-Hash chain `sha256-chain-v1`, all hashes lowercase hex:
-
-- `leaf` is SHA-256 of the event's JSON line as `export` prints it, without the newline, computed before redaction.
-- `chain` for seq 0 is SHA-256 of the genesis followed by the leaf; for seq n it is SHA-256 of the previous `chain` followed by the leaf, both as raw 32-byte values.
-- The genesis is 32 zero bytes, or the SHA-256 of the token given to `run --anchor-token`; `manifest.json` `chain.genesis` carries it in hex and `chain.token_bound` says which. A reader that finds no `genesis` field assumes zero bytes.
-- `manifest.json` `chain.head` is the last `chain`.
-
-`agentrecorder anchor` prints lines of `session_id`, `seq`, `chain` (the same value as `chain.jsonl` at that seq), `genesis` (as in the manifest) and `timestamp` (when the line was printed, informational).
-
-## Compatibility rules
-
-- Adding an event type or a payload field is compatible and keeps version 1.
-- Removing or renaming a field, or changing its meaning, increments `schema_version`.
+Hash chain `sha256-chain-v1`, lowercase hex: `leaf` is SHA-256 of the exported JSON line before redaction; `chain` is SHA-256 of the previous chain (or the genesis for seq 0) followed by the leaf, as raw bytes. The genesis is 32 zero bytes or the SHA-256 of the `run --anchor-token` token; `chain.token_bound` says which. An anchor line carries `session_id`, `seq`, `chain`, `genesis` and `timestamp`.

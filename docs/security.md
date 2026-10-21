@@ -1,69 +1,61 @@
-# Security and threat model
+# Security
 
-## Assets
+## Assets and boundaries
 
-- Terminal output: source code, file contents, tokens printed by tools, customer data.
-- Terminal input: passwords typed at prompts, API keys pasted into agents.
-- Environment variables of the managed process: API keys and cloud credentials.
-- The live PTY: anyone who can write to it can run commands as the user.
-- Recordings at rest in `state.db`.
-
-## Trust boundaries
+Assets: terminal output and input (code, secrets, passwords), the environment of the managed process, the live PTY, recordings in `state.db`.
 
 | Boundary | Assumption |
 | --- | --- |
-| Same Unix user | Trusted. Any process running as the user can already read `~/.ssh`, ptrace the agent, or read its memory. `agentrecorder` does not defend against it. |
-| Other local users | Untrusted. They must not attach, read recordings, or send control requests. |
-| root | Out of scope. |
-| Bytes produced by the managed process | Untrusted. They are replayed into the user's terminal and can contain escape sequences. |
-| Network | Not used. `agentrecorder` opens no network sockets. |
+| Same Unix user | Trusted; it can already read `~/.ssh` or ptrace the agent |
+| Other local users | Untrusted; must not attach, read or control |
+| root | Out of scope |
+| Bytes from the managed process | Untrusted; they are replayed into a terminal |
+| Network | Not used |
 
 ## Controls
 
-| Threat | Control | Code or test |
+| Threat | Control | Where |
 | --- | --- | --- |
-| Another user attaches or sends `stop` | State directories are created 0700 and tightened if looser; ownership is checked; sockets are chmod 0600; the supervisor rejects peers whose uid differs (`SO_PEERCRED` / `getpeereid`), which also covers systems that ignore socket file permissions | `layout.rs`, `peer.rs`, `state_files_are_private` |
-| Another user reads recordings | The process umask is 077, so `state.db`, its WAL and logs are 0600 | `main.rs`, `state_files_are_private` |
-| Secrets in environment variables are persisted | The environment is never written to the store or logs. Only argv and cwd are stored. | `input_is_recorded_only_when_enabled_and_env_is_never_stored` |
-| Typed passwords are persisted | Input recording is off by default and requires `--record-input` | same test |
-| Output recording captures secrets | Output recording is on by default because replay and recovery depend on it; `run` (attached) prints `(recording output)` at start, while `run -d` prints only the session id; `--no-record` turns it off; `--max-record-mb` caps it | `run.rs` |
-| Recordings kept forever | Finished sessions older than `AGENTRECORDER_RETENTION_DAYS` (default 30, 0 disables) are deleted when a new session starts; `agentrecorder prune` and `agentrecorder rm` delete on demand | `run.rs`, `sessions.rs` |
-| Deleted data remains on disk | `secure_delete=ON` overwrites freed pages. `rm` and `prune` also delete events left without a session row, and always end with `wal_checkpoint(TRUNCATE)`. If another agentrecorder process holds a read transaction, the checkpoint cannot complete; `rm` and `prune` then warn that the data stays in `state.db-wal` until that process finishes, and running `prune` again afterwards scrubs it. | `delete_removes_events_and_session`, `delete_under_a_reader_reports_pending_wal_and_a_later_checkpoint_scrubs`, `orphan_events_are_removed` |
-| A live session is deleted | `rm` and retention delete only `exited` or `lost` sessions. A session whose socket is missing while its supervisor process (matched by command line and session id) still runs is `unreachable`, not `lost`. | `missing_socket_with_live_supervisor_is_unreachable_not_lost` |
-| Replayed output attacks the terminal | `replay` keeps only allowlisted OSC sequences (0-2 titles, 7 working directory, 8 hyperlinks, 133 prompt marks, and color settings that are not queries); everything else, including OSC 52 clipboard writes and vendor sequences such as OSC 1337 and 5522, is dropped. CSI sequences are also allowlisted: only cursor movement, erase, insert and delete, scrolling regions, SGR, tab stops, DECSET and DECRST modes, cursor style (`CSI Ps SP q`) and soft reset (`CSI ! p`) pass. Every report or query (DSR, DA, XTVERSION, DECRQM, DECRQSS, DECRQPSR, DECRQCRA, XTQMODKEYS, XTREPORTCOLORS, XTSMGRAPHICS, window ops, kitty keyboard) is dropped, as are DECID (`ESC Z`), all DCS, APC, PM and SOS strings, and C1 control characters in raw and UTF-8 encoded form. A sequence that contains a C0 or non-ASCII byte is dropped whole (including `ESC` followed by a raw C1 byte), OSC strings that contain C1 are dropped, and CAN, SUB and the C1 string terminator (raw or UTF-8 encoded) end strings as they do in terminals. Modes are allowlisted too: only cursor, wrap, origin, reverse video, blink, alternate screen and synchronized output (`CSI ? Pm h/l`) and insert and newline modes (`CSI Pm h/l`) pass, so replay cannot turn on mouse or focus reporting, bracketed paste or keyboard lock; REP counts above 1024 are dropped; OSC 7 is dropped and OSC 8 links are kept only for `http`, `https` and `mailto`; charset designations pass but `ESC %` and `ESC SP` sequences do not. After replay the client resets colors and modes and discards terminal input that arrived during playback. A recording therefore cannot write the clipboard or make the terminal type a response into the shell. `--raw` disables the filter. | `sanitize.rs` unit tests, `replay_honours_speed_offset_and_filters_dangerous_sequences` |
-| Accidental re-execution of destructive commands | `replay` never executes anything. `recover --restart` and `--resume` start a new session only after an interactive confirmation or `--yes`, and refuse without a TTY | `recover_exited_session_shows_history_and_restarts_only_on_request` |
-| Oversized or malformed protocol frames | Frames over 4 MiB and unknown frame kinds close the connection; the `Hello` frame and any control request must arrive within 5 s in total, so a peer cannot hold a connection thread by sending bytes slowly | `protocol.rs` |
-| The agent inherits restrictive or unsafe process state from agentrecorder | The child starts with default signal dispositions and an empty signal mask (an ignored SIGINT or SIGHUP in the caller does not carry over), descriptors above 2 inherited from the calling shell are closed on exec, and the caller's umask is restored, so the 077 umask that protects agentrecorder's own files does not make the agent's files private | `the_child_gets_default_signals_the_users_umask_and_no_inherited_fds` |
-| Supervisor-run git commands interfere with the user's repository | `git rev-parse`, `git status`, `git diff --name-status` and `git ls-files` run with `GIT_OPTIONAL_LOCKS=0`, never write, and are bounded to 3 s; only the commit id, the paths that are modified, untracked or changed since the start HEAD (capped at 500) and their counts are stored, never file contents | `notifications_idle_time_and_git_state_are_measured` |
-| Output can inject text through notifications or titles | Notification and title text is stored with control characters removed and a length cap (512 and 256 characters) | `modes.rs` unit tests |
-| `inspect` reads the agent transcript | The transcript named by the hooks is opened read-only when `inspect` runs. From `assistant` lines only `type`, `timestamp`, `requestId`, `uuid`, `message.id`, `message.model` and `message.usage` are read; from `user` lines `timestamp`, `origin.kind`, `isMeta`, `isCompactSummary`, `isSidechain` and the text and image blocks of `message.content`. Nothing from it is written to the store or a bundle by `inspect`; the `Stop` and `SessionEnd` hooks write only the summed counts and model names (next row). The terminal and `--json` get the counts, the model names, the path and per-prompt lengths and origins; the prompt text only with `--prompts`, and in text output with control characters replaced, so a transcript cannot send escape sequences to the terminal | `injected_claude_hooks_record_agent_events_without_prompt_text`, `transcript.rs` unit tests |
-| Agent hooks record the prompt or tool content | `agentrecorder hook` keeps an allowlist of metadata fields with length caps; `prompt`, `tool_input` and `last_assistant_message` are dropped before the event leaves the hook process. At `Stop` and `SessionEnd` it reads the transcript named by the hook the same way `inspect` does and records only `usage` (token sums, API call count, model names, lines outside the session); no prompt or reply text leaves the hook. It prints nothing on stdout, so it cannot inject context or a permission decision into the agent. | `hook.rs` unit tests, `injected_claude_hooks_record_agent_events_without_prompt_text`, `the_hook_command_never_fails_the_agent` |
-| Attaching a session to itself | Refused when `AGENTRECORDER_SESSION` equals the target id | `attach.rs` |
-| Terminal left in raw mode | The client restores the saved terminal settings on detach, exit, errors, and SIGTERM, SIGINT or SIGHUP | `killing_the_client_restores_the_terminal` |
-| A shared bundle leaks a secret | `bundle --redact` masks matches in output, input, snapshots, payload strings, session metadata and the cast header; `--cut` removes a time range. The patterns are not stored. `bundle` writes files 0600 under the 077 umask, so sharing is an explicit copy | `bundles_redact_verify_and_detect_changes_against_anchors`, `bundle.rs` unit tests |
-| Recorded output runs script in the dashboard | Data is embedded as JSON with `<`, `>` and `&` escaped, so it cannot close the script element; the page inserts text with `textContent` only; a Content-Security-Policy allows only inline scripts and styles (the player is vendored into the page) and has no `connect-src`, so the page makes no network request and cannot send the data anywhere | `dashboard_data_cannot_close_the_script_element` |
-| A bundle is edited after the fact | Each event's hash is chained in `chain.jsonl`; `verify` rechecks kept events, the chain, the file digests and, with `--anchors`, the chain values a third party received while the session ran | `bundles_redact_verify_and_detect_changes_against_anchors` |
-| A bundle or anchors are presented for a session the reviewer did not issue | `run --anchor-token` seeds the hash chain with the SHA-256 of a token the reviewer handed out; only the digest is stored or printed, and `verify --token` fails for a bundle or anchors made with another token or none | `anchor_token_binds_the_chain_and_verify_checks_it`, `chain.rs` unit tests |
-| A zip bundle names paths outside its directory | `verify` and `view` read entries by exact name under the single prefix that holds `manifest.json` and never extract an archive to disk; `view` writes only `index.html` under `views/ID`, with the id taken from the manifest and refused if it contains `/` | `bundle_zip_holds_the_same_files_and_verify_and_view_read_it` |
-| Dashboard copies outlive the session | `view ID` writes under `$AGENTRECORDER_HOME/views/ID` (0700) and `rm`, `prune` and retention delete it with the session | `view_writes_a_private_dashboard_that_rm_deletes` |
-| Corrupt store hides recordings | `agentrecorder` reports the path and does not overwrite the file | `corrupt_store_is_reported_not_overwritten` |
+| Another user attaches or controls a session | State directories 0700, sockets 0600, peer uid checked (`SO_PEERCRED`, `getpeereid`) | `layout.rs`, `peer.rs` |
+| Another user reads recordings | umask 077: `state.db`, WAL and logs are 0600 | `main.rs` |
+| Environment secrets persisted | The environment is never written; only argv and cwd | `supervisor.rs` |
+| Typed passwords persisted | Input recording off unless `--record-input` | `run.rs` |
+| Output captures secrets | `run` prints `(recording output)`; `--no-record`, `--max-record-mb` | `run.rs` |
+| Recordings kept forever | Retention (`AGENTRECORDER_RETENTION_DAYS`, default 30), `prune`, `rm` | `run.rs`, `sessions.rs` |
+| Deleted data stays on disk | `secure_delete=ON`, orphan cleanup, `wal_checkpoint(TRUNCATE)`; a reader that blocks the checkpoint is reported and a later `prune` scrubs | `store/lib.rs` |
+| A live session is deleted | Only `exited` or `lost` sessions; a session whose supervisor still runs is `unreachable` | `state.rs` |
+| Replayed output attacks the terminal | Allowlist: OSC 0-2, 7, 8 (`http`, `https`, `mailto`), 133 and non-query colors; CSI cursor, erase, scroll, SGR, tabs, DEC modes (cursor, wrap, origin, reverse, blink, alternate screen, synchronized output), cursor style, soft reset. Every query and report, DCS, APC, PM, SOS, C1, OSC 52 and vendor sequences are dropped; REP capped at 1024. The client resets modes afterwards and discards input typed during playback. `--raw` disables | `sanitize.rs` |
+| Re-execution of destructive commands | `replay` executes nothing; `recover --restart` and `--resume` need confirmation or `-y` and a TTY | `recover.rs` |
+| Malformed or slow protocol peers | Frames over 4 MiB and unknown kinds close the connection; `Hello` plus request within 5 s | `protocol.rs` |
+| Unsafe process state inherited by the agent | Default signals, empty mask, close-on-exec above fd 2, the caller's umask | `pty.rs` |
+| Supervisor git commands touch the repository | Read-only, `GIT_OPTIONAL_LOCKS=0`, 3 s bound; only commit id, paths and counts stored | `supervisor.rs` |
+| Output injects text via notifications or titles | Control characters removed, 512 and 256 character caps | `modes.rs` |
+| Transcript and hook data leak prompts | `inspect` reads the transcript read-only and takes only usage, ids, timestamps, origins and prompt text (shown only with `--prompts`, control characters replaced). `agentrecorder hook` keeps an allowlist of metadata fields; `prompt`, `tool_input` and `last_assistant_message` are dropped in the hook process; at `Stop` it records only token sums and model names. It prints nothing on stdout | `transcript.rs`, `hook.rs` |
+| Attaching a session to itself | Refused when `AGENTRECORDER_SESSION` equals the target | `attach.rs` |
+| Terminal left in raw mode | Restored on detach, exit, error, SIGTERM, SIGINT, SIGHUP | `attach.rs` |
+| A shared bundle leaks a secret | `--redact*` masks output, input, snapshots, payloads, metadata and the cast header; `--cut` removes a range; patterns are not stored; files are 0600 | `bundle.rs` |
+| Recorded output runs script in the dashboard | Data embedded as JSON with `<`, `>`, `&` escaped; `textContent` only; CSP with inline script and style only and no `connect-src` | `dashboard.html` |
+| A bundle is edited afterwards | Hash chain over every event; `verify` rechecks events, chain, digests and anchors | `chain.rs` |
+| A bundle for a session the reviewer did not issue | `run --anchor-token` seeds the chain with the token's SHA-256; only the digest is stored; `verify --token` | `chain.rs` |
+| A zip bundle escapes its directory | Entries read by exact name under the manifest's prefix, never extracted; `view` writes only `index.html` under `views/ID`, id without `/` | `bundle.rs` |
+| Corrupt store | Reported with the path, never overwritten | `store/lib.rs` |
+
+Each row has an end-to-end or unit test; `grep` the control's name in `crates/*/tests` and the module.
 
 ## Residual risks
 
-- argv is stored. A secret passed as a command-line argument (for example `--token xyz`) is persisted and shown by `inspect`. It is also visible to other users through `ps` on most systems.
-- Output recording stores whatever the agent prints, including secrets it echoes. Use `--no-record` for sessions that print credentials.
-- `--record-input` stores everything typed, including passwords at no-echo prompts.
-- The live session snapshot is sent unfiltered on attach. A process running as the user can already write anything to the user's terminal, so this adds no capability.
-- Redaction is pattern based: a secret that no pattern matches stays in the bundle. Redacted events are not hash-checked, so their content is as trustworthy as whoever made the bundle.
-- A bundle is self-reported unless anchors were sent to someone else while the session ran, and even then it covers only the recorded terminal.
-- An anchor token binds a chain to the session it was issued for, not to a person: whoever holds the token can start the session. The token travels on the command line only as its digest, but the token itself is visible to any same-user process while `run` parses its arguments, and in shell history unless passed through `AGENTRECORDER_ANCHOR_TOKEN`.
-- The vendored `asciinema-player` runs with `'wasm-unsafe-eval'` in the page; its version and checksum are in `crates/agentrecorder/src/vendor/asciinema-player/NOTICE`, and a bump replaces the files and that record together.
-- `install.sh` checks the downloaded tarball against the `.sha256` file attached to the same GitHub release, which detects a corrupted download, not a compromised release. Building from source with `cargo install agentrecorder --locked` avoids the trust in release assets.
-- SQLite `secure_delete` does not reach copies made by filesystem snapshots, backups or SSD wear leveling. Full-disk encryption is the control for those.
-- `client_pid` in `session.attached` is self-reported.
-- `agent.hook` events are self-reported. Any process of the same user that knows a session id can send one; the supervisor's uid check stops other users.
-- Process metrics come from `sysinfo` and are readable by the same user only.
+- argv is stored and visible in `ps`; a secret passed as an argument is persisted.
+- Output recording stores what the agent prints. Use `--no-record` for sessions that print credentials.
+- `--record-input` stores passwords typed at no-echo prompts.
+- The attach snapshot is unfiltered; a same-user process can write to the terminal anyway.
+- Redaction is pattern based. Redacted events are not hash-checked.
+- A bundle is self-reported without anchors, and covers only the recorded terminal.
+- An anchor token binds a session, not a person. It is visible to same-user processes and in shell history unless passed through `AGENTRECORDER_ANCHOR_TOKEN`.
+- The vendored `asciinema-player` runs with `'wasm-unsafe-eval'`; version and checksum in `crates/agentrecorder/src/vendor/asciinema-player/NOTICE`.
+- `install.sh` checks the sha256 attached to the same release: it detects corruption, not a compromised release. `cargo install --locked` builds from source.
+- `secure_delete` does not reach filesystem snapshots, backups or SSD wear leveling; full-disk encryption covers those.
+- `agent.hook` events and `client_pid` are self-reported; any same-user process can send them.
 
 ## Reporting
 
-Report vulnerabilities privately to the maintainers through GitHub security advisories on the repository, not in public issues.
+Report vulnerabilities through GitHub security advisories on the repository, not in public issues.
