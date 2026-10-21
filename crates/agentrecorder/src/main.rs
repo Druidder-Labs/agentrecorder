@@ -120,6 +120,8 @@ struct SuperviseArgs {
     restarted_from: Option<String>,
     #[arg(long)]
     agent_session_id: Option<String>,
+    #[arg(long)]
+    hold_output: bool,
     #[arg(last = true, required = true)]
     argv: Vec<String>,
 }
@@ -173,6 +175,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
                 max_record_bytes: a.max_record_bytes,
                 restarted_from: a.restarted_from,
                 agent_session_id: a.agent_session_id,
+                hold_output: a.hold_output,
                 umask: a.umask,
             })
         }

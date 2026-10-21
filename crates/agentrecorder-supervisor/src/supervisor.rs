@@ -48,6 +48,7 @@ const NOTIFICATION_INTERVAL_MS: u64 = 1000;
 const GIT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_TERM: &str = "xterm-256color";
 const MAX_MARK_LABEL: usize = 256;
+const MAX_HELD_OUTPUT: usize = 4 << 20;
 
 pub struct Config {
     pub layout: Layout,
@@ -61,6 +62,7 @@ pub struct Config {
     pub max_record_bytes: u64,
     pub restarted_from: Option<String>,
     pub agent_session_id: Option<String>,
+    pub hold_output: bool,
     pub umask: Option<u32>,
 }
 
@@ -106,6 +108,7 @@ struct Term {
     next_client_id: u64,
     bytes_since_snapshot: u64,
     drops_at_snapshot: u64,
+    held: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -422,6 +425,7 @@ pub fn run(cfg: Config) -> Result<i32> {
             next_client_id: 1,
             bytes_since_snapshot: 0,
             drops_at_snapshot: 0,
+            held: cfg.hold_output.then(Vec::new),
         }),
         master: spawned.master,
         child_pid,
@@ -552,6 +556,7 @@ fn read_pty(shared: &Shared, mut master: File) {
         let (target, notes) = {
             let mut term = shared.term();
             let notes = term.screen.process(data);
+            hold(shared, &mut term, data);
             maybe_snapshot(shared, &mut term, n as u64);
             let target = match term.client.as_ref() {
                 Some(c) if c.backpressure.load(Ordering::SeqCst) => Some((c.id, c.tx.clone(), c.backpressure.clone())),
@@ -579,6 +584,30 @@ fn read_pty(shared: &Shared, mut master: File) {
             if term.client.as_ref().map(|c| c.id) == Some(id) {
                 shared.detach_client(&mut term, DetachReason::ClientTooSlow);
             }
+        }
+    }
+}
+
+fn hold(shared: &Shared, term: &mut Term, data: &[u8]) {
+    let Some(held) = term.held.as_mut() else { return };
+    if held.len() + data.len() <= MAX_HELD_OUTPUT {
+        held.extend_from_slice(data);
+        return;
+    }
+    term.held = None;
+    shared.recorder.event(Body::RuntimeWarning(
+        Notice::new(
+            "pre_attach_output_dropped",
+            "more output arrived before the first client attached than agentrecorder holds for it; the client got a screen snapshot instead",
+        )
+        .with("limit_bytes", MAX_HELD_OUTPUT),
+    ));
+}
+
+fn send_chunks(tx: &Sender<Frame>, data: &[u8]) {
+    for chunk in data.chunks(SNAPSHOT_CHUNK) {
+        if tx.try_send(Frame::Output(chunk.to_vec())).is_err() {
+            break;
         }
     }
 }
@@ -813,17 +842,18 @@ fn attach(shared: &Arc<Shared>, mut reader: UnixStream, writer: UnixStream, hell
     let client_id = {
         let mut term = shared.term();
         if shared.exited.load(Ordering::SeqCst) {
+            if let Some(held) = term.held.take() {
+                send_chunks(&client.tx, &held);
+            }
             let info = shared.exit.lock().unwrap_or_else(|p| p.into_inner()).clone();
             client.close(Frame::Exited(info.unwrap_or(ExitInfo { exit_code: None, signal: None })), false);
             return Ok(());
         }
         shared.detach_client(&mut term, DetachReason::AttachedElsewhere);
         shared.resize(&mut term, hello.rows, hello.cols);
-        let snapshot = term.screen.state_with_history(HISTORY_ON_ATTACH).into_bytes();
-        for chunk in snapshot.chunks(SNAPSHOT_CHUNK) {
-            if client.tx.try_send(Frame::Output(chunk.to_vec())).is_err() {
-                break;
-            }
+        match term.held.take() {
+            Some(held) => send_chunks(&client.tx, &held),
+            None => send_chunks(&client.tx, term.screen.state_with_history(HISTORY_ON_ATTACH).as_bytes()),
         }
         client.id = term.next_client_id;
         term.next_client_id += 1;

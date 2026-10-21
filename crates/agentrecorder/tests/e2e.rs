@@ -1392,3 +1392,27 @@ fn a_slow_interactive_client_is_resynced_instead_of_detached() {
     assert_eq!(reasons, ["client_request"]);
     env.ok(&["stop", &id]);
 }
+
+#[test]
+fn a_pipe_client_gets_output_produced_before_it_attached() {
+    let env = Env::new();
+    let file = env.path().join("lines.txt");
+    let line = format!("{}\n", "b".repeat(98));
+    std::fs::write(&file, line.repeat(200_000)).unwrap();
+    let want = std::fs::read(&file).unwrap();
+    for round in 0..2 {
+        let out = env.command(&["run", "--", "cat", file.to_str().unwrap()]).stdin(Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let mut got: Vec<u8> = out.stdout.iter().copied().filter(|b| *b != b'\r').collect();
+        if let Some(at) = got.windows(4).position(|w| w == b"^D\x08\x08") {
+            got.drain(at..at + 4);
+        }
+        assert_eq!(got.len(), want.len(), "round {round}: {} bytes missing", want.len() as i64 - got.len() as i64);
+        assert!(got == want, "round {round}: content differs");
+    }
+    for round in 0..3 {
+        let out = env.command(&["run", "--", "seq", "1", "30000"]).stdin(Stdio::null()).output().unwrap();
+        let lines = String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(lines, 30000, "round {round}");
+    }
+}

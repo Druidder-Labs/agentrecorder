@@ -81,6 +81,9 @@ pub fn start(layout: &Layout, args: &RunArgs, restarted_from: Option<&str>) -> R
     if let Some(from) = restarted_from {
         cmd.args(["--restarted-from", from]);
     }
+    if !args.detached {
+        cmd.arg("--hold-output");
+    }
     if let Some(agent) = &launch.agent_session_id {
         cmd.args(["--agent-session-id", agent]);
     }

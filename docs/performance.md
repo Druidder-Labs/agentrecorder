@@ -48,7 +48,7 @@ The supervisor's ceiling on this machine is about 70 MiB/s with recording and 77
 
 ### Output produced before the client attaches
 
-The ceiling run showed the pipe client receiving 49 to 141 KB fewer bytes than were recorded, in three runs of a 50 MiB file. `run` starts the process before its own client attaches (about 10 ms), and the attach sends a screen snapshot with at most 1000 lines of history, so output beyond that, produced in the gap, reaches the recording but not the client. The loss happens with v0.1.0 too. With `sleep 0.2` before `cat`, the client received the file byte for byte. It affects only programs that print more than about 1000 lines within the first milliseconds; the recording is complete either way. This is an open defect against AC-19.
+The first ceiling run showed the pipe client receiving 49 to 141 KB fewer bytes than were recorded, in three runs of a 50 MiB file; v0.1.0 lost data the same way. `run` starts the process about 10 ms before its own client attaches, and the attach sent a screen snapshot with at most 1000 lines of history, so earlier output reached the recording but not the client. Since the fix, the supervisor of an attached `run` holds up to 4 MiB of output until the first attach and sends it instead of the snapshot. The rerun delivered 211,833,628 of 211,833,628 recorded bytes to the pipe client. Covered by `a_pipe_client_gets_output_produced_before_it_attached`.
 
 ## Interpretation
 
