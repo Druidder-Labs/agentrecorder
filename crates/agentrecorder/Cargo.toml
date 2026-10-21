@@ -1,0 +1,32 @@
+[package]
+name = "agentrecorder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Run, inspect, recover and replay AI coding agent sessions"
+publish = false
+
+[[bin]]
+name = "agentrecorder"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+agentrecorder-store = { path = "../agentrecorder-store" }
+agentrecorder-supervisor = { path = "../agentrecorder-supervisor" }
+anyhow.workspace = true
+clap.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+sysinfo.workspace = true
+vt100.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+tempfile.workspace = true
+rusqlite.workspace = true

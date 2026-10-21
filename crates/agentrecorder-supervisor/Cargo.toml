@@ -1,0 +1,26 @@
+[package]
+name = "agentrecorder-supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agentrecorder-store = { path = "../agentrecorder-store" }
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vt100.workspace = true
+signal-hook.workspace = true
+sysinfo.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true
