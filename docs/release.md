@@ -6,7 +6,7 @@ Releases are cut by release-please from Conventional Commits on `main`, and the 
 
 1. Every commit on `main` follows Conventional Commits (`feat:`, `fix:`, `docs:`, ...). The `Pull request title` workflow enforces it on PR titles, which become the squash-merge commit titles.
 2. On each push to `main`, the `Release Please` workflow opens or updates a release pull request titled `chore(main): release X.Y.Z`. It computes the version from the commits since the last tag (`feat` bumps the minor, `fix` the patch; while the version is below 1.0.0 a breaking change bumps the minor, not the major) and updates in that PR:
-   - `CHANGELOG.md` (generated; do not edit it by hand),
+   - `CHANGELOG.md` (created by the first release PR and extended by every later one; do not edit it by hand and do not add a hand-written file, or release-please nests the old content under the new entry),
    - `version.txt`,
    - `[workspace.package] version` and the two internal dependency versions in `Cargo.toml`,
    - the three workspace entries in `Cargo.lock`.
