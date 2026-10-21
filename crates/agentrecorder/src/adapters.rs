@@ -35,6 +35,13 @@ const CLAUDE_SUBCOMMANDS: &[&str] = &[
     "update",
 ];
 
+pub const CLAUDE_HOOK_EVENTS: &[&str] =
+    &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop", "StopFailure", "SessionEnd"];
+const HOOK_TIMEOUT_S: u64 = 5;
+const HOOK_SUFFIX: &str = " hook --agent claude";
+
+const CLAUDE_NO_HOOKS: &[&str] = &["-h", "--help", "-v", "--version", "--settings"];
+
 const CLAUDE_NO_INJECT: &[&str] = &[
     "-c",
     "--continue",
@@ -83,28 +90,58 @@ fn file_name(p: &str) -> Option<&str> {
     Path::new(p).file_name()?.to_str()
 }
 
-pub fn prepare(argv: &[String], inject: bool) -> Result<Launch> {
+pub fn prepare(argv: &[String], hook_program: Option<&str>) -> Result<Launch> {
     let unchanged = |id| Launch { argv: argv.to_vec(), agent_session_id: id };
     let Some(at) = agent_index(argv) else { return Ok(unchanged(None)) };
     if program(argv) != Some("claude") {
         return Ok(unchanged(None));
     }
     let args = &argv[at + 1..];
-    if let Some(id) = claude_session_in(args) {
-        return Ok(unchanged(Some(id)));
+    let has = |list: &[&str]| {
+        args.iter()
+            .any(|a| list.contains(&a.split('=').next().unwrap_or(a)) || CLAUDE_SUBCOMMANDS.contains(&a.as_str()))
+    };
+    let Some(hook_program) = hook_program else { return Ok(unchanged(claude_session_in(args))) };
+    let mut inserted = Vec::new();
+    let agent_session_id = match claude_session_in(args) {
+        Some(id) => Some(id),
+        None if !has(CLAUDE_NO_INJECT) => {
+            let id = new_uuid()?;
+            inserted.extend(["--session-id".to_string(), id.clone()]);
+            Some(id)
+        }
+        None => None,
+    };
+    if !has(CLAUDE_NO_HOOKS) {
+        inserted.extend(["--settings".to_string(), claude_hook_settings(hook_program)]);
     }
-    let blocked = args.iter().any(|a| {
-        let flag = a.split('=').next().unwrap_or(a);
-        CLAUDE_NO_INJECT.contains(&flag) || CLAUDE_SUBCOMMANDS.contains(&a.as_str())
-    });
-    if !inject || blocked {
-        return Ok(unchanged(None));
-    }
-    let id = new_uuid()?;
     let mut out = argv[..=at].to_vec();
-    out.extend(["--session-id".to_string(), id.clone()]);
+    out.extend(inserted);
     out.extend_from_slice(args);
-    Ok(Launch { argv: out, agent_session_id: Some(id) })
+    Ok(Launch { argv: out, agent_session_id })
+}
+
+pub fn claude_hook_settings(hook_program: &str) -> String {
+    let command = format!("{}{HOOK_SUFFIX}", shell_quote(hook_program));
+    let entry = serde_json::json!([{"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}]}]);
+    let hooks: serde_json::Map<String, serde_json::Value> =
+        CLAUDE_HOOK_EVENTS.iter().map(|e| (e.to_string(), entry.clone())).collect();
+    serde_json::json!({ "hooks": hooks }).to_string()
+}
+
+fn is_injected_settings(value: &str) -> bool {
+    let Ok(serde_json::Value::Object(top)) = serde_json::from_str::<serde_json::Value>(value) else { return false };
+    let Some(serde_json::Value::Object(hooks)) = top.get("hooks").filter(|_| top.len() == 1) else { return false };
+    !hooks.is_empty()
+        && hooks.values().flat_map(|v| v.as_array().into_iter().flatten()).all(|m| {
+            m["hooks"]
+                .as_array()
+                .is_some_and(|hs| hs.iter().all(|h| h["command"].as_str().is_some_and(|c| c.ends_with(HOOK_SUFFIX))))
+        })
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn claude_session_in(args: &[String]) -> Option<String> {
@@ -124,15 +161,18 @@ fn claude_session_in(args: &[String]) -> Option<String> {
     None
 }
 
-pub fn without_session_id(argv: &[String], id: &str) -> Vec<String> {
+pub fn without_injected(argv: &[String], id: Option<&str>) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     let mut i = 0;
     while i < argv.len() {
-        if argv[i] == "--session-id" && argv.get(i + 1).is_some_and(|v| v == id) {
+        let next = argv.get(i + 1);
+        let pair = (argv[i] == "--session-id" && next.map(String::as_str) == id && id.is_some())
+            || (argv[i] == "--settings" && next.is_some_and(|v| is_injected_settings(v)));
+        if pair {
             i += 2;
             continue;
         }
-        if argv[i].strip_prefix("--session-id=") == Some(id) {
+        if id.is_some() && argv[i].strip_prefix("--session-id=") == id {
             i += 1;
             continue;
         }
@@ -188,6 +228,8 @@ fn new_uuid() -> Result<String> {
 mod tests {
     use super::*;
 
+    const HOOK: &str = "/usr/local/bin/agentrecorder";
+
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
     }
@@ -220,12 +262,16 @@ mod tests {
 
     #[test]
     fn injects_a_uuid_right_after_claude() {
-        let l = prepare(&v(&["env", "A=1", "claude", "--model", "haiku", "fix it"]), true).unwrap();
+        let l = prepare(&v(&["env", "A=1", "claude", "--model", "haiku", "fix it"]), Some(HOOK)).unwrap();
         let id = l.agent_session_id.unwrap();
         assert!(is_uuid(&id), "{id}");
         assert_eq!(&id[14..15], "4");
-        assert_eq!(l.argv, v(&["env", "A=1", "claude", "--session-id", &id, "--model", "haiku", "fix it"]));
-        let other = prepare(&v(&["claude"]), true).unwrap().agent_session_id.unwrap();
+        let settings = claude_hook_settings(HOOK);
+        assert_eq!(
+            l.argv,
+            v(&["env", "A=1", "claude", "--session-id", &id, "--settings", &settings, "--model", "haiku", "fix it"])
+        );
+        let other = prepare(&v(&["claude"]), Some(HOOK)).unwrap().agent_session_id.unwrap();
         assert_ne!(id, other);
     }
 
@@ -236,19 +282,29 @@ mod tests {
             v(&["codex"]),
             v(&["gemini"]),
             v(&["claude", "mcp", "list"]),
+            v(&["claude", "--version"]),
+            v(&["claude", "-h"]),
+            v(&["claude", "--settings", "{}", "--continue"]),
+        ] {
+            let l = prepare(&argv, Some(HOOK)).unwrap();
+            assert_eq!(l.argv, argv);
+            assert_eq!(l.agent_session_id, None, "{argv:?}");
+        }
+        for argv in [
             v(&["claude", "--continue"]),
             v(&["claude", "-r"]),
             v(&["claude", "--resume", "my-session-name"]),
             v(&["claude", "--resume", "4b41da33-24de-41bb-92ef-77589bb77d13", "--fork-session"]),
-            v(&["claude", "--version"]),
             v(&["claude", "--no-session-persistence", "-p", "hi"]),
             v(&["claude", "--from-pr=12"]),
         ] {
-            let l = prepare(&argv, true).unwrap();
-            assert_eq!(l.argv, argv);
+            let l = prepare(&argv, Some(HOOK)).unwrap();
+            let mut want = vec![argv[0].clone(), "--settings".into(), claude_hook_settings(HOOK)];
+            want.extend_from_slice(&argv[1..]);
+            assert_eq!(l.argv, want, "hooks only");
             assert_eq!(l.agent_session_id, None, "{argv:?}");
         }
-        let l = prepare(&v(&["claude", "--model", "haiku"]), false).unwrap();
+        let l = prepare(&v(&["claude", "--model", "haiku"]), None).unwrap();
         assert_eq!(l.argv, v(&["claude", "--model", "haiku"]));
         assert_eq!(l.agent_session_id, None);
     }
@@ -262,20 +318,40 @@ mod tests {
             v(&["claude", "-r", id]),
             v(&["claude", "--resume", id]),
         ] {
-            let l = prepare(&argv, true).unwrap();
+            let l = prepare(&argv, None).unwrap();
             assert_eq!(l.argv, argv);
             assert_eq!(l.agent_session_id.as_deref(), Some(id), "{argv:?}");
+            let hooked = prepare(&argv, Some(HOOK)).unwrap();
+            assert_eq!(hooked.agent_session_id.as_deref(), Some(id), "{argv:?}");
+            assert!(!hooked.argv.contains(&"--session-id".to_string()) || argv.contains(&"--session-id".to_string()));
         }
     }
 
     #[test]
-    fn removes_only_the_matching_session_id() {
+    fn removes_only_what_was_injected() {
         let id = "4b41da33-24de-41bb-92ef-77589bb77d13";
-        let argv = v(&["claude", "--session-id", id, "--model", "haiku"]);
-        assert_eq!(without_session_id(&argv, id), v(&["claude", "--model", "haiku"]));
+        let ours = claude_hook_settings("/other/path/agentrecorder");
+        let argv = v(&["claude", "--session-id", id, "--settings", &ours, "--model", "haiku"]);
+        assert_eq!(without_injected(&argv, Some(id)), v(&["claude", "--model", "haiku"]));
         let eq = v(&["claude", &format!("--session-id={id}"), "-p", "x"]);
-        assert_eq!(without_session_id(&eq, id), v(&["claude", "-p", "x"]));
+        assert_eq!(without_injected(&eq, Some(id)), v(&["claude", "-p", "x"]));
         let other = v(&["claude", "--session-id", "00000000-0000-4000-8000-000000000000"]);
-        assert_eq!(without_session_id(&other, id), other);
+        assert_eq!(without_injected(&other, Some(id)), other);
+        let users =
+            v(&["claude", "--settings", r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#]);
+        assert_eq!(without_injected(&users, None), users);
+        let file = v(&["claude", "--settings", "./settings.json"]);
+        assert_eq!(without_injected(&file, None), file);
+    }
+
+    #[test]
+    fn hook_settings_quote_the_program_and_cover_every_event() {
+        let s: serde_json::Value = serde_json::from_str(&claude_hook_settings("/a b/it's/agentrecorder")).unwrap();
+        for e in CLAUDE_HOOK_EVENTS {
+            let h = &s["hooks"][e][0]["hooks"][0];
+            assert_eq!(h["type"], "command");
+            assert_eq!(h["timeout"], HOOK_TIMEOUT_S);
+            assert_eq!(h["command"], r"'/a b/it'\''s/agentrecorder' hook --agent claude");
+        }
     }
 }

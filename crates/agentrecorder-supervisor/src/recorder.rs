@@ -114,19 +114,26 @@ impl Recorder {
         self.send_bulk(ev, data.len());
     }
 
-    fn send_bulk(&self, ev: NewEvent, bytes: usize) {
+    fn send_bulk(&self, ev: NewEvent, bytes: usize) -> bool {
         let queued = &self.counters.queued_bytes;
         if self.tx.len() >= QUEUE_CAPACITY - LIFECYCLE_HEADROOM
             || queued.load(Ordering::Relaxed) + bytes as u64 > QUEUE_BYTES
         {
             self.count_drop(bytes);
-            return;
+            return false;
         }
         queued.fetch_add(bytes as u64, Ordering::Relaxed);
         if self.tx.try_send(Msg::Event(ev)).is_err() {
             queued.fetch_sub(bytes as u64, Ordering::Relaxed);
             self.count_drop(bytes);
+            return false;
         }
+        true
+    }
+
+    pub fn best_effort(&self, body: Body) -> bool {
+        let ev = self.new_event(body, None);
+        self.send_bulk(ev, 0)
     }
 
     pub fn event(&self, body: Body) {

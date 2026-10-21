@@ -84,6 +84,8 @@ enum Command {
         #[arg(long, default_value = "30d", help = "Age such as 12h, 7d or 90m")]
         older_than: String,
     },
+    #[command(about = "Record an agent hook event (JSON on stdin) in the session named by AGENTRECORDER_SESSION")]
+    Hook(commands::hook::HookArgs),
     #[command(name = "__supervise", hide = true)]
     Supervise(SuperviseArgs),
 }
@@ -128,6 +130,9 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli) -> anyhow::Result<i32> {
+    if let Command::Hook(args) = cli.command {
+        return Ok(commands::hook::hook(args));
+    }
     let layout = Layout::from_env()?;
     if !matches!(cli.command, Command::Supervise(_)) {
         agentrecorder_supervisor::default_sigpipe();
@@ -144,6 +149,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Command::Export(args) => commands::export::export(&layout, args),
         Command::Rm { sessions } => commands::sessions::remove(&layout, &sessions),
         Command::Prune { older_than } => commands::sessions::prune(&layout, &older_than),
+        Command::Hook(_) => unreachable!("handled before the state directory is resolved"),
         Command::Supervise(a) => {
             layout.ensure()?;
             agentrecorder_supervisor::run(agentrecorder_supervisor::Config {

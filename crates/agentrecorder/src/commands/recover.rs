@@ -123,10 +123,7 @@ fn describe(store: &Store, s: &Session) -> Result<()> {
 
 fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &DetachKey) -> Result<i32> {
     let resume = adapters::resume_for(&s.command, s.agent_session_id.as_deref());
-    let restart_argv = match &s.agent_session_id {
-        Some(id) => adapters::without_session_id(&s.command, id),
-        None => s.command.clone(),
-    };
+    let restart_argv = adapters::without_injected(&s.command, s.agent_session_id.as_deref());
     if !args.restart && !args.resume {
         println!("Options:");
         println!("  agentrecorder replay {}            view the recorded output", s.id);
@@ -168,7 +165,7 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
         record_input: s.record_input,
         max_record_mb: original_record_cap_mb(store, s)?,
         detach_key: args.detach_key.clone(),
-        no_agent_session_id: false,
+        no_agent_integration: false,
         cwd,
         command: argv,
     };

@@ -9,7 +9,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::Value;
 
-pub use events::{Body, DetachReason, GitPhase, Notice, NotificationSource, SnapshotReason, TerminationReason, kind};
+pub use events::{
+    AgentHook, Body, DetachReason, GitPhase, Notice, NotificationSource, SnapshotReason, TerminationReason, kind,
+};
 pub use time::{format_rfc3339, now_unix_ns};
 
 pub const EVENT_SCHEMA_VERSION: u32 = 1;

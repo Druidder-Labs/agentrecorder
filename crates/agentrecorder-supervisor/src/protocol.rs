@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 
+use agentrecorder_store::AgentHook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,6 +31,7 @@ pub enum Control {
     Status,
     Stop { signal: i32, grace_ms: u64 },
     Detach,
+    AgentHook { event: Box<AgentHook> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 pub mod export;
+pub mod hook;
 pub mod inspect;
 pub mod recover;
 pub mod replay;

@@ -17,6 +17,7 @@ pub mod kind {
     pub const GIT_SNAPSHOT: &str = "git.snapshot";
     pub const RUNTIME_WARNING: &str = "runtime.warning";
     pub const RUNTIME_ERROR: &str = "runtime.error";
+    pub const AGENT_HOOK: &str = "agent.hook";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,6 +74,34 @@ pub enum Body {
     RuntimeWarning(Notice),
     #[serde(rename = "runtime.error")]
     RuntimeError(Notice),
+    #[serde(rename = "agent.hook")]
+    AgentHook(Box<AgentHook>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHook {
+    pub agent: String,
+    pub hook_event_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +200,7 @@ impl Body {
             Body::GitSnapshot { .. } => kind::GIT_SNAPSHOT,
             Body::RuntimeWarning(_) => kind::RUNTIME_WARNING,
             Body::RuntimeError(_) => kind::RUNTIME_ERROR,
+            Body::AgentHook(_) => kind::AGENT_HOOK,
         }
     }
 
@@ -227,6 +257,14 @@ mod tests {
             Body::GitSnapshot { phase: GitPhase::Start, head: Some("abc".into()), dirty_paths: Some(2) },
             Body::RuntimeWarning(Notice::new("events_dropped", "x").with("dropped_events", 3)),
             Body::RuntimeError(Notice::new("spawn_failed", "y")),
+            Body::AgentHook(Box::new(AgentHook {
+                agent: "claude".into(),
+                hook_event_name: "Notification".into(),
+                session_id: Some("4b41da33-24de-41bb-92ef-77589bb77d13".into()),
+                notification_type: Some("permission_prompt".into()),
+                message: Some("Claude needs your permission".into()),
+                ..AgentHook::default()
+            })),
         ]
     }
 

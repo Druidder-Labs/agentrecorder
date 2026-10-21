@@ -109,6 +109,10 @@ struct DetachReply {
     detached: bool,
 }
 
+pub fn agent_hook(layout: &Layout, id: &str, event: agentrecorder_store::AgentHook) -> Result<(), ConnectError> {
+    control(layout, id, Control::AgentHook { event: Box::new(event) }).map(|_| ())
+}
+
 pub fn detach(layout: &Layout, id: &str) -> Result<bool, ConnectError> {
     let reply: DetachReply = serde_json::from_value(control(layout, id, Control::Detach)?)
         .map_err(|e| ConnectError::Rejected(format!("malformed detach reply: {e}")))?;

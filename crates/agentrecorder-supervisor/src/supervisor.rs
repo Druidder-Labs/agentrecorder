@@ -673,6 +673,10 @@ fn control(shared: &Arc<Shared>, c: Control) -> Frame {
             shared.detach_client(&mut term, DetachReason::DetachRequested);
             Frame::Reply(serde_json::json!({"detached": had}))
         }
+        Control::AgentHook { event } => {
+            let recorded = shared.recorder.best_effort(Body::AgentHook(event));
+            Frame::Reply(serde_json::json!({"recorded": recorded}))
+        }
     }
 }
 

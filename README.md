@@ -51,6 +51,7 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |
 | `export ID` | JSON Lines, asciicast v2 or asciicast v3 |
 | `rm ID`, `prune` | Delete finished sessions and their recordings |
+| `hook` | Record an agent hook event; `run` wires it into Claude Code for you |
 
 Every command has `--help`. The full reference, including scripting behavior and what each recovery case means, is in `docs/cli.md`.
 

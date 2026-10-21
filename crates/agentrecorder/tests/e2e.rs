@@ -935,10 +935,12 @@ fn claude_sessions_get_a_pre_assigned_id_used_for_exact_resume_and_fresh_on_rest
     let agent = info["session"]["agent_session_id"].as_str().expect("agent session id").to_string();
     assert!(is_uuid_v4(&agent), "{agent}");
     let argv: Vec<&str> = info["session"]["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-    assert_eq!(argv, ["env", "A=1", claude.as_str(), "--session-id", agent.as_str(), "--model", "haiku"]);
+    assert_eq!(argv[..5], ["env", "A=1", claude.as_str(), "--session-id", agent.as_str()]);
+    assert_eq!(argv[5], "--settings");
+    assert_eq!(argv[7..], ["--model", "haiku"]);
     let created = env.events(&id).into_iter().find(|e| e["event_type"] == "session.created").unwrap();
     assert_eq!(created["payload"]["agent_session_id"], agent.as_str());
-    assert!(env.ok(&["replay", &id, "--instant"]).contains(&format!("--session-id {agent} --model haiku")));
+    assert!(env.ok(&["replay", &id, "--instant"]).contains(&format!("--session-id {agent} --settings")));
     assert!(env.ok(&["inspect", &id]).contains(&format!("Agent session:   {agent}")));
 
     let offer = env.ok(&["recover", &id]);
@@ -964,7 +966,7 @@ fn claude_sessions_get_a_pre_assigned_id_used_for_exact_resume_and_fresh_on_rest
 fn session_ids_are_not_injected_when_disabled_or_already_chosen() {
     let env = Env::new();
     let claude = fake_claude(&env);
-    let off = env.ok(&["run", "-d", "--no-agent-session-id", "--", &claude, "-p", "hi"]).trim().to_string();
+    let off = env.ok(&["run", "-d", "--no-agent-integration", "--", &claude, "-p", "hi"]).trim().to_string();
     let continued = env.start_detached(&[&claude, "--continue"]);
     let given = "4b41da33-24de-41bb-92ef-77589bb77d13";
     let chosen = env.start_detached(&[&claude, "--session-id", given]);
@@ -979,4 +981,87 @@ fn session_ids_are_not_injected_when_disabled_or_already_chosen() {
     }
     let resume = env.ok(&["recover", &continued]);
     assert!(resume.contains(&format!("run `{claude} --continue`")), "{resume}");
+}
+
+fn fake_claude_running_hooks(env: &Env) -> String {
+    let dir = env.path().join("hookbin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("claude");
+    let script = r#"#!/usr/bin/env python3
+import json, subprocess, sys
+args = sys.argv[1:]
+sid = args[args.index("--session-id") + 1]
+hooks = json.loads(args[args.index("--settings") + 1])["hooks"]
+def fire(name, **fields):
+    cmd = hooks[name][0]["hooks"][0]["command"]
+    payload = dict(hook_event_name=name, session_id=sid, transcript_path="/t/" + sid + ".jsonl", **fields)
+    r = subprocess.run(["sh", "-c", cmd], input=json.dumps(payload).encode(), capture_output=True)
+    print("HOOK %s exit=%d stdout=%r" % (name, r.returncode, r.stdout.decode()), flush=True)
+fire("SessionStart", source="startup", model="haiku")
+fire("UserPromptSubmit", prompt="the-secret-prompt", permission_mode="default")
+fire("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+fire("Stop", last_assistant_message="the-secret-reply")
+"#;
+    std::fs::write(&path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn injected_claude_hooks_record_agent_events_without_prompt_text() {
+    let env = Env::new();
+    let claude = fake_claude_running_hooks(&env);
+    let id = env.start_detached(&[&claude]);
+    env.wait_status(&id, "exited");
+    let out = env.ok(&["replay", &id, "--instant"]);
+    for name in ["SessionStart", "UserPromptSubmit", "Notification", "Stop"] {
+        assert!(out.contains(&format!("HOOK {name} exit=0 stdout=''")), "{out}");
+    }
+    let agent = env.inspect(&id)["session"]["agent_session_id"].as_str().unwrap().to_string();
+    let hooks: Vec<_> = env.events(&id).into_iter().filter(|e| e["event_type"] == "agent.hook").collect();
+    let names: Vec<_> = hooks.iter().map(|e| e["payload"]["hook_event_name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["SessionStart", "UserPromptSubmit", "Notification", "Stop"]);
+    for e in &hooks {
+        assert_eq!(e["payload"]["agent"], "claude");
+        assert_eq!(e["payload"]["session_id"], agent.as_str());
+    }
+    assert_eq!(hooks[0]["payload"]["source"], "startup");
+    assert_eq!(hooks[2]["payload"]["notification_type"], "permission_prompt");
+    assert_eq!(hooks[2]["payload"]["message"], "Claude needs your permission");
+    let all = env.ok(&["export", &id, "--format", "jsonl"]);
+    assert!(!all.contains("the-secret-prompt") && !all.contains("the-secret-reply"));
+    let db = std::fs::read(env.db()).unwrap();
+    assert!(!db.windows(17).any(|w| w == b"the-secret-prompt"));
+}
+
+#[test]
+fn the_hook_command_never_fails_the_agent() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "sleep 30"]);
+    let send = |session: Option<&str>, input: &str| {
+        let mut c = env.command(&["hook", "--agent", "claude"]);
+        if let Some(s) = session {
+            c.env("AGENTRECORDER_SESSION", s);
+        }
+        let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let ok = send(Some(&id), r#"{"hook_event_name":"Stop","session_id":"x"}"#);
+    assert!(ok.status.success() && ok.stdout.is_empty() && ok.stderr.is_empty(), "{ok:?}");
+    for (session, input) in [
+        (None, r#"{"hook_event_name":"Stop"}"#),
+        (Some("ffffff"), r#"{"hook_event_name":"Stop"}"#),
+        (Some("../../x"), r#"{"hook_event_name":"Stop"}"#),
+        (Some(id.as_str()), "not json"),
+    ] {
+        let out = send(session, input);
+        assert!(out.status.success(), "{session:?} {input}: {out:?}");
+        assert!(out.stdout.is_empty(), "{session:?} {input}: {out:?}");
+    }
+    wait_for("agent.hook event", || env.events(&id).iter().any(|e| e["event_type"] == "agent.hook"));
+    let hooks = env.events(&id).into_iter().filter(|e| e["event_type"] == "agent.hook").count();
+    assert_eq!(hooks, 1);
+    env.ok(&["stop", &id]);
 }

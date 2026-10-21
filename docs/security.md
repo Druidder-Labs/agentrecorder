@@ -36,6 +36,7 @@
 | The agent inherits restrictive or unsafe process state from agentrecorder | The child starts with default signal dispositions and an empty signal mask (an ignored SIGINT or SIGHUP in the caller does not carry over), descriptors above 2 inherited from the calling shell are closed on exec, and the caller's umask is restored, so the 077 umask that protects agentrecorder's own files does not make the agent's files private | `the_child_gets_default_signals_the_users_umask_and_no_inherited_fds` |
 | Supervisor-run git commands interfere with the user's repository | `git rev-parse` and `git status` run with `GIT_OPTIONAL_LOCKS=0`, never write, and are bounded to 3 s; only the commit id and a count of changed paths are stored | `notifications_idle_time_and_git_state_are_measured` |
 | Output can inject text through notifications or titles | Notification and title text is stored with control characters removed and a length cap (512 and 256 characters) | `modes.rs` unit tests |
+| Agent hooks record the prompt or tool content | `agentrecorder hook` keeps an allowlist of metadata fields with length caps; `prompt`, `tool_input` and `last_assistant_message` are dropped before the event leaves the hook process. It prints nothing on stdout, so it cannot inject context or a permission decision into the agent. | `hook.rs` unit tests, `injected_claude_hooks_record_agent_events_without_prompt_text`, `the_hook_command_never_fails_the_agent` |
 | Attaching a session to itself | Refused when `AGENTRECORDER_SESSION` equals the target id | `attach.rs` |
 | Terminal left in raw mode | The client restores the saved terminal settings on detach, exit, errors, and SIGTERM, SIGINT or SIGHUP | `killing_the_client_restores_the_terminal` |
 | Corrupt store hides recordings | `agentrecorder` reports the path and does not overwrite the file | `corrupt_store_is_reported_not_overwritten` |
@@ -48,6 +49,7 @@
 - The live session snapshot is sent unfiltered on attach. A process running as the user can already write anything to the user's terminal, so this adds no capability.
 - SQLite `secure_delete` does not reach copies made by filesystem snapshots, backups or SSD wear leveling. Full-disk encryption is the control for those.
 - `client_pid` in `session.attached` is self-reported.
+- `agent.hook` events are self-reported. Any process of the same user that knows a session id can send one; the supervisor's uid check stops other users.
 - Process metrics come from `sysinfo` and are readable by the same user only.
 
 ## Reporting

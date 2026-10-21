@@ -34,9 +34,9 @@ pub struct RunArgs {
     pub detach_key: String,
     #[arg(
         long,
-        help = "Do not add --session-id to a Claude Code command; recover --resume then continues the most recent conversation"
+        help = "Do not add --session-id or hook settings to a Claude Code command; recover --resume then continues the most recent conversation"
     )]
-    pub no_agent_session_id: bool,
+    pub no_agent_integration: bool,
     #[arg(long, help = "Working directory for the command (default: current directory)")]
     pub cwd: Option<PathBuf>,
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND", help = "Command and arguments, after --")]
@@ -54,10 +54,12 @@ pub fn start(layout: &Layout, args: &RunArgs, restarted_from: Option<&str>) -> R
     apply_retention(layout, &mut store);
     let id = new_id(&store)?;
     layout.socket_path(&id)?;
-    let launch = crate::adapters::prepare(&args.command, !args.no_agent_session_id)?;
     drop(store);
     let (rows, cols) = attach::terminal_size().unwrap_or((24, 80));
     let exe = std::env::current_exe().context("locating the agentrecorder binary")?;
+    let hook_program = exe.to_string_lossy().into_owned();
+    let launch =
+        crate::adapters::prepare(&args.command, (!args.no_agent_integration).then_some(hook_program.as_str()))?;
     let log = OpenOptions::new().create(true).append(true).open(layout.log_path(&id))?;
     let mut cmd = Command::new(exe);
     cmd.arg("__supervise")

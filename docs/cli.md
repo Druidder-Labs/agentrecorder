@@ -12,7 +12,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 
 | Command | Purpose |
 | --- | --- |
-| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-session-id] [--detach-key K] [--cwd DIR] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d` |
+| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-integration] [--detach-key K] [--cwd DIR] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d` |
 | `sessions [--json]` (alias `ls`) | List sessions and their status (see below) |
 | `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
 | `detach ID` | Detach whichever client is attached |
@@ -23,6 +23,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `export ID [--format jsonl\|asciicast-v2\|asciicast-v3]` | Events as JSON Lines, or output as an asciicast file with markers (v3 also carries the exit status) |
 | `rm ID...` | Delete finished sessions and their recordings |
 | `prune --older-than 30d` | Delete finished sessions older than the given age |
+| `hook [--agent NAME]` | Read an agent hook event as JSON on stdin and record it as `agent.hook` in the session named by `AGENTRECORDER_SESSION`; always exits 0 and prints nothing on stdout (see Agent integration) |
 
 ## Session states
 
@@ -40,7 +41,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | Situation | What `agentrecorder recover` does |
 | --- | --- |
 | The client disconnected (terminal closed, SSH dropped, client killed) | The process is still running; it reattaches and redraws the screen. |
-| The process exited or crashed | Shows exit code or signal and the last recorded screen. `--restart` starts a new session with the same command after confirmation, minus a recorded `--session-id`, so Claude Code gets a new one; for Claude Code, Codex, Gemini CLI and OpenCode, `--resume` runs the agent's own resume command instead (see Agent session ids). Process memory is gone. |
+| The process exited or crashed | Shows exit code or signal and the last recorded screen. `--restart` starts a new session with the same command after confirmation, minus the `--session-id` and hook settings that `run` inserted, so Claude Code gets a new id; for Claude Code, Codex, Gemini CLI and OpenCode, `--resume` runs the agent's own resume command instead (see Agent integration). Process memory is gone. |
 | The supervisor was killed or the host rebooted | Shows persisted metadata and history and offers the same `--restart` and `--resume` options. Arbitrary processes are not restored. |
 | The socket file was deleted but the supervisor still runs | The CLI asks the supervisor to recreate it (SIGUSR1) and the session works again. If the supervisor cannot answer (for example it is stopped), the session is `unreachable`, not `lost`: `rm` refuses to delete it, and `stop` sends SIGTERM to the supervisor. |
 
@@ -48,13 +49,23 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 
 `agentrecorder run -- CMD` behaves like a pipe when it is not on a terminal. When stdin is not a terminal and reaches end of file, the client sends Ctrl-D to the session, so a shell fed from a file ends on its own. When stdout is not a terminal, output waits for the reader instead of being dropped. The client exits with CMD's exit code, and the recording is complete before it exits, so `export` can follow `run` directly. Use `run -d` to start a session and return immediately with its id.
 
-## Agent session ids
+## Agent integration
+
+### Session ids
 
 When the command is `claude` (directly or behind `env`), `run` generates a UUID v4 and inserts `--session-id <uuid>` right after the program name, so `recover --resume` runs `claude --resume <uuid>` and reopens that exact conversation. The id is stored on the session and shown by `inspect` as `Agent session`; the recorded command line includes the inserted flag.
 
-Nothing is inserted when the arguments already pick or skip a session (`--session-id`, `--resume`, `-r`, `--continue`, `-c`, `--fork-session`, `--from-pr`, `--teleport`, `--no-session-persistence`), start elsewhere (`--bg`, `--cloud`, `--desktop`, `--tmux`), ask for `--help` or `--version`, or name a subcommand such as `mcp`. A UUID the user passed with `--session-id`, `--resume` or `-r` is recorded as is. `--no-agent-session-id` turns insertion off. Without a recorded id, `--resume` falls back to `claude --continue`, the most recent conversation in the working directory.
+No id is inserted when the arguments already pick or skip a session (`--session-id`, `--resume`, `-r`, `--continue`, `-c`, `--fork-session`, `--from-pr`, `--teleport`, `--no-session-persistence`), start elsewhere (`--bg`, `--cloud`, `--desktop`, `--tmux`), ask for `--help` or `--version`, or name a subcommand such as `mcp`. A UUID the user passed with `--session-id`, `--resume` or `-r` is recorded as is. `--no-agent-integration` turns insertion of the id and of the hooks off. Without a recorded id, `--resume` falls back to `claude --continue`, the most recent conversation in the working directory.
 
 Claude Code rejects a `--session-id` that was already used (`Session ID ... is already in use`), so `recover --restart` removes the recorded id and `run` inserts a new one. Codex CLI, Gemini CLI and OpenCode keep their "most recent session" resume commands; their session flags are not inserted.
+
+### Hooks
+
+For the same `claude` commands, `run` also inserts `--settings '<json>'` with command hooks for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `Stop`, `StopFailure` and `SessionEnd`. Each hook runs `agentrecorder hook --agent claude` with a 5 s timeout. Hooks passed with `--settings` are added to the user's own hooks for that run; nothing is written to the user's settings files. Hooks are not inserted when the arguments already contain `--settings` (a second one would replace either the user's or agentrecorder's), ask for `--help` or `--version`, or name a subcommand. They are inserted with `--resume` and `--continue`.
+
+`agentrecorder hook` reads the event JSON from stdin and sends it to the supervisor of the session named by `AGENTRECORDER_SESSION`, which every managed process inherits. It records only `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message` and `tool_name`, each with a length cap. The prompt, tool input and assistant reply are never recorded. It exits 0 and prints nothing on stdout in every case, including outside a session, so it never changes what the agent does; errors go to stderr.
+
+The command is agent-neutral: another agent's command hook can call `agentrecorder hook --agent <name>` if it passes the same fields. Installing hooks for Codex CLI, Gemini CLI or OpenCode is not automated and has not been tested.
 
 ## Recording and retention
 

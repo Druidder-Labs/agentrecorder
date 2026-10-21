@@ -35,7 +35,7 @@ Schema version: 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib
 
 | Type | Payload | Notes |
 | --- | --- | --- |
-| `session.created` | `command`, `cwd`, `rows`, `cols`, `record_output`, `record_input`, `supervisor_pid`, `restarted_from`, `max_record_bytes`, `term`, `agent_session_id` | First event of every session. `max_record_bytes` and `term` are absent in recordings made before they were added; `agent_session_id` is present only when the agent's own session id is known (see `cli.md`, Agent session ids); `recover --restart` reuses the cap and asciicast export uses `term`. |
+| `session.created` | `command`, `cwd`, `rows`, `cols`, `record_output`, `record_input`, `supervisor_pid`, `restarted_from`, `max_record_bytes`, `term`, `agent_session_id` | First event of every session. `max_record_bytes` and `term` are absent in recordings made before they were added; `agent_session_id` is present only when the agent's own session id is known (see `cli.md`, Agent integration); `recover --restart` reuses the cap and asciicast export uses `term`. |
 | `process.started` | `pid`, `command` | |
 | `session.attached` | `client`, `client_pid`, `rows`, `cols` | `client_pid` is reported by the client and not verified. |
 | `session.detached` | `client`, `reason` | Reasons: `client_request`, `client_disconnected`, `detach_requested`, `attached_elsewhere`, `client_too_slow`, `process_exited`, `pty_write_failed`, `protocol_error`. |
@@ -50,6 +50,7 @@ Schema version: 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib
 | `git.snapshot` | `phase` (`start` or `exit`), `head`, `dirty_paths` | Only when the working directory is a git work tree. `head` is null before the first commit. |
 | `runtime.warning` | `code`, `message`, code-specific fields | Codes: `events_dropped` (`dropped_events`, `dropped_bytes`), `recording_limit_reached` (`limit_bytes`), `stop_escalated` (`signal`), `input_dropped` (`bytes`). |
 | `runtime.error` | `code`, `message` | Codes: `spawn_failed`, `resize_failed`. |
+| `agent.hook` | `agent`, `hook_event_name`, and when the agent sent them `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message`, `tool_name` | Reported by the agent through `agentrecorder hook` (see `cli.md`, Agent integration) and not verified. Recorded best effort: dropped and counted like output when the recorder queue is near full. |
 
 A session that ends without `session.terminated` was lost: the supervisor was killed or the host stopped. `agentrecorder sessions` reports it as `lost`; `sessions --json` and `inspect` show `lost_reason` (`host_restarted` or `supervisor_terminated`).
 
