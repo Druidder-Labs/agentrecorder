@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/agentrecorder-store", "crates/agentrecorder-supervisor", "crates/agentrecorder"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -13,8 +13,8 @@ keywords = ["terminal", "pty", "agents", "session", "replay"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
-agentrecorder-store = { path = "crates/agentrecorder-store", version = "0.1.0" }
-agentrecorder-supervisor = { path = "crates/agentrecorder-supervisor", version = "0.1.0" }
+agentrecorder-store = { path = "crates/agentrecorder-store", version = "0.2.0" }
+agentrecorder-supervisor = { path = "crates/agentrecorder-supervisor", version = "0.2.0" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive", "env"] }
