@@ -11,8 +11,8 @@ It is not a terminal emulator, a multiplexer layout engine, or an AI assistant. 
 Requirements: Linux or macOS, a Rust toolchain (1.95 or newer, required by `sysinfo` 0.39). No Docker, database server, account or API key.
 
 ```
-git clone https://github.com/Druidder-Labs/term
-cd term
+git clone https://github.com/Druidder-Labs/agentrecorder
+cd agentrecorder
 cargo install --path crates/agentrecorder --locked
 ```
 
