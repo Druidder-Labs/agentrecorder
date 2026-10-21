@@ -212,6 +212,15 @@ turns.forEach((t, i) => {
   t.end = stop ? stop.t_ms : null;
   t.agent = stop ? stop.t_ms - t.t_ms : null;
   t.calls = toolCalls.filter(h => h.t_ms >= t.t_ms && h.t_ms < next);
+  const inTurn = hooks.filter(h => h.t_ms >= t.t_ms && h.t_ms < (stop ? stop.t_ms : next));
+  t.approvals = 0;
+  t.approvalMs = 0;
+  inTurn.forEach((h, k) => {
+    if (h.payload.hook_event_name !== "PermissionRequest") return;
+    const resumed = inTurn.slice(k + 1).find(x => x.payload.hook_event_name !== "Notification" && x.payload.hook_event_name !== "PermissionRequest");
+    t.approvals += 1;
+    t.approvalMs += (resumed ? resumed.t_ms : stop ? stop.t_ms : h.t_ms) - h.t_ms;
+  });
   const prev = turns[i - 1];
   t.waited = !prev ? t.t_ms : prev.end != null ? Math.max(0, t.t_ms - prev.end) : null;
 });
@@ -221,6 +230,7 @@ function secs(ms) {
   return ms < 60000 ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s` : dur(ms);
 }
 const num = n => Number(n || 0).toLocaleString("en-US");
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 document.getElementById("verify").append(
   el("div", { class: "vstatus" },
     el("span", { class: `pill ${M.chain.token_bound ? "ok" : "warn"}` }, M.chain.token_bound ? "chain bound to a reviewer token" : "not bound to a token"),
@@ -238,7 +248,7 @@ const tiles = [
   ["Commands", shell.length ? shell.length : "unavailable", shell.length ? `${failed} failed (OSC 133)` : "no OSC 133 marks"],
   ["Tool calls", hooks.length ? toolCalls.length : "unavailable", hooks.length ? `${toolFailed} failed, ${hooks.length} hook events` : "no agent hooks"],
   ["Tokens", usage ? (usage.input + usage.output + usage.cache_read + usage.cache_creation).toLocaleString("en-US") : "unavailable", usage ? `${usage.output.toLocaleString("en-US")} output, ${usage.api_calls} API calls` : hooks.length ? "no usage summary in the hooks" : "no agent hooks"],
-  ["Prompts", P.available ? turns.length : "unavailable", P.available ? `agent ${secs(sum(turns.map(t => t.agent)))}, between turns ${secs(sum(turns.slice(1).map(t => t.waited)))}` : "no agent transcript"],
+  ["Prompts", P.available ? turns.length : "unavailable", P.available ? `agent ${secs(sum(turns.map(t => t.agent)) - sum(turns.map(t => t.approvalMs)))}, between turns ${secs(sum(turns.slice(1).map(t => t.waited)))}` : "no agent transcript"],
   ["Markers", marks.length, "user marks"],
   ["Edited for sharing", (M.fates.redacted || 0) + (M.fates.cut || 0), `${M.fates.redacted || 0} redacted, ${M.fates.cut || 0} cut`],
 ];
@@ -265,7 +275,8 @@ if (!P.available) {
   const total = sum(turns.map(t => t.total)) + sum(before.map(t => t.total));
   story.append(el("div", { class: "story-sum" },
     el("span", { class: "pill" }, `${turns.length} prompts`),
-    el("span", { class: "pill" }, `agent working ${secs(sum(turns.map(t => t.agent)))}`),
+    el("span", { class: "pill" }, `agent working ${secs(sum(turns.map(t => t.agent)) - sum(turns.map(t => t.approvalMs)))}`),
+    sum(turns.map(t => t.approvals)) ? el("span", { class: "pill warn" }, `${plural(sum(turns.map(t => t.approvals)), "approval")}, ${secs(sum(turns.map(t => t.approvalMs)))} waiting`) : null,
     el("span", { class: "pill" }, `between turns ${secs(sum(turns.slice(1).map(t => t.waited)))}`),
     el("span", { class: "pill" }, `${num(total)} tokens, ${num(sum(turns.map(t => t.output)) + sum(before.map(t => t.output)))} output`),
     P.cut ? el("span", { class: "pill warn" }, `${P.cut} prompts removed by --cut`) : null));
@@ -288,7 +299,8 @@ if (!P.available) {
       el("td", { class: "num" }, el("button", { type: "button", class: "at", title: "Play from here", onclick: () => player && player.seek(t.t_ms / 1000) }, off(t.t_ms))),
       el("td", { class: "num", title: "Time between the end of the previous answer (Stop hook) and this prompt; the first row counts from the session start" }, secs(t.waited)),
       el("td", { class: "prompt" }, t.origin !== "human" && t.origin !== "user" ? el("span", { class: "pill" }, t.origin) : null, prompt),
-      el("td", { class: "num", title: "Time from this prompt to the agent's Stop hook" }, t.agent != null ? secs(t.agent) : el("span", { class: "sub", title: "No Stop hook before the next prompt: interrupted, or still running at exit" }, "no stop")),
+      el("td", { class: "num", title: "Time from this prompt to the agent's Stop hook" }, t.agent != null ? secs(t.agent) : el("span", { class: "sub", title: "No Stop hook before the next prompt: interrupted, or still running at exit" }, "no stop"),
+        t.approvals ? el("div", { class: "sub", title: "From each PermissionRequest hook to the next hook that shows the agent working again" }, `${secs(t.approvalMs)} waiting for ${plural(t.approvals, "approval")}`) : null),
       el("td", {}, t.calls.length ? Object.entries(tools).map(([k, n]) => `${k} ${n}`).join(", ") : el("span", { class: "sub" }, "none"),
         failedCalls ? el("div", { class: "sub" }, `${failedCalls} failed`) : null),
       el("td", { class: "num" }, num(t.total), el("div", { class: "sub" }, `${num(t.output)} out, ${t.api_calls} calls`)));
@@ -298,7 +310,7 @@ if (!P.available) {
   story.append(el("div", { class: "scroll" }, el("table", { class: "story" },
     el("thead", {}, el("tr", {}, ["#", "At", "Waited", "Prompt", "Agent", "Tools", "Tokens"].map(h => el("th", {}, h)))), tbody)));
   story.append(el("div", { class: "caveat" },
-    `Waited: from the previous answer (Stop hook) to this prompt; the first row counts from the session start. Agent: from the prompt to its Stop hook. Tools: PostToolUse hooks until the next prompt. Tokens: replies until the next prompt${before.length ? `; ${num(sum(before.map(t => t.total)))} tokens came before the first prompt` : ""}. From the ${P.source} read when the bundle was written: not covered by the hash chain or verify. ${P.text ? "Prompt text included with --prompts, after redaction." : "Prompt text is included only when the bundle is written with --prompts."}`));
+    `Waited: from the previous answer (Stop hook) to this prompt; the first row counts from the session start. Agent: from the prompt to its Stop hook, including time spent waiting for approvals, shown below it. Tools: PostToolUse hooks until the next prompt. Tokens: replies until the next prompt${before.length ? `; ${num(sum(before.map(t => t.total)))} tokens came before the first prompt` : ""}. From the ${P.source} read when the bundle was written: not covered by the hash chain or verify. ${P.text ? "Prompt text included with --prompts, after redaction." : "Prompt text is included only when the bundle is written with --prompts."}`));
 }
 const active = new Set(Object.keys(CATS));
 const filters = document.getElementById("filters");
