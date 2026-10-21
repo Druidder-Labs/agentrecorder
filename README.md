@@ -5,7 +5,7 @@ A flight recorder for coding agents.
 When an agent misbehaves, the output has already scrolled away. After a crash or a reboot, nothing says what survived. When someone asks what the agent did, there is nothing to show. `agentrecorder` runs the agent, records every byte it prints with timing, and answers afterwards:
 
 - **Replay.** Play the session back with its original timing, or export it as asciicast. Replay renders recorded bytes; it never re-executes a command.
-- **Inspect.** Tool calls and token usage from the agent's hooks and transcript, files changed in the git work tree, process tree, CPU, memory, time since the last output, command and failure counts when the shell emits OSC 133 marks, and for Claude Code whether the agent is working, idle or waiting for you. Measured or reported values only; anything else is marked `unavailable`.
+- **Inspect.** Tool calls and token usage from the agent's hooks and transcript, with the tokens of each prompt (the prompt text with `--prompts`), files changed in the git work tree, process tree, CPU, memory, time since the last output, command and failure counts when the shell emits OSC 133 marks, and for Claude Code whether the agent is working, idle or waiting for you. Measured or reported values only; anything else is marked `unavailable`.
 - **Share.** Bundle a session into a dashboard that opens offline, with a hash chain over every event. Anchors streamed to a third party while the session ran let a reviewer verify that nothing was edited afterwards.
 - **Recover.** After a crash or reboot it states what is left (a live process, an exit code and the last screen, or only the recording) and offers the agent's own resume command. It never restarts anything on its own.
 - **Run.** The supervisor keeps the agent running when you close the tab, lose SSH or your client crashes; reattach from any terminal and the screen comes back. tmux, Zellij or the agent's own background mode cover this part too; the recording is what they lack.
@@ -58,7 +58,7 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `sessions` | List sessions and their status |
 | `attach ID`, `detach ID` | Connect this terminal to a session, or disconnect the attached one |
 | `mark ID [LABEL]` | Mark a moment in a running session; `replay --from-mark` starts there |
-| `inspect ID` | Measured process, terminal, git, tool call and token data; `--json` for scripts |
+| `inspect ID` | Measured process, terminal, git, tool call and token data, tokens per prompt; `--prompts` shows the prompt text, `--json` for scripts |
 | `recover ID` | Reattach if alive; otherwise report what is left and offer `--restart` or `--resume` |
 | `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |

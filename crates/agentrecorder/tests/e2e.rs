@@ -1045,7 +1045,8 @@ with open(transcript, "w") as f:
     f.write(line(now, "req_1", 2, 100, 500, 50) + "\n")
     f.write(line(now, "req_1", 2, 100, 500, 50) + "\n")
     f.write(line("2000-01-01T00:00:00.000Z", "req_0", 9, 9, 9, 9) + "\n")
-    f.write(json.dumps({"type": "user", "timestamp": now, "message": {"content": "the-secret-prompt"}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": now, "origin": {"kind": "human"}, "message": {"content": "the-secret-prompt\n\x1b]52;c;evil\x07"}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": now, "message": {"content": [{"type": "tool_result", "content": "ok"}]}}) + "\n")
     f.write(line(now, "req_2", 3, 10, 600, 0) + "\n")
 fire("SessionStart", source="startup", model="haiku")
 fire("UserPromptSubmit", prompt="the-secret-prompt", permission_mode="default")
@@ -1145,6 +1146,27 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
         "{text}"
     );
     assert!(text.contains("Cost:            unavailable (no price table)"), "{text}");
+    let turns = tokens["interactions"].as_array().unwrap();
+    let got: Vec<(String, u64, u64)> = turns
+        .iter()
+        .map(|t| (t["origin"].as_str().unwrap().into(), t["api_calls"].as_u64().unwrap(), t["total"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(got, [("none".to_string(), 1, 652), ("human".to_string(), 1, 613)]);
+    assert!(turns.iter().all(|t| t.get("text").is_none()), "{turns:?}");
+    assert!(!text.contains("the-secret-prompt"), "{text}");
+    assert!(text.contains("Interactions:    2 (1 human, 1 none; tokens per prompt from the claude transcript; prompt text hidden, --prompts shows it)"), "{text}");
+    let shown = env.ok(&["inspect", &id, "--prompts"]);
+    assert!(
+        shown.contains(
+            "human             613 tokens, 1 API calls, output 10, 30 chars  \"the-secret-prompt ]52;c;evil\""
+        ),
+        "{shown}"
+    );
+    assert!(!shown.contains('\x1b') && !shown.contains('\x07'), "{shown}");
+    let full: serde_json::Value = serde_json::from_str(&env.ok(&["inspect", &id, "--json", "--prompts"])).unwrap();
+    assert_eq!(full["tokens"]["interactions"][1]["text"], "the-secret-prompt\n\u{1b}]52;c;evil\u{7}");
+    let db = std::fs::read(env.db()).unwrap();
+    assert!(!db.windows(17).any(|w| w == b"the-secret-prompt"));
 
     std::fs::remove_file(tokens["transcript_path"].as_str().unwrap()).unwrap();
     let gone = env.inspect(&id);

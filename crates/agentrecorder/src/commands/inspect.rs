@@ -113,7 +113,7 @@ fn session_window(s: &agentrecorder_store::Session) -> (i64, i64) {
 
 const RULE: &str = "----------------------------------------";
 
-pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
+pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Result<i32> {
     let (store, s, state) = open_and_resolve(layout, id)?;
     let st = state.label();
     let live = state.live();
@@ -230,6 +230,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
                     "total": u.total(),
                     "models": u.models,
                     "outside_session": u.outside_session,
+                    "interactions": interactions_json(&u.interactions, win_from, prompts),
                 })),
                 "files_changed": files.as_ref().ok(),
                 "unavailable": unavailable,
@@ -395,6 +396,13 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
         }
         Err(why) => println!("Tokens:          {na} ({why})"),
     }
+    match &tokens {
+        Ok((source, _, u)) if !u.interactions.is_empty() => {
+            print_interactions(&u.interactions, win_from, prompts, source)
+        }
+        Ok((source, _, _)) => println!("Interactions:    0 (no prompts in the {source} during the session)"),
+        Err(_) => println!("Interactions:    {na} (no transcript)"),
+    }
     println!("Cost:            {na} (no price table)");
     println!("Warnings:        {}", count_of(kind::RUNTIME_WARNING));
     println!("Errors:          {}", count_of(kind::RUNTIME_ERROR));
@@ -405,6 +413,68 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool) -> Result<i32> {
     }
     println!("{RULE}");
     Ok(0)
+}
+
+const INTERACTIONS_SHOWN: usize = 50;
+
+fn interactions_json(list: &[transcript::Interaction], from_ns: i64, prompts: bool) -> Vec<Value> {
+    list.iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut v = json!({
+                "index": i + 1,
+                "timestamp": t.at_ns.map(format_rfc3339),
+                "offset_ms": t.at_ns.map(|at| (at - from_ns).max(0) / 1_000_000),
+                "origin": t.origin,
+                "chars": t.chars,
+                "images": t.images,
+                "api_calls": t.api_calls,
+                "input": t.input,
+                "output": t.output,
+                "cache_read": t.cache_read,
+                "cache_creation": t.cache_creation,
+                "total": t.total(),
+            });
+            if prompts {
+                v["text"] = json!(t.text);
+            }
+            v
+        })
+        .collect()
+}
+
+fn print_interactions(list: &[transcript::Interaction], from_ns: i64, prompts: bool, source: &str) {
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for t in list {
+        *by.entry(t.origin.as_str()).or_default() += 1;
+    }
+    let kinds: Vec<String> = by.iter().map(|(k, n)| format!("{n} {k}")).collect();
+    let hint = if prompts { "" } else { "; prompt text hidden, --prompts shows it" };
+    println!("Interactions:    {} ({}; tokens per prompt from the {source}{hint})", list.len(), kinds.join(", "));
+    for (i, t) in list.iter().enumerate().take(INTERACTIONS_SHOWN) {
+        let at = t.at_ns.map_or("-".into(), |at| fmt::offset_ms((at - from_ns).max(0) / 1_000_000));
+        let images = match t.images {
+            0 => String::new(),
+            1 => ", 1 image".into(),
+            n => format!(", {n} images"),
+        };
+        let mut line = format!(
+            "  {:>3} {at} {:<17} {} tokens, {} API calls, output {}, {} chars{images}",
+            i + 1,
+            t.origin,
+            t.total(),
+            t.api_calls,
+            t.output,
+            t.chars
+        );
+        if prompts && !t.text.is_empty() {
+            line.push_str(&format!("  \"{}\"", transcript::one_line(&t.text, 100)));
+        }
+        println!("{line}");
+    }
+    if list.len() > INTERACTIONS_SHOWN {
+        println!("  ... {} more in --json", list.len() - INTERACTIONS_SHOWN);
+    }
 }
 
 fn print_tree(node: &ProcNode, depth: usize) {

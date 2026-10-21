@@ -73,6 +73,8 @@ enum Command {
         session: String,
         #[arg(long, help = "Print JSON instead of text")]
         json: bool,
+        #[arg(long, help = "Show the text of each prompt read from the agent transcript (hidden by default)")]
+        prompts: bool,
     },
     #[command(about = "Reattach, or explain what can and cannot be recovered")]
     Recover(commands::recover::RecoverArgs),
@@ -180,7 +182,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Command::Attach { session, detach_key } => commands::sessions::attach(&layout, &session, &detach_key),
         Command::Detach { session } => commands::sessions::detach(&layout, &session),
         Command::Mark { session, label } => commands::sessions::mark(&layout, &session, &label),
-        Command::Inspect { session, json } => commands::inspect::inspect(&layout, &session, json),
+        Command::Inspect { session, json, prompts } => commands::inspect::inspect(&layout, &session, json, prompts),
         Command::Recover(args) => commands::recover::recover(&layout, args),
         Command::Replay(args) => commands::replay::replay(&layout, args),
         Command::Stop { session, signal, timeout } => commands::sessions::stop(&layout, &session, &signal, timeout),
