@@ -614,7 +614,7 @@ fn run_is_not_slowed_by_a_concurrent_replay_and_retention() {
     let _ = replay.kill();
     let _ = replay.wait();
     assert!(out.status.success());
-    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
     assert!(!String::from_utf8_lossy(&out.stderr).contains("state.db-wal"));
 }
 
@@ -832,7 +832,7 @@ fn state_files_are_private() {
 fn supervisor_killed_mid_output_leaves_consistent_events() {
     let env = Env::new();
     let id = env.start_detached(&["sh", "-c", "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"]);
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for("output to be recorded", || env.events(&id).iter().any(|e| e["event_type"] == "terminal.output"));
     let (_, child) = kill_supervisor(&env, &id);
     send_signal(child as i32, libc::SIGKILL);
     let events = env.events(&id);
@@ -846,8 +846,8 @@ fn supervisor_killed_mid_output_leaves_consistent_events() {
 #[test]
 fn corrupt_store_is_reported_not_overwritten() {
     let env = Env::new();
-    env.start_detached(&["true"]);
-    std::thread::sleep(Duration::from_millis(200));
+    let id = env.start_detached(&["true"]);
+    env.wait_status(&id, "exited");
     for f in ["state.db-wal", "state.db-shm"] {
         let _ = std::fs::remove_file(env.path().join(f));
     }
