@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Run, inspect, recover and replay AI coding agent sessions"
-publish = false
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Run, inspect, recover and replay terminal sessions of AI coding agents"
+readme = "../../README.md"
 
 [[bin]]
 name = "agentrecorder"
@@ -16,8 +19,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-agentrecorder-store = { path = "../agentrecorder-store" }
-agentrecorder-supervisor = { path = "../agentrecorder-supervisor" }
+agentrecorder-store.workspace = true
+agentrecorder-supervisor.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 nix.workspace = true

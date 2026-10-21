@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "SQLite session and event store for agentrecorder"
 
 [lints]
 workspace = true

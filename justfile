@@ -18,8 +18,11 @@ test:
 
 check: fmt-check lint test
 
-check-ci: check deny
+check-ci: check deny package
     python3 bench/bench.py --quick > /dev/null
+
+package:
+    cargo package --workspace --locked --allow-dirty
 
 deny:
     cargo deny check

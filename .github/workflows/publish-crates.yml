@@ -1,0 +1,46 @@
+name: Publish crates
+
+# Runs when release-please publishes a GitHub release. The three workspace crates are
+# published to crates.io in dependency order with a short-lived token from crates.io
+# trusted publishing (OIDC); no long-lived registry token is stored in the repository.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: none
+
+concurrency:
+  group: publish-crates-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Check that the tag matches the workspace version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          test "v${version}" = "${TAG}" || { echo "tag ${TAG} does not match Cargo.toml version ${version}"; exit 1; }
+      - name: Verify the packages
+        run: cargo package --workspace --locked
+      - name: Get a crates.io token through trusted publishing
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --workspace --locked

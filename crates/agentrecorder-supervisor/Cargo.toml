@@ -5,13 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Per-session PTY supervisor, socket protocol and screen model for agentrecorder"
 
 [lints]
 workspace = true
 
 [dependencies]
-agentrecorder-store = { path = "../agentrecorder-store" }
+agentrecorder-store.workspace = true
 anyhow.workspace = true
 crossbeam-channel.workspace = true
 libc.workspace = true

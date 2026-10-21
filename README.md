@@ -69,6 +69,7 @@ Threat model and controls: `docs/security.md`.
 - `docs/event-model.md`: event schema
 - `docs/security.md`: threat model and controls
 - `docs/performance.md`: measured baseline and event-loss behavior
+- `docs/release.md`: how releases and crates.io publishing work
 - `CHANGELOG.md`
 
 ## Development
