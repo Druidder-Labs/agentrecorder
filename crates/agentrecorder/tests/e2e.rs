@@ -194,7 +194,7 @@ fn detach_command_and_second_attach_take_over_clients() {
 #[test]
 fn stop_can_escalate_while_a_gentler_stop_is_pending() {
     let env = Env::new();
-    let id = env.start_detached(&["sh", "-c", "trap '' HUP TERM; echo armed; sleep 300"]);
+    let id = env.start_detached(&["sh", "-c", "trap '' HUP TERM; echo armed; exec sleep 300"]);
     wait_for("trap installed", || env.ok(&["replay", &id, "--instant", "--raw"]).contains("armed"));
     let mut gentle = env.command(&["stop", &id, "--signal", "HUP", "--timeout", "60"]).spawn().unwrap();
     wait_for("stop request recorded", || env.events(&id).iter().any(|e| e["event_type"] == "session.stop_requested"));
@@ -258,7 +258,7 @@ fn reattach_to_a_full_screen_program_restores_and_leaves_the_alternate_screen() 
 #[test]
 fn stop_escalates_to_sigkill_after_the_grace_period() {
     let env = Env::new();
-    let id = env.start_detached(&["sh", "-c", "trap '' HUP TERM; echo armed; sleep 300"]);
+    let id = env.start_detached(&["sh", "-c", "trap '' HUP TERM; echo armed; exec sleep 300"]);
     wait_for("trap installed", || env.ok(&["replay", &id, "--instant", "--raw"]).contains("armed"));
     let child = env.inspect(&id)["session"]["child_pid"].as_i64().unwrap();
     let t = Instant::now();
@@ -849,6 +849,8 @@ fn corrupt_store_is_reported_not_overwritten() {
     let env = Env::new();
     let id = env.start_detached(&["true"]);
     env.wait_status(&id, "exited");
+    let sup = env.inspect(&id)["session"]["supervisor_pid"].as_i64().unwrap();
+    wait_for("supervisor to close the store", || !pid_alive(sup));
     for f in ["state.db-wal", "state.db-shm"] {
         let _ = std::fs::remove_file(env.path().join(f));
     }

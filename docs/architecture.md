@@ -50,6 +50,33 @@ There is no TUI in the MVP. `ratatui` was not added because no command needs a f
 
 ## Process model
 
+The life of one session, from `run` to exit:
+
+```
+client (run)                supervisor (__supervise)               CMD           store (state.db)
+    |                               |                               |                   |
+    |-- open store, retention, id ------------------------------------------------------>|
+    |-- exec self, setsid -------->|                               |                   |
+    |                               |-- insert session row ---------------------------->|
+    |                               |-- open PTY, spawn ----------->|                   |
+    |                               |-- bind run/ID.sock            |                   |
+    |                               |-- status = running ------------------------------>|
+    |-- status? (poll 5 ms) ------->|                               |                   |
+    |-- attach -------------------->|                               |                   |
+    |<-- held output or snapshot ---|                               |                   |
+    |-- input --------------------->|-- PTY writer ---------------->|                   |
+    |                               |<-- PTY reader ----------------|                   |
+    |                               |-- recorder batches ------------------------------>|
+    |<-- output frames -------------|                               |                   |
+    |                               |<-- exit ----------------------|                   |
+    |                               |-- process.exited, git, terminated --------------->|
+    |                               |   (waits for commit)          |                   |
+    |<-- Exited frame --------------|                               |                   |
+    |   exit with CMD's code        |-- remove socket, exit         |                   |
+```
+
+A detach (`Ctrl-\`, `agentrecorder detach`, a lost terminal) ends only the client; the supervisor, CMD and recording continue, and the next `attach` starts again at the attach step.
+
 `agentrecorder run -- CMD` does the following:
 
 1. Opens the store, applies retention, allocates a 6-hex-digit session id from `/dev/urandom`, and checks that the socket path fits the platform limit before anything is created. For a Claude Code command it inserts `--session-id <uuid>` and `--settings` with hooks that call `agentrecorder hook` (`adapters::prepare`, rules in `cli.md`, Agent integration) and passes the uuid to the supervisor, which stores it as `agent_session_id`.
@@ -119,7 +146,7 @@ The environment is not stored, so `--restart` and `--resume` use the environment
 
 One SQLite database, `state.db`, in WAL mode with `synchronous=NORMAL` and `secure_delete=ON`. Each supervisor is the only writer of its session's events, so per-session sequence numbers are assigned without coordination. CLI commands write only lifecycle corrections (`mark_lost`) and deletions. Readers run concurrently through WAL.
 
-The recorder batches up to 512 events, 4 MiB or 20 ms per transaction and merges output chunks that arrive within 5 ms of each other, up to 64 KiB. A write that fails because the database is busy or locked is retried every 100 ms for up to 10 s (60 s for the exit metadata); other errors are not retried. Readers fetch events in pages of 256 rows, each in its own short read transaction, so a long replay never pins the WAL. The WAL is capped with `journal_size_limit` (4 MiB); new stores use `auto_vacuum=INCREMENTAL`; an index on `(session_id, kind, seq, data_len)` serves kind filters. `rm` and `prune` delete orphaned events, run `incremental_vacuum` and end with `wal_checkpoint(TRUNCATE)`; automatic retention does this only when it deleted something.
+The recorder batches up to 512 events, 4 MiB or 20 ms per transaction and merges output chunks that arrive within 5 ms of each other, up to 64 KiB. A write that fails because the database is busy or locked is retried every 100 ms for up to 10 s (60 s for the exit metadata); other errors are not retried. Readers fetch events in pages of 256 rows, each in its own short read transaction, so a long replay never pins the WAL. The WAL is capped with `journal_size_limit` (4 MiB); new stores use `auto_vacuum=INCREMENTAL`; an index on `(session_id, kind, seq, data_len)` serves kind filters. `rm` and `prune` delete orphaned events, run `incremental_vacuum` until every free page is returned to the file system and end with `wal_checkpoint(TRUNCATE)`; automatic retention does this only when it deleted something.
 
 If the store cannot be opened when a session starts, `run` fails. If writes fail later, the session keeps running and failures are logged to `logs/ID.log`.
 

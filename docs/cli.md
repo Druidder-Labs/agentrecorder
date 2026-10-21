@@ -79,7 +79,7 @@ A session whose command resumes a Claude Code UUID (`claude --resume <uuid>` or 
 | `pending` | No `SessionStart` yet, less than 90 s after the process started |
 | `unconfirmed` | No `SessionStart` and the process ended (the exit code is named), or 90 s passed |
 
-`inspect` shows it as `Resume` (`resume` in `--json`). `recover --resume --detached` waits up to 15 s for a verdict other than `pending` and prints it on stderr before the new session id; attached, the verdict is printed after the client detaches or the agent exits. Claude Code reports `No conversation found` and exits with code 1 for an unknown id, which gives `unconfirmed`.
+`inspect` shows it as `Resume` (`resume` in `--json`). `recover --resume --detached` waits up to 15 s for a verdict other than `pending`, and for an ended process until its exit code is recorded, and prints it on stderr before the new session id; attached, the verdict is printed after the client detaches or the agent exits. Claude Code reports `No conversation found` and exits with code 1 for an unknown id, which gives `unconfirmed`.
 
 ### Agent state
 
@@ -121,7 +121,7 @@ Details: `security.md`.
 
 ## Platform notes
 
-- Linux and macOS only. CI runs the test suite on Linux; on macOS it runs only where a developer runs `just check`.
+- Linux and macOS only. CI runs the test suite on both.
 - On macOS, when output is produced faster than it is read, the kernel PTY can emit `\r\r\n` for a newline; recordings contain what the kernel delivered.
 - CPU and memory figures cover the session's process tree as reported by the OS at inspection time.
 - The end-to-end test for the main workflow is `cargo test -p agentrecorder --test e2e mvp_workflow`.

@@ -201,13 +201,17 @@ fn report_resume(layout: &Layout, id: &str, wait: Duration) {
     loop {
         let check = open_and_resolve(layout, id).and_then(|(store, s, state)| {
             let running = state.live().is_some_and(|l| !l.exited);
-            agent_state::resume_check(&store, &s, running, now_unix_ns())
+            let exit_unrecorded = state.live().is_some_and(|l| l.exited);
+            Ok(agent_state::resume_check(&store, &s, running, now_unix_ns())?.map(|c| (c, exit_unrecorded)))
         });
         match check {
-            Ok(Some(c)) if c.verdict == Verdict::Pending && Instant::now() < deadline => {
+            Ok(Some((c, exit_unrecorded)))
+                if (c.verdict == Verdict::Pending || (exit_unrecorded && c.verdict == Verdict::Unconfirmed))
+                    && Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(100))
             }
-            Ok(Some(c)) => {
+            Ok(Some((c, _))) => {
                 let hint = if c.verdict == Verdict::Pending {
                     format!("; check later with agentrecorder inspect {id}")
                 } else {

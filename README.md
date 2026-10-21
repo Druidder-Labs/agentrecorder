@@ -2,7 +2,7 @@
 
 Run it. Inspect it. Recover it. Replay it.
 
-A coding agent started in a terminal dies with that terminal. When it misbehaves, the output has already scrolled away. After a crash or a reboot, nothing says what survived. `agentrecorder` runs the agent for you and keeps the answers:
+A flight recorder for coding agents. When an agent misbehaves, the output has already scrolled away; after a crash or a reboot, nothing says what survived. `agentrecorder` runs the agent, records every byte it prints with timing, and answers what happened afterwards:
 
 - **Run.** The agent keeps running when you close the tab, lose SSH or your client crashes. Reattach from any terminal and the screen comes back.
 - **Inspect.** Process tree, CPU, memory, time since the last output, git HEAD before and after, command and failure counts when the shell emits OSC 133 marks, and for Claude Code whether the agent is working, idle or waiting for you, as reported by its hooks. Measured or reported values only; anything else is marked `unavailable`.
@@ -10,6 +10,14 @@ A coding agent started in a terminal dies with that terminal. When it misbehaves
 - **Replay.** Play the session back with its original timing, or export it as asciicast. Replay renders recorded bytes; it never re-executes a command.
 
 Works with Claude Code, Codex CLI, Gemini CLI, OpenCode and any other program, inside the terminal you already use. One binary, a local SQLite file, no daemon to configure, no account.
+
+## When to use it
+
+- You need to review what an agent did after the fact: a timed recording, markers, exit status, git HEAD before and after, and a JSON Lines or asciicast export.
+- You run agents without tmux, or several agents at once, and want each one isolated in its own supervisor.
+- You build tooling that needs a machine-readable event stream of a terminal session.
+
+If an agent only has to survive a closed tab, tmux, Zellij or the agent's own background mode already do that, and `agentrecorder` adds little. Claude Code has the deepest integration (exact resume, agent state from hooks); Codex CLI, Gemini CLI and OpenCode resume their most recent session, which can be a different conversation.
 
 ## Install
 

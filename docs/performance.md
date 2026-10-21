@@ -50,6 +50,8 @@ The supervisor's ceiling on this machine is about 70 MiB/s with recording and 77
 
 The first ceiling run showed the pipe client receiving 49 to 141 KB fewer bytes than were recorded, in three runs of a 50 MiB file; v0.1.0 lost data the same way. `run` starts the process about 10 ms before its own client attaches, and the attach sent a screen snapshot with at most 1000 lines of history, so earlier output reached the recording but not the client. Since the fix, the supervisor of an attached `run` holds up to 4 MiB of output until the first attach and sends it instead of the snapshot. The rerun delivered 211,833,628 of 211,833,628 recorded bytes to the pipe client. Covered by `a_pipe_client_gets_output_produced_before_it_attached`.
 
+`crates/agentrecorder/tests/conservation.rs` checks produced == recorded == delivered with numbered lines, so a missing, duplicated or reordered chunk fails by content, not only by length. It covers a pipe client with 64 KiB to 12 MiB produced before attach, a late attach to a detached session, producers that exit at once, a 24 MiB burst to an interactive client, and 60,000 single-line writes. Ten consecutive runs on 2026-10-21 passed in about 8 s each. In those runs neither `pre_attach_output_dropped` nor `client_output_discarded` fired, so the branches that accept a reported loss are written but not exercised.
+
 ## Events table layout
 
 Measured on 2026-10-21 with `cargo run --release -p agentrecorder-store --example layout_bench`, median of three runs. Three sessions per database, with the store's pragmas (WAL, `synchronous=NORMAL`, `secure_delete=ON`, incremental auto-vacuum) and batches of 512 events per transaction. Reads, scans and deletes act on the middle session.
@@ -67,7 +69,9 @@ Decision: keep the current layout. With 64 KiB blobs it inserts 38 percent slowe
 
 ### Space returned by `rm` and `prune`
 
-The measurement found that `rm`, `prune` and retention do not shrink `state.db`. `Store::checkpoint` runs `PRAGMA incremental_vacuum` through `execute_batch`, which steps the statement once, and the pragma frees one page per step. After `rm` of a 60 MB session the file stayed at 62 MB with 15,142 free pages; the `sqlite3` shell, which steps to completion, freed all of them and left 24 KiB. Freed pages are overwritten (`secure_delete`) and reused by new recordings, so the file stays at its high-water mark instead of growing without bound. This is an open defect; the benchmark above steps the pragma to completion.
+The measurement found that `rm`, `prune` and retention do not shrink `state.db`. `Store::checkpoint` runs `PRAGMA incremental_vacuum` through `execute_batch`, which steps the statement once, and the pragma frees one page per step. After `rm` of a 60 MB session the file stayed at 62 MB with 15,142 free pages; the `sqlite3` shell, which steps to completion, freed all of them and left 24 KiB. Freed pages are overwritten (`secure_delete`) and reused by new recordings, so the file stayed at its high-water mark instead of growing without bound.
+
+Fixed on 2026-10-21: `Store::checkpoint` now steps the pragma until it returns no more rows. `rm` of a session with 600,000 lines of 99 bytes took `state.db` from 64,380,928 bytes to 24,576 bytes with a free-page count of 0 (debug build, `AGENTRECORDER_HOME` under `/tmp`). Covered by `deleting_a_session_returns_its_pages_to_the_file_system`.
 
 ## Interpretation
 

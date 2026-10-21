@@ -485,7 +485,11 @@ impl Store {
     }
 
     pub fn checkpoint(&self) -> Result<Deletion> {
-        self.conn.execute_batch("PRAGMA incremental_vacuum")?;
+        let mut vacuum = self.conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut freed = vacuum.query([])?;
+        while freed.next()?.is_some() {}
+        drop(freed);
+        drop(vacuum);
         let busy: i64 = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
         Ok(if busy == 0 { Deletion::Scrubbed } else { Deletion::WalPending })
     }
@@ -747,6 +751,24 @@ mod tests {
             let bytes = std::fs::read(dir.path().join(f)).unwrap_or_default();
             assert!(!bytes.windows(14).any(|w| w == b"SECRET-XYZ-123"), "{f}");
         }
+    }
+
+    #[test]
+    fn deleting_a_session_returns_its_pages_to_the_file_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let mut store = Store::open(&path).unwrap();
+        new_session(&store, "abc123");
+        let chunk = vec![b'x'; 16 * 1024];
+        let events: Vec<NewEvent> = (0..400).map(|i| ev(i, &chunk)).collect();
+        store.append_events("abc123", 0, &events).unwrap();
+        store.checkpoint().unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(store.delete_session("abc123").unwrap(), Deletion::Scrubbed);
+        let free: i64 = store.conn.pragma_query_value(None, "freelist_count", |r| r.get(0)).unwrap();
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(free, 0);
+        assert!(after < before / 10, "before {before} after {after}");
     }
 
     #[test]
