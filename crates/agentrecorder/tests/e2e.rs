@@ -1227,3 +1227,60 @@ fn osc_133_marks_fill_commands_and_failures() {
     env.wait_status(&plain, "exited");
     assert!(env.inspect(&plain)["commands"].is_null());
 }
+
+fn read_streaming(
+    mut child: std::process::Child,
+    start: Instant,
+) -> (Vec<(Duration, String)>, std::process::ExitStatus) {
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let mut lines = Vec::new();
+    for line in reader.lines() {
+        lines.push((start.elapsed(), line.unwrap()));
+    }
+    (lines, child.wait().unwrap())
+}
+
+#[test]
+fn follow_streams_a_running_session_and_ends_with_it() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "echo line-one; sleep 1.5; echo line-two; sleep 1.5; echo line-three"]);
+    let spawn = |args: &[&str]| env.command(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let started = Instant::now();
+    let replay = spawn(&["replay", &id, "--follow", "--instant"]);
+    let export = spawn(&["export", &id, "--follow"]);
+    let replay = std::thread::spawn(move || read_streaming(replay, started));
+    let (exported, export_status) = read_streaming(export, started);
+    let (replayed, replay_status) = replay.join().unwrap();
+    assert!(replay_status.success() && export_status.success());
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    let when = |lines: &[(Duration, String)], needle: &str| {
+        lines.iter().find(|(_, l)| l.contains(needle)).map(|(t, _)| *t).unwrap_or_else(|| panic!("{needle}: {lines:?}"))
+    };
+    for (lines, first, third) in [(&replayed, "line-one", "line-three"), (&exported, "bGluZS1vbmU", "bGluZS10aHJlZQ")] {
+        assert!(when(lines, first) < Duration::from_millis(1500), "{lines:?}");
+        assert!(when(lines, third) >= Duration::from_millis(2500), "{lines:?}");
+    }
+    let last = exported.last().unwrap().1.clone();
+    assert!(last.contains("\"event_type\":\"session.terminated\""), "{last}");
+    assert_eq!(env.status(&id), "exited");
+}
+
+#[test]
+fn follow_stops_on_interrupt_and_returns_immediately_for_finished_sessions() {
+    let env = Env::new();
+    let done = env.start_detached(&["sh", "-c", "echo finished-output"]);
+    env.wait_status(&done, "exited");
+    let t = Instant::now();
+    assert!(env.ok(&["replay", &done, "--follow", "--instant"]).contains("finished-output"));
+    assert!(t.elapsed() < Duration::from_secs(2));
+
+    let id = env.start_detached(&["sh", "-c", "echo running; sleep 30"]);
+    let child = env.command(&["export", &id, "--follow"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    send_signal(child.id() as i32, libc::SIGINT);
+    let (lines, status) = read_streaming(child, Instant::now());
+    assert_eq!(status.code(), Some(130));
+    assert!(lines.iter().any(|(_, l)| l.contains("session.created")), "{lines:?}");
+    env.ok(&["stop", &id]);
+}

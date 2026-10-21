@@ -47,9 +47,9 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `attach ID`, `detach ID` | Connect this terminal to a session, or disconnect the attached one |
 | `inspect ID` | Measured process, terminal and git data; `--json` for scripts |
 | `recover ID` | Reattach if alive; otherwise report what is left and offer `--restart` or `--resume` |
-| `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant` |
+| `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |
-| `export ID` | JSON Lines, asciicast v2 or asciicast v3 |
+| `export ID` | JSON Lines, asciicast v2 or asciicast v3; `--follow` streams a running session |
 | `rm ID`, `prune` | Delete finished sessions and their recordings |
 | `hook` | Record an agent hook event; `run` wires it into Claude Code for you |
 

@@ -7,7 +7,7 @@ use agentrecorder_store::{Body, kind};
 use agentrecorder_supervisor::Layout;
 use anyhow::{Result, bail};
 
-use super::open_store;
+use super::{Follow, open_store};
 use crate::attach::{REPLAY_RESET, RESET_MODES};
 use crate::fmt;
 use crate::render::{apply, initial_size, playback_start};
@@ -27,6 +27,8 @@ pub struct ReplayArgs {
     pub instant: bool,
     #[arg(long, help = "Do not filter terminal queries, clipboard writes and device control strings")]
     pub raw: bool,
+    #[arg(short, long, help = "Keep playing new output while the session runs; stops when it ends or on Ctrl-C")]
+    pub follow: bool,
 }
 
 pub fn replay(layout: &Layout, args: ReplayArgs) -> Result<i32> {
@@ -71,8 +73,9 @@ pub fn replay(layout: &Layout, args: ReplayArgs) -> Result<i32> {
     let mut buf = Vec::with_capacity(64 << 10);
     let kinds = [kind::TERMINAL_OUTPUT, kind::TERMINAL_RESIZED, kind::TERMINAL_SNAPSHOT, kind::RUNTIME_WARNING];
 
-    store
-        .for_each_event_from(&s.id, start_after, Some(&kinds), |e| {
+    let follow = Follow { layout, follow: args.follow, interrupted: &interrupted };
+    follow
+        .each_from(&store, &s.id, start_after, Some(&kinds), |e| {
             if interrupted.load(Ordering::Relaxed) {
                 bail!("interrupted");
             }

@@ -18,9 +18,9 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `detach ID` | Detach whichever client is attached |
 | `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded, the agent state reported by its hooks, command and failure counts from OSC 133 shell integration marks, and for a `claude --resume <uuid>` session whether the resume was confirmed |
 | `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise explain what was lost and offer an explicit restart (same command, working directory and recording cap) or the agent's resume command |
-| `replay ID [--speed N] [--from HH:MM:SS] [--max-idle S] [--instant] [--raw]` | Play back recorded output; never re-executes commands |
+| `replay ID [--speed N] [--from HH:MM:SS] [--max-idle S] [--instant] [--raw] [-f\|--follow]` | Play back recorded output; never re-executes commands. `--follow` keeps playing new output while the session runs |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
-| `export ID [--format jsonl\|asciicast-v2\|asciicast-v3]` | Events as JSON Lines, or output as an asciicast file with markers (v3 also carries the exit status) |
+| `export ID [--format jsonl\|asciicast-v2\|asciicast-v3] [-f\|--follow]` | Events as JSON Lines, or output as an asciicast file with markers (v3 also carries the exit status). `--follow` keeps writing new events while the session runs |
 | `rm ID...` | Delete finished sessions and their recordings |
 | `prune --older-than 30d` | Delete finished sessions older than the given age |
 | `hook [--agent NAME]` | Read an agent hook event as JSON on stdin and record it as `agent.hook` in the session named by `AGENTRECORDER_SESSION`; always exits 0 and prints nothing on stdout (see Agent integration) |
@@ -48,6 +48,8 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 ## Scripting
 
 `agentrecorder run -- CMD` behaves like a pipe when it is not on a terminal. When stdin is not a terminal and reaches end of file, the client sends Ctrl-D to the session, so a shell fed from a file ends on its own. When stdout is not a terminal, output waits for the reader instead of being dropped. The client exits with CMD's exit code, and the recording is complete before it exits, so `export` can follow `run` directly. Use `run -d` to start a session and return immediately with its id.
+
+`replay --follow` and `export --follow` read the recording, then poll it every 100 ms for new events while the session runs. They return when the session is `exited` or `lost`, after one last read, or on Ctrl-C (exit code 130). New output appears about 0.1 s after the program wrote it (100 ms poll plus the recorder's 20 ms batch). `export --follow` flushes after every line, so `agentrecorder export ID --follow | jq` streams. On a finished session both behave as without `--follow`.
 
 ## Agent integration
 

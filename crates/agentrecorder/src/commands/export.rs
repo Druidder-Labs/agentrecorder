@@ -5,7 +5,10 @@ use agentrecorder_supervisor::Layout;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use super::open_store;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::{Follow, open_store};
 use crate::render::initial_size;
 
 const CAST_KINDS: &[&str] = &[
@@ -29,6 +32,8 @@ pub struct ExportArgs {
         help = "jsonl (all events), asciicast or asciicast-v2, or asciicast-v3 (output, resizes, markers, exit status)"
     )]
     pub format: String,
+    #[arg(short, long, help = "Keep writing new events while the session runs; stops when it ends or on Ctrl-C")]
+    pub follow: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -40,21 +45,31 @@ enum Cast {
 pub fn export(layout: &Layout, args: ExportArgs) -> Result<i32> {
     let store = open_store(layout)?;
     let s = store.resolve(&args.session)?;
+    let interrupted = Arc::new(AtomicBool::new(false));
+    if args.follow {
+        for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            signal_hook::flag::register(sig, interrupted.clone())?;
+        }
+    }
+    let follow = Follow { layout, follow: args.follow, interrupted: &interrupted };
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     match args.format.as_str() {
         "jsonl" => {
-            store.for_each_event(&s.id, None, |e| {
+            follow.each(&store, &s.id, None, |e| {
                 serde_json::to_writer(&mut out, &e.to_json())?;
                 out.write_all(b"\n")?;
+                if args.follow {
+                    out.flush()?;
+                }
                 Ok(())
             })?;
         }
-        "asciicast" | "asciicast-v2" => write_cast(&store, &s, Cast::V2, &mut out)?,
-        "asciicast-v3" => write_cast(&store, &s, Cast::V3, &mut out)?,
+        "asciicast" | "asciicast-v2" => write_cast(&store, &s, Cast::V2, &follow, &mut out)?,
+        "asciicast-v3" => write_cast(&store, &s, Cast::V3, &follow, &mut out)?,
         f => bail!("unknown format {f:?}; use jsonl, asciicast-v2 or asciicast-v3"),
     }
     out.flush()?;
-    Ok(0)
+    Ok(if interrupted.load(Ordering::Relaxed) { 130 } else { 0 })
 }
 
 fn recorded_term(store: &Store, s: &Session) -> Result<Option<String>> {
@@ -130,7 +145,7 @@ impl Timeline {
     }
 }
 
-fn write_cast(store: &Store, s: &Session, cast: Cast, out: &mut impl Write) -> Result<()> {
+fn write_cast(store: &Store, s: &Session, cast: Cast, follow: &Follow<'_>, out: &mut impl Write) -> Result<()> {
     let (rows, cols) = initial_size(store, s)?;
     let term = recorded_term(store, s)?;
     let mut header = match cast {
@@ -146,13 +161,17 @@ fn write_cast(store: &Store, s: &Session, cast: Cast, out: &mut impl Write) -> R
         }
     }
     writeln!(out, "{header}")?;
+    let flush = follow.follow;
     let line = |out: &mut dyn Write, v: Value| -> Result<()> {
         writeln!(out, "{}", escape_controls(v.to_string()))?;
+        if flush {
+            out.flush()?;
+        }
         Ok(())
     };
     let mut timeline = Timeline { cast, last_ns: 0, emitted_us: 0 };
     let mut pending: Vec<u8> = Vec::new();
-    store.for_each_event(&s.id, Some(CAST_KINDS), |e| {
+    follow.each(store, &s.id, Some(CAST_KINDS), |e| {
         match e.body() {
             Some(Body::TerminalResized { rows, cols }) => {
                 line(out, json!([timeline.stamp(e.mono_ns), "r", format!("{cols}x{rows}")]))?
