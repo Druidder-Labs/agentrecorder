@@ -45,6 +45,14 @@ pub struct RunArgs {
         help = "Append hash-chain anchor lines to FILE every 30 s while the session runs (see `agentrecorder anchor`)"
     )]
     pub anchor: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "AGENTRECORDER_ANCHOR_TOKEN",
+        hide_env_values = true,
+        help = "Bind the hash chain to a token the reviewer issued; only its SHA-256 is stored, and `verify --token` checks it"
+    )]
+    pub anchor_token: Option<String>,
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND", help = "Command and arguments, after --")]
     pub command: Vec<String>,
 }
@@ -92,6 +100,12 @@ pub fn start(layout: &Layout, args: &RunArgs, restarted_from: Option<&str>) -> R
     }
     if let Some(agent) = &launch.agent_session_id {
         cmd.args(["--agent-session-id", agent]);
+    }
+    if let Some(token) = &args.anchor_token {
+        if token.trim().is_empty() {
+            bail!("--anchor-token needs a non-empty token");
+        }
+        cmd.args(["--anchor-token-digest", &crate::chain::token_digest(token)]);
     }
     cmd.arg("--").args(&launch.argv);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));

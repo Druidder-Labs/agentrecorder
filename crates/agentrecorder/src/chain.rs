@@ -21,6 +21,14 @@ pub fn link(prev: &Hash, leaf: &Hash) -> Hash {
     h.finalize().into()
 }
 
+pub fn token_digest(token: &str) -> String {
+    hex(&Sha256::digest(token.as_bytes()))
+}
+
+pub fn genesis(token_digest: Option<&str>) -> Hash {
+    token_digest.and_then(unhex).unwrap_or(GENESIS)
+}
+
 pub fn file_digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
@@ -53,5 +61,15 @@ mod tests {
         assert_eq!(unhex(&hex(&ab)), Some(ab));
         assert_eq!(hex(&leaf("")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(unhex("zz"), None);
+    }
+
+    #[test]
+    fn a_token_moves_the_genesis_and_every_link_after_it() {
+        let d = token_digest("invite-42");
+        assert_eq!(genesis(None), GENESIS);
+        assert_eq!(genesis(Some(&d)), unhex(&d).unwrap());
+        assert_eq!(genesis(Some("not hex")), GENESIS);
+        let a = leaf("a");
+        assert_ne!(link(&genesis(Some(&d)), &a), link(&GENESIS, &a));
     }
 }

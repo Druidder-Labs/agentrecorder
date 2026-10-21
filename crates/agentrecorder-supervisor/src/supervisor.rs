@@ -62,6 +62,7 @@ pub struct Config {
     pub max_record_bytes: u64,
     pub restarted_from: Option<String>,
     pub agent_session_id: Option<String>,
+    pub anchor_token_digest: Option<String>,
     pub hold_output: bool,
     pub umask: Option<u32>,
 }
@@ -434,6 +435,7 @@ pub fn run(cfg: Config) -> Result<i32> {
         boot_time,
         restarted_from: cfg.restarted_from.as_deref(),
         agent_session_id: cfg.agent_session_id.as_deref(),
+        anchor_token_digest: cfg.anchor_token_digest.as_deref(),
     })?;
 
     let (recorder, recorder_thread) = Recorder::spawn(

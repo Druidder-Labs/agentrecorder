@@ -385,6 +385,7 @@ mod tests {
                 boot_time: None,
                 restarted_from: None,
                 agent_session_id: None,
+                anchor_token_digest: None,
             })
             .unwrap();
         store

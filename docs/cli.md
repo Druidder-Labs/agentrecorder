@@ -12,7 +12,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 
 | Command | Purpose |
 | --- | --- |
-| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-integration] [--detach-key K] [--cwd DIR] [--anchor FILE] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d`. `--anchor FILE` appends hash-chain anchor lines to FILE every 30 s while the session runs (see Sharing a session) |
+| `run [-d] [--no-record] [--record-input] [--max-record-mb N] [--no-agent-integration] [--detach-key K] [--cwd DIR] [--anchor FILE] [--anchor-token TOKEN] -- CMD...` | Start CMD in a new supervised session and attach, or print the id with `-d`. `--anchor FILE` appends hash-chain anchor lines to FILE every 30 s while the session runs; `--anchor-token TOKEN` (or `AGENTRECORDER_ANCHOR_TOKEN`) binds the chain to a token the reviewer issued, storing only its SHA-256 (see Sharing a session) |
 | `sessions [--json]` (alias `ls`) | List sessions: id, when they started, status, duration, exit, working directory and the command (see below) |
 | `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
 | `detach ID` | Detach whichever client is attached |
@@ -22,10 +22,10 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `replay ID [--speed N] [--from HH:MM:SS\|--from-mark N\|LABEL] [--max-idle S] [--instant] [--raw] [-f\|--follow]` | Play back recorded output; never re-executes commands. `--follow` keeps playing new output while the session runs. `--from-mark` starts at a marker, by number (1 is the first) or exact label; on a terminal, replay prints `[agentrecorder] mark N: LABEL` on stderr as it passes each one |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
 | `export ID [--format jsonl\|asciicast-v2\|asciicast-v3] [-f\|--follow]` | Events as JSON Lines, or output as an asciicast file with markers (v3 also carries the exit status). `--follow` keeps writing new events while the session runs |
-| `bundle ID [-o DIR] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--dry-run] [--json]` | Write a shareable directory (default `./agentrecorder-ID`) for a finished session: `index.html` (dashboard), `session.cast` (asciicast v3), `events.jsonl`, `chain.jsonl` and `manifest.json`. `--dry-run` lists what the redactions and cuts would change and writes nothing (see Sharing a session) |
+| `bundle ID [-o DIR\|FILE] [--zip] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--dry-run] [--json]` | Write a shareable directory (default `./agentrecorder-ID`) for a finished session: `index.html` (dashboard), `session.cast` (asciicast v3), `events.jsonl`, `chain.jsonl` and `manifest.json`. `--zip` writes the same five files into one zip file instead (default `./agentrecorder-ID.zip`). `--dry-run` lists what the redactions and cuts would change and writes nothing (see Sharing a session) |
 | `anchor ID [--interval S]` | Print one hash-chain anchor line every S seconds (default 30) while the session runs and a last one when it ends; for a finished session, one line. Exit 130 on Ctrl-C |
-| `verify DIR [--anchors FILE] [--json]` | Check a bundle's file digests and hash chain, and that every anchor in FILE matches; exit 0 when everything matches, 1 otherwise |
-| `view DIR\|ID [--no-open]` | Open the dashboard of a bundle, or write one for a finished session to `views/ID` and open it; `--no-open` prints the path only |
+| `verify DIR\|FILE.zip [--anchors FILE] [--token TOKEN] [--json]` | Check a bundle's file digests and hash chain, that every anchor in FILE matches, and with `--token` that the chain genesis is the SHA-256 of the token; exit 0 when everything matches, 1 otherwise |
+| `view DIR\|FILE.zip\|ID [--no-open]` | Open the dashboard of a bundle (a zip bundle's `index.html` is extracted to `views/ID` first), or write one for a finished session to `views/ID` and open it; `--no-open` prints the path only |
 | `rm ID...` | Delete finished sessions and their recordings |
 | `prune --older-than 30d` | Delete finished sessions older than the given age |
 | `completions SHELL` | Print a completion script for bash, zsh, fish or elvish; for example `agentrecorder completions zsh > "${fpath[1]}/_agentrecorder"` |
@@ -129,17 +129,20 @@ The marks come from the output stream, so any program in the session can emit th
 `bundle` turns a finished session into a directory that someone without `agentrecorder` can open, for example a technical interview reviewer, a bug report or a pull request:
 
 ```
-agentrecorder run --anchor anchors.jsonl -- claude   # work as usual; anchors are appended every 30 s
+agentrecorder run --anchor anchors.jsonl --anchor-token "$TOKEN" -- claude   # work as usual; anchors are appended every 30 s
 agentrecorder bundle last --redact-secrets --dry-run # see what would be redacted, with offsets
-agentrecorder bundle last --redact-secrets --redact-literal 'hunter2' --cut 00:12:03-00:12:09
-agentrecorder view agentrecorder-3f9a1c              # dashboard in the browser
-agentrecorder verify agentrecorder-3f9a1c --anchors anchors.jsonl   # what the receiver runs
+agentrecorder bundle last --redact-secrets --redact-literal 'hunter2' --cut 00:12:03-00:12:09 --zip
+agentrecorder view agentrecorder-3f9a1c.zip          # dashboard in the browser
+agentrecorder verify agentrecorder-3f9a1c.zip --anchors anchors.jsonl --token "$TOKEN"   # what the receiver runs
 ```
 
-What to send a reviewer: the bundle directory (or a zip of it) and, when integrity matters, the `anchors.jsonl` the reviewer received during the session (for example through a synced folder or `tail -f anchors.jsonl | curl -T - URL`). The reviewer opens `index.html` and runs `verify`.
+What to send a reviewer: the bundle (a directory, or one zip file with `--zip`) and, when integrity matters, the `anchors.jsonl` the reviewer received during the session (for example through a synced folder or `tail -f anchors.jsonl | curl -T - URL`). The reviewer opens `index.html` and runs `verify`.
+
+A reviewer who hands out one token per session (for example a technical interview invite) passes it to the candidate, who runs with `--anchor-token TOKEN` or `AGENTRECORDER_ANCHOR_TOKEN`. The token itself is never stored: its SHA-256 becomes the first link of the hash chain (the genesis), so every anchor line and the bundle's `manifest.json` depend on it, and `verify --token TOKEN` fails for a bundle made without that token. The token names the session the reviewer issued it for; it does not identify the person who typed.
 
 - `index.html` is a single file with everything inline, including the terminal player (`asciinema-player` 3.17.0, Apache-2.0, vendored in `crates/agentrecorder/src/vendor/`): summary tiles, the player, a timeline of markers, agent hook events, OSC 133 commands, git snapshots, notifications and warnings (click a row to seek), agent activity by tool, and the integrity data. It opens from disk without network access and makes no requests.
 - `--redact REGEX` (Rust `regex` syntax, matched on bytes), `--redact-literal TEXT` (exact text) and `--redact-secrets` (built-in shapes: OpenAI and Anthropic `sk-` keys, GitHub and GitLab tokens, AWS access key ids, Google API keys, Slack tokens, bearer tokens, JWTs, private key blocks; the list is `SECRET_PATTERNS` in `bundle.rs`) replace every match with `*` of the same length in output and input (matched across event boundaries), screen snapshots, every string in event payloads including the command line, the stored session metadata and the asciicast header. The patterns are not written to the bundle; the manifest records how many there were and how many matches they replaced. `--dry-run` prints each match with its offset, event type, the first four characters and the length, so the result can be checked before anything is written. A pattern that matches nothing, and a cut that removes nothing or starts after the session ended, print a warning.
+- `--zip` writes `events.jsonl`, `chain.jsonl`, `session.cast`, `manifest.json` and `index.html` into one deflate-compressed zip file under a directory named after the file, so `unzip agentrecorder-3f9a1c.zip` unpacks the same bundle; `verify` and `view` read the zip directly.
 - `--cut FROM-TO` removes terminal output, input, snapshots, notifications, hook events, OSC 133 commands and marks recorded between two offsets (seconds, `MM:SS` or `HH:MM:SS`); lifecycle events stay. The cast carries a `cut` marker at the start of each range. The screen after a cut can look wrong until the program redraws it.
 - Every recorded event is in `chain.jsonl` with its hash and fate (`kept`, `redacted`, `cut`), so a receiver sees how many events were edited and where.
 
@@ -147,9 +150,10 @@ What a bundle proves:
 
 - `verify` without anchors shows that the files agree with each other: a kept event that was edited after bundling fails. Whoever made the bundle can still build a consistent bundle from edited data, so without anchors the bundle is self-reported.
 - With anchors that a third party received while the session ran, `verify` shows that the events up to the last anchor are the ones that existed at that time, apart from the ones marked redacted or cut. Events after the last anchor are reported as not anchored.
+- With `--token`, `verify` shows that the session was started with that token; anchors made for another token, or a bundle made without one, fail.
 - No bundle shows what happened outside the recorded terminal: another terminal, another device or another person.
 
-`bundle` refuses a running session and a non-empty output directory unless `--force` is given. `anchor` must run with the same `agentrecorder` version that later writes the bundle, because the hash covers the exported JSON line of each event.
+`bundle` refuses a running session and a non-empty output directory or an existing zip file unless `--force` is given. `anchor` must run with the same `agentrecorder` version that later writes the bundle, because the hash covers the exported JSON line of each event.
 
 ## Recording and retention
 

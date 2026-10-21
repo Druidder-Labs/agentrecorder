@@ -9,7 +9,7 @@ agentrecorder (CLI client)          crates/agentrecorder
   |-- rm / prune ------------> SQLite store: deletes finished sessions, checkpoints the WAL
   |-- recover / replay ------> SQLite store (read)
   |-- export ----------------> SQLite store (read)
-  |-- bundle / view / anchor -> SQLite store (read); bundle and view write a directory with the dashboard
+  |-- bundle / view / anchor -> SQLite store (read); bundle writes a directory or a zip file with the dashboard, view a directory
   `-- verify ----------------> bundle directory only (no store)
 
 supervisor                     crates/agentrecorder-supervisor

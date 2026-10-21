@@ -1723,7 +1723,7 @@ fn bundle_dry_run_presets_default_dir_and_warnings() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["dir"], format!("agentrecorder-{id}"));
+    assert_eq!(v["path"], format!("agentrecorder-{id}"));
     let dir = env.path().join(format!("agentrecorder-{id}"));
     assert!(dir.join("index.html").is_file());
     let html = std::fs::read_to_string(dir.join("index.html")).unwrap();
@@ -1743,4 +1743,130 @@ fn completions_are_generated_for_each_shell() {
         let out = env.ok(&["completions", shell]);
         assert!(out.contains("bundle") && out.contains("agentrecorder"), "{shell}");
     }
+}
+
+#[test]
+fn bundle_zip_holds_the_same_files_and_verify_and_view_read_it() {
+    let env = Env::new();
+    let id = env.start_detached(&["sh", "-c", "echo zipped; exit 3"]);
+    env.wait_status(&id, "exited");
+    let dir = env.path().join("bundle");
+    env.ok(&["bundle", &id, "-o", dir.to_str().unwrap()]);
+    let zip_path = env.path().join("review.zip");
+    let zip_s = zip_path.to_str().unwrap();
+    let out = env.ok(&["bundle", &id, "--zip", "-o", zip_s, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((v["zip"].as_bool(), v["path"].as_str()), (Some(true), Some(zip_s)));
+    assert!(zip_path.is_file() && !env.path().join("review").exists());
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+    let mut names: Vec<String> = archive.file_names().map(|n| n.unwrap().to_string()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["chain.jsonl", "events.jsonl", "index.html", "manifest.json", "session.cast"].map(|f| format!("review/{f}"))
+    );
+    for f in ["manifest.json", "events.jsonl", "chain.jsonl", "session.cast"] {
+        let mut body = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(&format!("review/{f}")).unwrap(), &mut body).unwrap();
+        let on_disk = std::fs::read_to_string(dir.join(f)).unwrap();
+        if f == "manifest.json" {
+            let strip = |t: &str| t.lines().filter(|l| !l.contains("\"created_at\"")).collect::<Vec<_>>().join("\n");
+            assert_eq!(strip(&body), strip(&on_disk), "{f} differs between zip and directory");
+        } else {
+            assert_eq!(body, on_disk, "{f} differs between zip and directory");
+        }
+    }
+
+    let report = env.ok(&["verify", zip_s, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(v["ok"], true);
+    let from_dir: serde_json::Value =
+        serde_json::from_str(&env.ok(&["verify", dir.to_str().unwrap(), "--json"])).unwrap();
+    assert_eq!(v["head"], from_dir["head"]);
+
+    let path = env.ok(&["view", zip_s, "--no-open"]).trim().to_string();
+    assert!(path.starts_with(env.path().to_str().unwrap()) && path.ends_with("index.html"), "{path}");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("\"manifest\""));
+
+    let out = env.run(&["bundle", &id, "--zip", "-o", zip_s]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("pass --force"));
+    env.ok(&["bundle", &id, "--zip", "-o", zip_s, "--force"]);
+    let out = env.run(&["bundle", &id, "--zip", "-o", dir.to_str().unwrap(), "--force"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("is a directory"));
+    let out = env.run(&["verify", env.path().join("missing.zip").to_str().unwrap()]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("opening"));
+}
+
+#[test]
+fn anchor_token_binds_the_chain_and_verify_checks_it() {
+    use sha2::Digest;
+    let env = Env::new();
+    let file = env.path().join("anchors.jsonl");
+    let out = env.ok(&[
+        "run",
+        "-d",
+        "--anchor",
+        file.to_str().unwrap(),
+        "--anchor-token",
+        "invite-42",
+        "--",
+        "sh",
+        "-c",
+        "echo a; sleep 0.3; echo b",
+    ]);
+    let id = out.trim().to_string();
+    env.wait_status(&id, "exited");
+    wait_for("anchor file to be written", || std::fs::read_to_string(&file).is_ok_and(|s| s.contains("\"seq\"")));
+    std::thread::sleep(Duration::from_millis(300));
+    let digest: String = sha2::Sha256::digest(b"invite-42").iter().map(|b| format!("{b:02x}")).collect();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["genesis"], digest);
+    assert!(!text.contains("invite-42"));
+    let info = env.inspect(&id);
+    assert!(!info.to_string().contains("invite-42"));
+    assert_eq!(info["session"]["anchor_token_digest"], digest);
+
+    let dir = env.path().join("b");
+    let dir_s = dir.to_str().unwrap();
+    env.ok(&["bundle", &id, "-o", dir_s]);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        (manifest["chain"]["token_bound"].as_bool(), manifest["chain"]["genesis"].as_str()),
+        (Some(true), Some(digest.as_str()))
+    );
+    for f in ["manifest.json", "events.jsonl", "chain.jsonl", "session.cast", "index.html"] {
+        assert!(!std::fs::read_to_string(dir.join(f)).unwrap().contains("invite-42"), "{f} carries the token");
+    }
+
+    let report = env.ok(&["verify", dir_s, "--anchors", file.to_str().unwrap(), "--token", "invite-42", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(
+        (v["ok"].as_bool(), v["token_bound"].as_bool(), v["token_checked"].as_bool()),
+        (Some(true), Some(true), Some(true))
+    );
+    assert_eq!(v["anchored_through_seq"], last["seq"]);
+    let report = env.ok(&["verify", dir_s, "--anchors", file.to_str().unwrap()]);
+    assert!(report.contains("pass --token to check it") && report.contains("result:   ok"), "{report}");
+    let out = env.run(&["verify", dir_s, "--token", "invite-43"]);
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("token:    does not match") && text.contains("not the chain genesis"), "{text}");
+
+    let plain = env.start_detached(&["sh", "-c", "echo a; sleep 0.3; echo b"]);
+    env.wait_status(&plain, "exited");
+    let plain_dir = env.path().join("plain");
+    env.ok(&["bundle", &plain, "-o", plain_dir.to_str().unwrap()]);
+    let out = env.run(&["verify", plain_dir.to_str().unwrap(), "--token", "invite-42"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("not bound to a token"));
+    let plain_anchors = env.path().join("plain-anchors.jsonl");
+    std::fs::write(&plain_anchors, env.ok(&["anchor", &plain])).unwrap();
+    let swapped = std::fs::read_to_string(&plain_anchors).unwrap().replace(&plain, &id);
+    std::fs::write(&plain_anchors, swapped).unwrap();
+    let out = env.run(&["verify", dir_s, "--anchors", plain_anchors.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("genesis differs"));
 }

@@ -272,13 +272,14 @@ document.getElementById("integrity").append(
   kv([
     ["Chain", el("span", { class: "mono" }, `${M.chain.algorithm}, ${M.chain.events} events`)],
     ["Head", el("span", { class: "mono" }, M.chain.head)],
+    ["Token", M.chain.token_bound ? el("span", { title: "The chain starts from the SHA-256 of a token the reviewer issued; verify --token checks it" }, "bound; check with verify --token") : el("span", {}, "not bound")],
     ["Kept", el("span", { title: "Unchanged events; verify rechecks each one against its recorded hash" }, M.fates.kept || 0)],
     ["Redacted", el("span", { title: "Events where --redact replaced matches with '*'; present but not hash-checked" }, `${M.fates.redacted || 0} events, ${M.redaction.matches} matches`)],
     ["Cut", el("span", { title: "Events removed by --cut; their hashes stay in the chain so the gap is visible" }, M.fates.cut || 0)],
     ...files,
   ]),
   el("div", { class: "caveat" }, "Kept: unchanged and hash-checked. Redacted: matches replaced with '*', present but not hash-checked. Cut: removed; the hash stays in the chain so the gap is visible. Check with ",
-    el("code", {}, "agentrecorder verify <dir> --anchors anchors.jsonl"),
+    el("code", {}, "agentrecorder verify <dir or zip> --anchors anchors.jsonl --token TOKEN"),
     ". Without anchors received while the session ran, the bundle is consistent with itself but is self-reported: it shows how the session went, not that nothing happened outside the terminal."),
 );
 </script>

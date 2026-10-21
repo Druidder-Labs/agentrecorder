@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use agentrecorder_store::{Event, Session, Store, format_rfc3339, kind, now_unix_ns};
 use agentrecorder_supervisor::Layout;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use regex::bytes::Regex;
 use serde_json::{Value, json};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use super::export::{Cast, CastWriter, cast_header, cast_line, recorded_term};
 use super::{Follow, open_store};
@@ -51,9 +53,15 @@ pub const SECRET_PATTERNS: &[(&str, &str)] = &[
 pub struct BundleArgs {
     #[arg(help = "Session id, a unique prefix of it, or `last`; the session must have finished")]
     pub session: String,
-    #[arg(short, long, help = "Directory to create (default: ./agentrecorder-<ID>); it must not exist or be empty")]
+    #[arg(
+        short,
+        long,
+        help = "Directory, or with --zip a file, to create (default: ./agentrecorder-<ID> or agentrecorder-<ID>.zip); it must not exist or be empty"
+    )]
     pub out: Option<PathBuf>,
-    #[arg(long, help = "Replace the output directory if it exists")]
+    #[arg(long, help = "Write one zip file with the same five files instead of a directory")]
+    pub zip: bool,
+    #[arg(long, help = "Replace the output directory or file if it exists")]
     pub force: bool,
     #[arg(
         long,
@@ -109,17 +117,25 @@ pub struct AnchorArgs {
 
 #[derive(clap::Args)]
 pub struct VerifyArgs {
-    #[arg(help = "Bundle directory written by `agentrecorder bundle`")]
+    #[arg(help = "Bundle directory or zip file written by `agentrecorder bundle`")]
     pub dir: PathBuf,
     #[arg(long, help = "File of anchor lines received from `agentrecorder anchor` while the session ran")]
     pub anchors: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "AGENTRECORDER_ANCHOR_TOKEN",
+        hide_env_values = true,
+        help = "Token issued for the session; its SHA-256 must be the chain genesis recorded in the bundle"
+    )]
+    pub token: Option<String>,
     #[arg(long, help = "Print the result as JSON")]
     pub json: bool,
 }
 
 #[derive(clap::Args)]
 pub struct ViewArgs {
-    #[arg(help = "Bundle directory, or a session id or unique prefix")]
+    #[arg(help = "Bundle directory or zip file, or a session id or unique prefix")]
     pub target: String,
     #[arg(long, help = "Print the dashboard path instead of opening it in a browser")]
     pub no_open: bool,
@@ -170,7 +186,10 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     let (s, _) = finished_session(layout, &store, &args.session, "a bundle")?;
     let cuts = args.cut.iter().map(|c| parse_cut(c)).collect::<Result<Vec<_>>>()?;
     let patterns = patterns(&args)?;
-    let out = args.out.clone().unwrap_or_else(|| PathBuf::from(format!("agentrecorder-{}", s.id)));
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("agentrecorder-{}{}", s.id, if args.zip { ".zip" } else { "" })));
     let mut items = load(&store, &s.id)?;
     let duration_ns = items.last().map_or(0, |it| it.event.mono_ns);
     let cut_report = apply_cuts(&mut items, &cuts);
@@ -196,13 +215,22 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     for w in &warnings {
         eprintln!("agentrecorder: warning: {w}");
     }
-    prepare_dir(&out, args.force)?;
-    let summary = write_bundle(&store, &s, &out, &items, &patterns, &cut_report, matches.len() as u64)?;
+    if args.zip {
+        prepare_file(&out, args.force)?;
+    } else {
+        prepare_dir(&out, args.force)?;
+    }
+    let (files, summary) = write_bundle(&store, &s, &items, &patterns, &cut_report, matches.len() as u64)?;
+    if args.zip {
+        write_zip(&out, &files)?;
+    } else {
+        write_dir(&out, &files)?;
+    }
     if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(
-                &json!({"session": s.id, "dir": out, "summary": summary, "warnings": warnings})
+                &json!({"session": s.id, "path": out, "zip": args.zip, "summary": summary, "warnings": warnings})
             )?
         );
         return Ok(0);
@@ -229,7 +257,7 @@ fn dry_run(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "session": s.id,
-                "dir": out,
+                "path": out,
                 "dry_run": true,
                 "events": items.len(),
                 "fates": fates,
@@ -317,6 +345,83 @@ fn prepare_dir(dir: &Path, replace: bool) -> Result<()> {
         }
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
+}
+
+fn prepare_file(path: &Path, replace: bool) -> Result<()> {
+    if path.is_dir() {
+        bail!("{} is a directory; --zip writes a file", path.display());
+    }
+    if path.exists() && !replace {
+        bail!("{} exists; choose another file or pass --force", path.display());
+    }
+    Ok(())
+}
+
+fn write_dir(dir: &Path, files: &[(&str, String)]) -> Result<()> {
+    for (name, body) in files {
+        fs::write(dir.join(name), body).with_context(|| format!("writing {name}"))?;
+    }
+    Ok(())
+}
+
+fn write_zip(path: &Path, files: &[(&str, String)]) -> Result<()> {
+    let prefix = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map_or_else(String::new, |s| format!("{s}/"));
+    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).unix_permissions(0o600);
+    for (name, body) in files {
+        zip.start_file(format!("{prefix}{name}"), options).with_context(|| format!("adding {name} to the zip"))?;
+        zip.write_all(body.as_bytes()).with_context(|| format!("writing {name} to the zip"))?;
+    }
+    zip.finish().with_context(|| format!("finishing {}", path.display()))?;
+    Ok(())
+}
+
+enum Source {
+    Dir(PathBuf),
+    Zip { archive: ZipArchive<File>, prefix: String },
+}
+
+impl Source {
+    fn open(path: &Path) -> Result<Self> {
+        if path.is_dir() {
+            return Ok(Source::Dir(path.to_path_buf()));
+        }
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let archive = ZipArchive::new(file)
+            .with_context(|| format!("{} is neither a directory nor a zip file", path.display()))?;
+        let prefix = archive
+            .file_names()
+            .filter_map(|n| n.ok())
+            .filter_map(|n| n.strip_suffix("manifest.json").map(str::to_string))
+            .min_by_key(String::len)
+            .ok_or_else(|| anyhow!("{} is not an agentrecorder bundle: it has no manifest.json", path.display()))?;
+        Ok(Source::Zip { archive, prefix })
+    }
+
+    fn read(&mut self, name: &str) -> std::io::Result<Vec<u8>> {
+        match self {
+            Source::Dir(dir) => fs::read(dir.join(name)),
+            Source::Zip { archive, prefix } => {
+                let Some(index) = archive.index_for_name(&format!("{prefix}{name}")) else {
+                    return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not in the zip file"));
+                };
+                let mut entry = archive.by_index(index).map_err(std::io::Error::other)?;
+                let mut buf = Vec::with_capacity(entry.size() as usize);
+                entry.read_to_end(&mut buf)?;
+                Ok(buf)
+            }
+        }
+    }
+
+    fn text(&mut self, name: &str) -> Result<String> {
+        let bytes = self.read(name).with_context(|| format!("reading {name}"))?;
+        String::from_utf8(bytes).with_context(|| format!("{name} is not UTF-8"))
+    }
 }
 
 fn load(store: &Store, id: &str) -> Result<Vec<Item>> {
@@ -426,18 +531,20 @@ fn apply_redactions(items: &mut [Item], patterns: &[Regex]) -> Vec<Match> {
     matches
 }
 
+type Files = Vec<(&'static str, String)>;
+
 fn write_bundle(
     store: &Store,
     s: &Session,
-    dir: &Path,
     items: &[Item],
     patterns: &[Regex],
     cut_report: &[Value],
     matches: u64,
-) -> Result<Value> {
+) -> Result<(Files, Value)> {
     let mut events = String::new();
     let mut chain_lines = String::new();
-    let mut head = chain::GENESIS;
+    let genesis = chain::genesis(s.anchor_token_digest.as_deref());
+    let mut head = genesis;
     let mut fates: BTreeMap<&str, u64> = BTreeMap::new();
     let mut timeline = Vec::new();
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -468,10 +575,9 @@ fn write_bundle(
     }
 
     let cast = render_cast(store, s, items, cut_report, patterns)?;
-    let files = [("events.jsonl", events), ("chain.jsonl", chain_lines), ("session.cast", cast)];
+    let mut files: Files = vec![("events.jsonl", events), ("chain.jsonl", chain_lines), ("session.cast", cast)];
     let mut digests = serde_json::Map::new();
     for (name, body) in &files {
-        fs::write(dir.join(name), body).with_context(|| format!("writing {name}"))?;
         digests
             .insert((*name).to_string(), json!({"sha256": chain::file_digest(body.as_bytes()), "bytes": body.len()}));
     }
@@ -485,7 +591,13 @@ fn write_bundle(
         "program": crate::state::program(s),
         "duration_ms": crate::state::duration_ms(s),
         "event_counts": counts,
-        "chain": {"algorithm": chain::ALGORITHM, "events": items.len(), "head": chain::hex(&head)},
+        "chain": {
+            "algorithm": chain::ALGORITHM,
+            "events": items.len(),
+            "genesis": chain::hex(&genesis),
+            "token_bound": s.anchor_token_digest.is_some(),
+            "head": chain::hex(&head),
+        },
         "fates": fates,
         "redaction": {"patterns": patterns.len(), "matches": matches, "events": fates.get("redacted").copied().unwrap_or(0)},
         "cuts": cut_report,
@@ -495,15 +607,18 @@ fn write_bundle(
         mask_value(&mut manifest[field], patterns);
     }
     let manifest_text = serde_json::to_string_pretty(&manifest)? + "\n";
-    fs::write(dir.join("manifest.json"), &manifest_text).context("writing manifest.json")?;
     let data = json!({"manifest": manifest, "timeline": timeline, "cast": files[2].1});
-    fs::write(dir.join("index.html"), dashboard(&data)).context("writing index.html")?;
-    Ok(json!({
+    let html = dashboard(&data);
+    files.push(("manifest.json", manifest_text));
+    files.push(("index.html", html));
+    let summary = json!({
         "events": items.len(),
         "fates": fates,
         "matches": matches,
         "chain_head": chain::hex(&head),
-    }))
+        "token_bound": s.anchor_token_digest.is_some(),
+    });
+    Ok((files, summary))
 }
 
 fn summary_line(summary: &Value) -> String {
@@ -574,7 +689,8 @@ pub fn anchor(layout: &Layout, args: AnchorArgs) -> Result<i32> {
     let follow = Follow { layout, follow: true, interrupted: &interrupted };
     let interval = Duration::from_secs(args.interval.max(1));
     let mut out = std::io::stdout().lock();
-    let mut head = chain::GENESIS;
+    let genesis = chain::genesis(s.anchor_token_digest.as_deref());
+    let mut head = genesis;
     let mut last_seq: Option<i64> = None;
     let mut emitted: Option<i64> = None;
     let mut last_emit = Instant::now();
@@ -583,6 +699,7 @@ pub fn anchor(layout: &Layout, args: AnchorArgs) -> Result<i32> {
             "session_id": s.id,
             "seq": seq,
             "chain": chain::hex(head),
+            "genesis": chain::hex(&genesis),
             "timestamp": format_rfc3339(now_unix_ns()),
         });
         writeln!(out, "{line}")?;
@@ -611,13 +728,12 @@ struct ChainEntry {
     fate: String,
 }
 
-fn read_json_lines(path: &Path) -> Result<Vec<(String, Value)>> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+fn parse_json_lines(name: &str, text: &str) -> Result<Vec<(String, Value)>> {
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .enumerate()
         .map(|(n, l)| {
-            let v = serde_json::from_str(l).with_context(|| format!("{} line {}: not JSON", path.display(), n + 1))?;
+            let v = serde_json::from_str(l).with_context(|| format!("{name} line {}: not JSON", n + 1))?;
             Ok((l.to_string(), v))
         })
         .collect()
@@ -625,12 +741,13 @@ fn read_json_lines(path: &Path) -> Result<Vec<(String, Value)>> {
 
 pub fn verify(args: VerifyArgs) -> Result<i32> {
     let dir = &args.dir;
-    let manifest_text = match fs::read_to_string(dir.join("manifest.json")) {
-        Ok(t) => t,
+    let mut src = Source::open(dir)?;
+    let manifest_text = match src.read("manifest.json") {
+        Ok(bytes) => String::from_utf8(bytes).context("manifest.json is not UTF-8")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("{} is not an agentrecorder bundle: it has no manifest.json", dir.display())
         }
-        Err(e) => return Err(e).with_context(|| format!("reading {}/manifest.json", dir.display())),
+        Err(e) => return Err(e).with_context(|| format!("reading manifest.json in {}", dir.display())),
     };
     let manifest: Value = serde_json::from_str(&manifest_text).context("manifest.json is not JSON")?;
     if manifest["format"] != BUNDLE_FORMAT {
@@ -642,7 +759,7 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     let mut failures: Vec<String> = Vec::new();
     if let Some(files) = manifest["files"].as_object() {
         for (name, meta) in files {
-            match fs::read(dir.join(name)) {
+            match src.read(name) {
                 Ok(bytes) if Some(chain::file_digest(&bytes).as_str()) == meta["sha256"].as_str() => {}
                 Ok(_) => failures.push(format!("{name}: sha256 differs from manifest.json")),
                 Err(e) => failures.push(format!("{name}: {e}")),
@@ -650,9 +767,26 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
         }
     }
 
+    let genesis = match manifest["chain"].get("genesis") {
+        None => chain::GENESIS,
+        Some(v) => v
+            .as_str()
+            .and_then(chain::unhex)
+            .ok_or_else(|| anyhow!("manifest.json chain.genesis is not a SHA-256 hex value"))?,
+    };
+    let token_bound = manifest["chain"]["token_bound"].as_bool().unwrap_or(false);
+    let token_checked = args.token.is_some();
+    if let Some(token) = &args.token {
+        if !token_bound {
+            failures.push("token: the bundle is not bound to a token".into());
+        } else if chain::genesis(Some(&chain::token_digest(token))) != genesis {
+            failures
+                .push("token: its SHA-256 is not the chain genesis; the session was started with another token".into());
+        }
+    }
     let mut entries: Vec<ChainEntry> = Vec::new();
-    let mut head = chain::GENESIS;
-    for (i, (_, v)) in read_json_lines(&dir.join("chain.jsonl"))?.into_iter().enumerate() {
+    let mut head = genesis;
+    for (i, (_, v)) in parse_json_lines("chain.jsonl", &src.text("chain.jsonl")?)?.into_iter().enumerate() {
         let (Some(leaf), Some(link)) =
             (v["leaf"].as_str().and_then(chain::unhex), v["chain"].as_str().and_then(chain::unhex))
         else {
@@ -679,7 +813,7 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     let session_id = manifest["session"]["id"].as_str().unwrap_or("").to_string();
     let mut seen = vec![false; entries.len()];
     let (mut kept, mut redacted) = (0u64, 0u64);
-    for (line, v) in read_json_lines(&dir.join("events.jsonl"))? {
+    for (line, v) in parse_json_lines("events.jsonl", &src.text("events.jsonl")?)? {
         let seq = v["seq"].as_i64().unwrap_or(-1);
         let Some(entry) = usize::try_from(seq).ok().and_then(|i| entries.get(i)) else {
             failures.push(format!("events.jsonl seq {seq}: not in chain.jsonl"));
@@ -706,10 +840,17 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     let mut anchored = None;
     if let Some(path) = &args.anchors {
         let mut count = 0;
-        for (_, a) in read_json_lines(path)? {
+        let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        for (_, a) in parse_json_lines(&path.display().to_string(), &text)? {
             let seq = a["seq"].as_i64().unwrap_or(-1);
             if a["session_id"] != session_id.as_str() {
                 failures.push(format!("anchor at seq {seq}: names session {}, not {session_id}", a["session_id"]));
+                continue;
+            }
+            if let Some(g) = a.get("genesis")
+                && g.as_str() != Some(chain::hex(&genesis).as_str())
+            {
+                failures.push(format!("anchor at seq {seq}: genesis differs; the anchors were made for another token"));
                 continue;
             }
             match (usize::try_from(seq).ok().and_then(|i| entries.get(i)), a["chain"].as_str().and_then(chain::unhex)) {
@@ -740,6 +881,8 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
                 "head": chain::hex(&head),
                 "anchored_through_seq": anchored,
                 "anchors_checked": args.anchors.is_some(),
+                "token_bound": token_bound,
+                "token_checked": token_checked,
                 "failures": failures,
             }))?
         );
@@ -749,6 +892,12 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     println!("session:  {session_id}");
     println!("events:   {} in chain ({kept} kept and hash-checked, {redacted} redacted, {cut} cut)", entries.len());
     println!("head:     {}", chain::hex(&head));
+    match (token_bound, token_checked) {
+        (true, true) if failures.iter().any(|f| f.starts_with("token:")) => println!("token:    does not match"),
+        (true, true) => println!("token:    matches the chain genesis"),
+        (true, false) => println!("token:    the chain is bound to a token; pass --token to check it"),
+        (false, _) => println!("token:    not bound to a token"),
+    }
     match (&args.anchors, anchored) {
         (Some(_), Some(seq)) => {
             let tail = entries.len() as i64 - 1 - seq;
@@ -774,13 +923,26 @@ pub fn view(layout: &Layout, args: ViewArgs) -> Result<i32> {
     let as_dir = Path::new(&args.target);
     let index = if as_dir.join("manifest.json").is_file() {
         as_dir.join("index.html")
+    } else if as_dir.is_file() {
+        let mut src = Source::open(as_dir)?;
+        let manifest: Value = serde_json::from_slice(&src.read("manifest.json").context("reading manifest.json")?)
+            .context("manifest.json is not JSON")?;
+        let Some(id) = manifest["session"]["id"].as_str().filter(|id| !id.is_empty() && !id.contains('/')) else {
+            bail!("{} has no session id in its manifest", as_dir.display());
+        };
+        let dir = layout.view_dir(id);
+        prepare_dir(&dir, true)?;
+        fs::write(dir.join("index.html"), src.read("index.html").context("reading index.html")?)
+            .context("writing index.html")?;
+        dir.join("index.html")
     } else {
         let store = open_store(layout)?;
         let (s, _) = finished_session(layout, &store, &args.target, "the dashboard")?;
         let dir = layout.view_dir(&s.id);
         prepare_dir(&dir, true)?;
         let items = load(&store, &s.id)?;
-        write_bundle(&store, &s, &dir, &items, &[], &[], 0)?;
+        let (files, _) = write_bundle(&store, &s, &items, &[], &[], 0)?;
+        write_dir(&dir, &files)?;
         dir.join("index.html")
     };
     if !index.is_file() {
@@ -854,6 +1016,7 @@ mod tests {
         let args = BundleArgs {
             session: "last".into(),
             out: None,
+            zip: false,
             force: false,
             redact: vec![],
             redact_literal: vec!["a(b".into()],

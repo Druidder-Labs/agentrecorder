@@ -63,9 +63,9 @@ The same sequence, with `bash` in place of `claude`, runs as an automated test a
 | `replay ID` | Play back recorded output; `--speed`, `--from`, `--instant`, `--follow` for a running session |
 | `stop ID` | Stop every process in the session, escalating to SIGKILL |
 | `export ID` | JSON Lines, asciicast v2 or asciicast v3; `--follow` streams a running session |
-| `bundle ID` | Write a shareable directory: dashboard, asciicast, events, hash chain; `--redact-secrets`, `--redact`, `--cut` and `--dry-run` edit and preview it first |
+| `bundle ID` | Write a shareable directory, or one zip file with `--zip`: dashboard, asciicast, events, hash chain; `--redact-secrets`, `--redact`, `--cut` and `--dry-run` edit and preview it first |
 | `view DIR\|ID` | Open the dashboard of a bundle or a finished session in the browser |
-| `anchor ID`, `verify DIR` | Stream hash-chain anchors to a third party while a session runs (`run --anchor FILE` does it for you); check a bundle against them |
+| `anchor ID`, `verify DIR` | Stream hash-chain anchors to a third party while a session runs (`run --anchor FILE` does it for you); check a bundle against them, and with `--token` against the token the reviewer issued (`run --anchor-token`) |
 | `rm ID`, `prune` | Delete finished sessions and their recordings |
 | `hook` | Record an agent hook event; `run` wires it into Claude Code for you |
 
@@ -73,7 +73,7 @@ Every command has `--help`. The full reference, including scripting behavior and
 
 ## Sharing a session
 
-`agentrecorder bundle last` writes a directory that opens in any browser, offline: summary, terminal player, a clickable timeline of markers, agent hook events, commands and git state, and the integrity data. `--redact-secrets` masks common key and token shapes, `--redact-literal` masks exact text, `--cut` removes a time range, and `--dry-run` shows what would change before anything is written. For a reviewer, such as a technical interview or a pull request, `anchor` streams hash-chain anchors while the session runs and `verify` checks the bundle against them later. A bundle shows how a session went in the recorded terminal; it does not show what happened outside it. Details: `docs/cli.md`, Sharing a session.
+`agentrecorder bundle last` writes a directory that opens in any browser, offline: summary, terminal player, a clickable timeline of markers, agent hook events, commands and git state, and the integrity data. `--redact-secrets` masks common key and token shapes, `--redact-literal` masks exact text, `--cut` removes a time range, and `--dry-run` shows what would change before anything is written. `--zip` writes one file instead of a directory. For a reviewer, such as a technical interview or a pull request, `anchor` streams hash-chain anchors while the session runs and `verify` checks the bundle against them later; a token the reviewer issued (`run --anchor-token`) seeds the chain, so `verify --token` also shows the bundle belongs to that invitation. A bundle shows how a session went in the recorded terminal; it does not show what happened outside it. Details: `docs/cli.md`, Sharing a session.
 
 ## Recording and privacy
 

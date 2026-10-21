@@ -173,6 +173,7 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
         no_agent_integration: false,
         cwd,
         anchor: None,
+        anchor_token: None,
         command: argv,
     };
     let started = run::start(layout, &run_args, Some(&s.id))?;

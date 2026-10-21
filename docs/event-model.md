@@ -58,7 +58,7 @@ A session that ends without `session.terminated` was lost: the supervisor was ki
 
 ## Storage
 
-Events live in the `events` table of `state.db` (`crates/agentrecorder-store/src/lib.rs`), keyed by `(session_id, seq)`. `payload` is stored as JSON text, `data` as a BLOB and `data_len` as its length, so counting bytes does not read the blobs. Session metadata (status, pids, exit data, boot time) lives in the `sessions` table; the supervisor updates it, and CLI commands may only mark a session `lost` or delete it. `PRAGMA user_version` holds the database schema version (4); older stores are migrated in place the first time a newer binary opens it (version 2 added `data_len`, version 3 the `events_by_kind` index, version 4 the `sessions.agent_session_id` column).
+Events live in the `events` table of `state.db` (`crates/agentrecorder-store/src/lib.rs`), keyed by `(session_id, seq)`. `payload` is stored as JSON text, `data` as a BLOB and `data_len` as its length, so counting bytes does not read the blobs. Session metadata (status, pids, exit data, boot time) lives in the `sessions` table; the supervisor updates it, and CLI commands may only mark a session `lost` or delete it. `PRAGMA user_version` holds the database schema version (5); older stores are migrated in place the first time a newer binary opens it (version 2 added `data_len`, version 3 the `events_by_kind` index, version 4 the `sessions.agent_session_id` column, version 5 the `sessions.anchor_token_digest` column, the SHA-256 of the token given to `run --anchor-token`).
 
 The payload shapes in the table above are defined once, as the `Body` enum in `crates/agentrecorder-store/src/events.rs`; a unit test round-trips every variant through its stored form.
 
@@ -69,11 +69,11 @@ The payload shapes in the table above are defined once, as the `Body` enum in `c
 
 ## Bundle format
 
-`agentrecorder bundle` writes a directory (`bundle_version` 1 in `manifest.json`):
+`agentrecorder bundle` writes a directory, or with `--zip` one zip file holding the same entries under a directory named after the file (`bundle_version` 1 in `manifest.json`):
 
 | File | Content |
 | --- | --- |
-| `manifest.json` | `format` (`agentrecorder-bundle`), `bundle_version`, `generator`, `created_at`, `session` (the stored session row), `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts` (`from_ms`, `to_ms`, `events`) and `files` (`sha256` and `bytes` of `events.jsonl`, `chain.jsonl` and `session.cast`) |
+| `manifest.json` | `format` (`agentrecorder-bundle`), `bundle_version`, `generator`, `created_at`, `session` (the stored session row), `command_display`, `program`, `duration_ms`, `event_counts`, `chain` (`algorithm`, `events`, `genesis`, `token_bound`, `head`), `fates`, `redaction` (`patterns`, `matches`, `events`), `cuts` (`from_ms`, `to_ms`, `events`) and `files` (`sha256` and `bytes` of `events.jsonl`, `chain.jsonl` and `session.cast`) |
 | `events.jsonl` | The export envelope above, one line per event that was not cut; redacted events carry the redacted bytes |
 | `chain.jsonl` | One line per recorded event, cut or not: `seq`, `leaf`, `chain`, `fate` (`kept`, `redacted` or `cut`) |
 | `session.cast` | asciicast v3 built from the bundled events, with a `cut FROM-TO` marker per cut range |
@@ -82,10 +82,11 @@ The payload shapes in the table above are defined once, as the `Body` enum in `c
 Hash chain `sha256-chain-v1`, all hashes lowercase hex:
 
 - `leaf` is SHA-256 of the event's JSON line as `export` prints it, without the newline, computed before redaction.
-- `chain` for seq 0 is SHA-256 of 32 zero bytes followed by the leaf; for seq n it is SHA-256 of the previous `chain` followed by the leaf, both as raw 32-byte values.
+- `chain` for seq 0 is SHA-256 of the genesis followed by the leaf; for seq n it is SHA-256 of the previous `chain` followed by the leaf, both as raw 32-byte values.
+- The genesis is 32 zero bytes, or the SHA-256 of the token given to `run --anchor-token`; `manifest.json` `chain.genesis` carries it in hex and `chain.token_bound` says which. A reader that finds no `genesis` field assumes zero bytes.
 - `manifest.json` `chain.head` is the last `chain`.
 
-`agentrecorder anchor` prints lines of `session_id`, `seq`, `chain` (the same value as `chain.jsonl` at that seq) and `timestamp` (when the line was printed, informational).
+`agentrecorder anchor` prints lines of `session_id`, `seq`, `chain` (the same value as `chain.jsonl` at that seq), `genesis` (as in the manifest) and `timestamp` (when the line was printed, informational).
 
 ## Compatibility rules
 

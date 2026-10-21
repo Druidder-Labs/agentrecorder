@@ -32,6 +32,8 @@ sha2.workspace = true
 signal-hook.workspace = true
 sysinfo.workspace = true
 vt100.workspace = true
+zip.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
