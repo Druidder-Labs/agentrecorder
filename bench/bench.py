@@ -98,6 +98,57 @@ def bench_throughput(home, mib):
     return out
 
 
+def recording_counts(home, session):
+    info = json.loads(agentrecorder(home, "inspect", session, "--json").stdout)
+    counts = info["event_counts"]
+    warnings = [n["payload"] for n in info["notices"] if n["type"] == "runtime.warning"]
+    return {
+        "recorded_output_bytes": sum(c["bytes"] for c in counts if c["kind"] == "terminal.output"),
+        "events_dropped_warnings": sum(1 for w in warnings if w.get("code") == "events_dropped"),
+        "client_discarded_bytes": sum(w.get("bytes", 0) for w in warnings if w.get("code") == "client_output_discarded"),
+    }
+
+
+def drain_pipe(argv, env):
+    t = time.perf_counter()
+    p = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    total = 0
+    while True:
+        d = p.stdout.read(1 << 20)
+        if not d:
+            break
+        total += len(d)
+    p.wait()
+    return time.perf_counter() - t, total
+
+
+def bench_ceiling(home, mib):
+    """Producer faster than the PTY: cat of a pre-generated file of 99-byte lines."""
+    path = os.path.join(home, "lines.txt")
+    line = b"a" * 98 + b"\n"
+    with open(path, "wb") as f:
+        block = line * (1048576 // len(line) + 1)
+        for _ in range(mib):
+            f.write(block[:1048576])
+    size = os.path.getsize(path)
+    out = {"file_bytes": size}
+    secs, n = drain_pty(["cat", path], dict(os.environ))
+    out["direct_pty"] = {"seconds": round(secs, 3), "bytes": n, "mib_per_s": round(n / secs / 1048576, 1)}
+    cases = (
+        ("agentrecorder_interactive_client", drain_pty, []),
+        ("agentrecorder_pipe_client", drain_pipe, []),
+        ("agentrecorder_interactive_no_record", drain_pty, ["--no-record"]),
+    )
+    for label, drain, extra in cases:
+        secs, n = drain([BIN, "run", *extra, "--", "cat", path], env_for(home))
+        row = {"seconds": round(secs, 3), "bytes_seen_by_client": n, "mib_per_s": round(n / secs / 1048576, 1)}
+        last = json.loads(agentrecorder(home, "sessions", "--json").stdout)[-1]
+        row.update(recording_counts(home, last["session"]))
+        out[label] = row
+    os.unlink(path)
+    return out
+
+
 def bench_replay(home, session):
     t = time.perf_counter()
     r = subprocess.run([BIN, "replay", session, "--instant", "--raw"], env=env_for(home), stdout=subprocess.PIPE, check=True)
@@ -197,6 +248,8 @@ def main():
     tp = bench_throughput(home, 20 if a.quick else 100)
     results["replay"] = bench_replay(home, tp.pop("replay_session"))
     results["throughput"] = tp
+    log("ceiling")
+    results["ceiling"] = bench_ceiling(home, 20 if a.quick else 200)
     log("memory")
     results["memory"] = bench_memory(home)
     log("store")

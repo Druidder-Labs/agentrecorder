@@ -33,9 +33,26 @@ The four runs on this machine (first baseline and three review rounds) put the k
 
 The third-round benchmark also caught two regressions before they shipped: startup rose to 26.6 ms while every possible descriptor (up to 65,536) was marked close-on-exec in the child, fixed by marking only the descriptors that are actually open; and recording stopped at 8 MiB because the byte budget subtracted snapshot bytes it never added, fixed and covered by `events_with_data_that_are_not_output_do_not_disturb_the_byte_budget`.
 
+## Throughput ceiling
+
+Measured on 2026-10-21 on the same machine, with `bench_ceiling` in `bench/bench.py`: `cat` of a pre-generated 200 MiB file of 99-byte lines, which writes faster than a PTY drains. The PTY's newline translation adds one byte per line, so 211.8 MB reach the reader.
+
+| Path | Seconds | MiB/s | Recorded bytes | Drop warnings | Client discards |
+| --- | --- | --- | --- | --- | --- |
+| Direct PTY, drained by the benchmark | 1.05 | 191.9 | - | - | - |
+| agentrecorder, interactive client (reads from a PTY) | 2.85 | 70.7 | 211,833,591 | 0 | 0 |
+| agentrecorder, pipe client (stdout is a pipe) | 2.82 | 71.6 | 211,833,636 | 0 | 0 |
+| agentrecorder, interactive client, `--no-record` | 2.63 | 76.8 | 0 | 0 | 0 |
+
+The supervisor's ceiling on this machine is about 70 MiB/s with recording and 77 MiB/s without, 37 to 40 percent of a bare PTY. Turning recording off gains 9 percent, so most of the cost is outside the recorder; the second PTY hop to the client and the socket are the remaining suspects, not measured separately. The recorder kept every byte at that rate. tmux is not installed on this machine, so the tmux comparison is still open (`brew install tmux`, then extend `bench_throughput`).
+
+### Output produced before the client attaches
+
+The ceiling run showed the pipe client receiving 49 to 141 KB fewer bytes than were recorded, in three runs of a 50 MiB file. `run` starts the process before its own client attaches (about 10 ms), and the attach sends a screen snapshot with at most 1000 lines of history, so output beyond that, produced in the gap, reaches the recording but not the client. The loss happens with v0.1.0 too. With `sleep 0.2` before `cat`, the client received the file byte for byte. It affects only programs that print more than about 1000 lines within the first milliseconds; the recording is complete either way. This is an open defect against AC-19.
+
 ## Interpretation
 
-- The throughput test is bound by the producer pipeline, not by the PTY or by `agentrecorder`: direct and managed runs finish in the same time within noise. A faster producer is needed to find the supervisor's ceiling. That measurement is open.
+- The throughput test is bound by the producer pipeline, not by the PTY or by `agentrecorder`: direct and managed runs finish in the same time within noise. The ceiling is measured separately (see Throughput ceiling).
 - The recorder kept up with 28 MiB/s of output without dropping events. The store's sequential write rate (about 95 MiB/s at 1 KiB per event, higher with the recorder's 64 KiB coalescing) is the expected ceiling before the queue fills and output events are dropped.
 - Interactive overhead is about 25 to 30 microseconds per keystroke round trip at the median. This is below what a person can perceive; terminal rendering dominates.
 - Startup overhead is about 10 ms at the median, mostly the supervisor exec, SQLite open and readiness polling, which waits for a full status reply.
