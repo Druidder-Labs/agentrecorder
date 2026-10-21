@@ -153,6 +153,25 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+pub fn resumed_session(argv: &[String]) -> Option<String> {
+    let at = agent_index(argv)?;
+    if program(argv) != Some("claude") {
+        return None;
+    }
+    let args = &argv[at + 1..];
+    if args.iter().any(|a| a == "--fork-session") {
+        return None;
+    }
+    args.iter().enumerate().find_map(|(i, a)| {
+        let value = match a.split_once('=') {
+            Some(("--resume", v)) => Some(v),
+            _ if matches!(a.as_str(), "--resume" | "-r") => args.get(i + 1).map(String::as_str),
+            _ => None,
+        };
+        value.filter(|v| is_uuid(v)).map(str::to_string)
+    })
+}
+
 fn claude_session_in(args: &[String]) -> Option<String> {
     if args.iter().any(|a| a == "--fork-session") {
         return None;
@@ -334,6 +353,18 @@ mod tests {
             assert_eq!(hooked.agent_session_id.as_deref(), Some(id), "{argv:?}");
             assert!(!hooked.argv.contains(&"--session-id".to_string()) || argv.contains(&"--session-id".to_string()));
         }
+    }
+
+    #[test]
+    fn finds_the_session_a_claude_command_resumes() {
+        let id = "4b41da33-24de-41bb-92ef-77589bb77d13";
+        assert_eq!(resumed_session(&v(&["env", "A=1", "claude", "--resume", id])).as_deref(), Some(id));
+        assert_eq!(resumed_session(&v(&["claude", "-r", id, "--model", "x"])).as_deref(), Some(id));
+        assert_eq!(resumed_session(&v(&["claude", &format!("--resume={id}")])).as_deref(), Some(id));
+        assert_eq!(resumed_session(&v(&["claude", "--session-id", id])), None);
+        assert_eq!(resumed_session(&v(&["claude", "--resume", id, "--fork-session"])), None);
+        assert_eq!(resumed_session(&v(&["claude", "--resume", "name"])), None);
+        assert_eq!(resumed_session(&v(&["codex", "resume", id])), None);
     }
 
     #[test]

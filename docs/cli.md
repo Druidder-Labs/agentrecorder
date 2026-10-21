@@ -16,7 +16,7 @@ Requirements: Linux or macOS. `cargo install agentrecorder --locked` builds from
 | `sessions [--json]` (alias `ls`) | List sessions and their status (see below) |
 | `attach ID [--detach-key K]` | Attach this terminal; detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or the `AGENTRECORDER_DETACH_KEY` variable) |
 | `detach ID` | Detach whichever client is attached |
-| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded, and the agent state reported by its hooks |
+| `inspect ID [--json]` | Measured values only: process tree, CPU, RSS, terminal size, time since the last output, window title, terminal notifications (OSC 9, 99, 777, BEL), git HEAD at start and exit, byte and event counts, warnings, the agent session id when one is recorded, the agent state reported by its hooks, and for a `claude --resume <uuid>` session whether the resume was confirmed |
 | `recover ID [--restart\|--resume] [-y] [--detached] [--detach-key K]` | Reattach if alive; otherwise explain what was lost and offer an explicit restart (same command, working directory and recording cap) or the agent's resume command |
 | `replay ID [--speed N] [--from HH:MM:SS] [--max-idle S] [--instant] [--raw]` | Play back recorded output; never re-executes commands |
 | `stop ID [--signal HUP\|TERM\|INT\|KILL] [--timeout S]` | Signal every process in the session, escalating to SIGKILL after the timeout (default 5 s) |
@@ -64,6 +64,19 @@ Claude Code rejects a `--session-id` that was already used (`Session ID ... is a
 For the same `claude` commands, `run` also inserts `--settings '<json>'` with command hooks for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure` and `SessionEnd`. Each hook runs `agentrecorder hook --agent claude` with a 5 s timeout. Hooks passed with `--settings` are added to the user's own hooks for that run; nothing is written to the user's settings files. Hooks are not inserted when the arguments already contain `--settings` (a second one would replace either the user's or agentrecorder's), ask for `--help` or `--version`, or name a subcommand. They are inserted with `--resume` and `--continue`.
 
 `agentrecorder hook` reads the event JSON from stdin and sends it to the supervisor of the session named by `AGENTRECORDER_SESSION`, which every managed process inherits. It records only `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `source`, `reason`, `model`, `permission_mode`, `notification_type`, `message` and `tool_name`, each with a length cap. The prompt, tool input and assistant reply are never recorded. It exits 0 and prints nothing on stdout in every case, including outside a session, so it never changes what the agent does; errors go to stderr.
+
+### Resume confirmation
+
+A session whose command resumes a Claude Code UUID (`claude --resume <uuid>` or `-r <uuid>`, as `recover --resume` runs it) gets a verdict from its first `SessionStart` hook:
+
+| Verdict | Condition |
+| --- | --- |
+| `confirmed` | `SessionStart` arrived with `source` `resume` and the expected session id |
+| `mismatch` | `SessionStart` arrived with another session id or source |
+| `pending` | No `SessionStart` yet, less than 90 s after the process started |
+| `unconfirmed` | No `SessionStart` and the process ended (the exit code is named), or 90 s passed |
+
+`inspect` shows it as `Resume` (`resume` in `--json`). `recover --resume --detached` waits up to 15 s for a verdict other than `pending` and prints it on stderr before the new session id; attached, the verdict is printed after the client detaches or the agent exits. Claude Code reports `No conversation found` and exits with code 1 for an unknown id, which gives `unconfirmed`.
 
 ### Agent state
 

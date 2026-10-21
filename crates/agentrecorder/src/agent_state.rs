@@ -1,4 +1,4 @@
-use agentrecorder_store::{AgentHook, Body, Store, kind};
+use agentrecorder_store::{AgentHook, Body, Session, Store, kind};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -80,6 +80,86 @@ pub fn from_store(store: &Store, session_id: &str, process_running: bool) -> Res
     Ok(state)
 }
 
+pub const RESUME_TIMEOUT_MS: i64 = 90_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Confirmed,
+    Mismatch,
+    Pending,
+    Unconfirmed,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Confirmed => "confirmed",
+            Verdict::Mismatch => "mismatch",
+            Verdict::Pending => "pending",
+            Verdict::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResumeCheck {
+    pub expected_session_id: String,
+    pub verdict: Verdict,
+    pub reason: String,
+}
+
+pub fn judge_resume(
+    expected: &str,
+    first_start: Option<&AgentHook>,
+    elapsed_ms: i64,
+    running: bool,
+    exit_code: Option<i64>,
+) -> ResumeCheck {
+    let (verdict, reason) = match first_start {
+        Some(h) if h.session_id.as_deref() == Some(expected) && h.source.as_deref() == Some("resume") => {
+            (Verdict::Confirmed, "the agent reported SessionStart with source resume and this session id".to_string())
+        }
+        Some(h) => (
+            Verdict::Mismatch,
+            format!(
+                "the agent reported SessionStart with session id {} and source {}",
+                h.session_id.as_deref().unwrap_or("none"),
+                h.source.as_deref().unwrap_or("none")
+            ),
+        ),
+        None if !running => (
+            Verdict::Unconfirmed,
+            match exit_code {
+                Some(c) => format!("the process exited with code {c} before the agent reported SessionStart"),
+                None => "the process ended before the agent reported SessionStart".to_string(),
+            },
+        ),
+        None if elapsed_ms < RESUME_TIMEOUT_MS => {
+            (Verdict::Pending, format!("no SessionStart yet; waiting up to {} s", RESUME_TIMEOUT_MS / 1000))
+        }
+        None => (Verdict::Unconfirmed, format!("no SessionStart within {} s", RESUME_TIMEOUT_MS / 1000)),
+    };
+    ResumeCheck { expected_session_id: expected.to_string(), verdict, reason }
+}
+
+pub fn resume_check(store: &Store, s: &Session, running: bool, now_ns: i64) -> Result<Option<ResumeCheck>> {
+    let Some(expected) = crate::adapters::resumed_session(&s.command) else { return Ok(None) };
+    let mut first = None;
+    store.for_each_event(&s.id, Some(&[kind::AGENT_HOOK]), |e| {
+        if first.is_none()
+            && let Some(Body::AgentHook(h)) = e.body()
+            && h.hook_event_name == "SessionStart"
+        {
+            first = Some(h);
+        }
+        Ok(())
+    })?;
+    let start = s.started_at_ns.unwrap_or(s.created_at_ns);
+    let elapsed_ms = (now_ns - start) / 1_000_000;
+    Ok(Some(judge_resume(&expected, first.as_deref(), elapsed_ms, running, s.exit_code)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +213,25 @@ mod tests {
         assert_eq!(s.event, "Notification");
         assert_eq!(s.detail.as_deref(), Some("permission_prompt"));
         assert_eq!(s.at_ns, 42);
+    }
+
+    #[test]
+    fn judges_resume_confirmation() {
+        let id = "4b41da33-24de-41bb-92ef-77589bb77d13";
+        let start = |sid: &str, source: &str| AgentHook {
+            hook_event_name: "SessionStart".into(),
+            session_id: Some(sid.into()),
+            source: Some(source.into()),
+            ..hook("SessionStart", None)
+        };
+        let v = |h: Option<&AgentHook>, ms, running, code| judge_resume(id, h, ms, running, code).verdict;
+        assert_eq!(v(Some(&start(id, "resume")), 1_000, true, None), Verdict::Confirmed);
+        assert_eq!(v(Some(&start(id, "startup")), 1_000, true, None), Verdict::Mismatch);
+        assert_eq!(v(Some(&start("other", "resume")), 1_000, false, Some(0)), Verdict::Mismatch);
+        assert_eq!(v(None, 1_000, true, None), Verdict::Pending);
+        assert_eq!(v(None, RESUME_TIMEOUT_MS, true, None), Verdict::Unconfirmed);
+        let gone = judge_resume(id, None, 500, false, Some(1));
+        assert_eq!(gone.verdict, Verdict::Unconfirmed);
+        assert!(gone.reason.contains("code 1"), "{}", gone.reason);
     }
 }

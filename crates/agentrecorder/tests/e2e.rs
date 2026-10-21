@@ -1121,3 +1121,72 @@ fn agent_state_follows_hook_events_and_ends_with_the_process() {
     assert!(env.inspect(&plain)["agent_state"].is_null());
     assert!(env.ok(&["inspect", &plain]).contains("Agent state:     unavailable (no agent hook events)"));
 }
+
+fn fake_claude_with_conversations(env: &Env) -> (String, std::path::PathBuf) {
+    let dir = env.path().join("resumebin");
+    let known = env.path().join("conversations");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&known).unwrap();
+    let path = dir.join("claude");
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+known = {known:?}
+args = sys.argv[1:]
+hooks = json.loads(args[args.index("--settings") + 1])["hooks"]
+def fire(name, **payload):
+    payload["hook_event_name"] = name
+    subprocess.run(["sh", "-c", hooks[name][0]["hooks"][0]["command"]], input=json.dumps(payload).encode())
+if "--session-id" in args:
+    sid = args[args.index("--session-id") + 1]
+    open(os.path.join(known, sid), "w").write("ok")
+    fire("SessionStart", session_id=sid, source="startup")
+    sys.exit(0)
+sid = args[args.index("--resume") + 1]
+path = os.path.join(known, sid)
+if not os.path.exists(path):
+    print("No conversation found with session ID: " + sid, flush=True)
+    fire("SessionEnd", session_id=sid, reason="other")
+    sys.exit(1)
+if open(path).read() == "wrong":
+    fire("SessionStart", session_id="11111111-1111-4111-8111-111111111111", source="startup")
+else:
+    fire("SessionStart", session_id=sid, source="resume")
+time.sleep(30)
+"#,
+        known = known.to_string_lossy()
+    );
+    std::fs::write(&path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (path.to_string_lossy().into_owned(), known)
+}
+
+#[test]
+fn resume_is_confirmed_only_when_the_agent_reports_the_expected_session() {
+    let env = Env::new();
+    let (claude, known) = fake_claude_with_conversations(&env);
+    let original = env.start_detached(&[&claude, "--model", "haiku"]);
+    env.wait_status(&original, "exited");
+    let agent = env.inspect(&original)["session"]["agent_session_id"].as_str().unwrap().to_string();
+    assert!(env.inspect(&original)["resume"].is_null());
+
+    let resume = |want: &str, reason: &str| {
+        let out = env.run(&["recover", &original, "--resume", "--yes", "--detached"]);
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(stderr.contains(&format!("[agentrecorder] resume {want}: ")), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+        let id = String::from_utf8(out.stdout).unwrap().trim().lines().last().unwrap().to_string();
+        let info = env.inspect(&id);
+        assert_eq!(info["resume"]["verdict"], want, "{}", info["resume"]);
+        assert_eq!(info["resume"]["expected_session_id"], agent.as_str());
+        assert!(env.ok(&["inspect", &id]).contains(&format!("Resume:          {want} (")));
+        let _ = env.run(&["stop", &id]);
+    };
+    resume("confirmed", "source resume and this session id");
+    std::fs::write(known.join(&agent), "wrong").unwrap();
+    resume("mismatch", "session id 11111111-1111-4111-8111-111111111111 and source startup");
+    std::fs::remove_file(known.join(&agent)).unwrap();
+    resume("unconfirmed", "exited with code 1 before the agent reported SessionStart");
+}

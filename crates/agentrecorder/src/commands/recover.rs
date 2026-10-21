@@ -1,18 +1,23 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
-use agentrecorder_store::{Body, LostReason, Session, Store, format_rfc3339, kind};
+use std::time::{Duration, Instant};
+
+use agentrecorder_store::{Body, LostReason, Session, Store, format_rfc3339, kind, now_unix_ns};
 use agentrecorder_supervisor::Layout;
 use anyhow::{Result, bail};
 
 use super::run::{self, RunArgs};
 use crate::adapters;
+use crate::agent_state::{self, Verdict};
 use crate::attach::{self, DetachKey};
 use crate::fmt;
 use crate::procinfo::pid_alive;
 use crate::render::final_screen;
 use crate::state::State;
 use crate::state::{duration_ms, open_and_resolve};
+
+const RESUME_WAIT: Duration = Duration::from_secs(15);
 
 #[derive(clap::Args)]
 pub struct RecoverArgs {
@@ -171,6 +176,9 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
     };
     let started = run::start(layout, &run_args, Some(&s.id))?;
     if args.detached {
+        if args.resume {
+            report_resume(layout, &started.id, RESUME_WAIT);
+        }
         println!("{}", started.id);
         return Ok(0);
     }
@@ -178,9 +186,42 @@ fn offer(layout: &Layout, store: &Store, s: &Session, args: &RecoverArgs, key: &
         return run::print_finished(layout, &started.id);
     }
     eprintln!("[agentrecorder] session {} started from {}; detach with {}", started.id, s.id, key.label);
-    match attach::attach(layout, &started.id, key)? {
+    let code = match attach::attach(layout, &started.id, key)? {
         attach::Outcome::Ended => run::print_finished(layout, &started.id),
         outcome => Ok(attach::report_outcome(&started.id, &outcome)),
+    };
+    if args.resume {
+        report_resume(layout, &started.id, Duration::ZERO);
+    }
+    code
+}
+
+fn report_resume(layout: &Layout, id: &str, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    loop {
+        let check = open_and_resolve(layout, id).and_then(|(store, s, state)| {
+            let running = state.live().is_some_and(|l| !l.exited);
+            agent_state::resume_check(&store, &s, running, now_unix_ns())
+        });
+        match check {
+            Ok(Some(c)) if c.verdict == Verdict::Pending && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            Ok(Some(c)) => {
+                let hint = if c.verdict == Verdict::Pending {
+                    format!("; check later with agentrecorder inspect {id}")
+                } else {
+                    String::new()
+                };
+                eprintln!("[agentrecorder] resume {}: {}{hint}", c.verdict.as_str(), c.reason);
+                return;
+            }
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("[agentrecorder] resume confirmation unavailable: {e:#}");
+                return;
+            }
+        }
     }
 }
 
