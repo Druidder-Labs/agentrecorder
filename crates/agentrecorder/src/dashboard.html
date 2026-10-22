@@ -108,7 +108,9 @@ pre.cmdline { margin: 6px 0; padding: 8px 10px; background: var(--chip); border-
 .step.test.bad { background: var(--bad-soft); color: var(--bad); }
 .step.test.unsure { background: var(--chip); color: var(--text); }
 .step.you { background: var(--human-soft); color: var(--human); }
-.step .d { font-family: var(--mono); font-size: 11.5px; opacity: .85; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step .d { font-family: var(--mono); font-size: 11.5px; opacity: .85; max-width: 340px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn > *, .turn .head > *, .steps > * { min-width: 0; max-width: 100%; }
+.step { max-width: 100%; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .tag.human { border-color: transparent; background: var(--human-soft); color: var(--human); }
@@ -247,10 +249,10 @@ pre.diff .m { color: var(--faint); }
 </section>
 <section class="tab" id="tab-code" hidden><div id="code"></div></section>
 <section class="tab lower" id="tab-details" hidden>
-  <details class="sec" id="files-sec"><summary>Files changed <span class="cnt" id="files-cnt"></span></summary><div class="body" id="files"></div></details>
+  <details class="sec" id="files-sec" open><summary>Files changed <span class="cnt" id="files-cnt"></span></summary><div class="body" id="files"></div></details>
   <details class="sec"><summary>All events <span class="cnt" id="events-cnt"></span></summary><div class="body"><div class="filters" id="filters"></div><div class="rows" id="rows"></div></div></details>
   <details class="sec"><summary>Session details</summary><div class="body" id="session"></div></details>
-  <details class="sec"><summary>Verification and integrity</summary><div class="body" id="integrity"></div></details>
+  <details class="sec" open><summary>Verification and integrity</summary><div class="body" id="integrity"></div></details>
 </section>
 </div>
 <script id="data" type="application/json">__AGENTRECORDER_DATA__</script>
@@ -313,7 +315,7 @@ const bundleName = D.bundle_name || `agentrecorder-${S.id}`;
 const P = M.prompts || { available: false, reason: "the bundle was written by an agentrecorder version without prompt data" };
 const exitOk = S.exit_code === 0;
 const exitText = S.exit_code != null ? `exit ${S.exit_code}` : S.exit_signal != null ? `killed by signal ${S.exit_signal}` : S.status;
-const verifyCmd = `agentrecorder verify ${bundleName} --anchors anchors.jsonl${M.chain.token_bound ? " --token TOKEN" : ""}`;
+const verifyCmd = `agentrecorder verify ${bundleName} --anchors ANCHORS_FILE${M.chain.token_bound ? " --token TOKEN" : ""}\n# ANCHORS_FILE: the anchor file you received while the session ran; leave --anchors out if you received none`;
 
 // Turns: one per prompt, from the transcript when the bundle has it, else from UserPromptSubmit hooks.
 const submits = hooks.filter(h => hookName(h) === "UserPromptSubmit");
@@ -349,13 +351,16 @@ for (const c of M.cuts || []) {
   if (work.length && !orphans.some(o => o.t_ms === work[0].t_ms)) orphans.push({ orphan: "after-cut", t_ms: work[0].t_ms });
 }
 let turns = [...realTurns, ...orphans].sort((a, b) => a.t_ms - b.t_ms);
+// Index of the first element at or after ms; the arrays are sorted by time.
+const lowerBound = (xs, ms, key = x => x.t_ms) => { let lo = 0, hi = xs.length; while (lo < hi) { const m = (lo + hi) >> 1; if (key(xs[m]) < ms) lo = m + 1; else hi = m; } return lo; };
+const within = (xs, a, b) => xs.slice(lowerBound(xs, a), lowerBound(xs, b));
 const cutStartAfter = ms => Math.min(Infinity, ...(M.cuts || []).filter(c => c.from_ms > ms).map(c => c.from_ms));
 turns.forEach((t, i) => {
   const next = Math.min(i + 1 < turns.length ? turns[i + 1].t_ms : Infinity, cutStartAfter(t.t_ms));
   t.next = next;
-  const stop = stops.find(h => h.t_ms >= t.t_ms && h.t_ms < next);
+  const stop = within(stops, t.t_ms, next)[0];
   t.end = stop ? stop.t_ms : null;
-  t.events = hooks.filter(h => h.t_ms >= t.t_ms && h.t_ms < next && hookName(h) !== "UserPromptSubmit");
+  t.events = within(hooks, t.t_ms, next).filter(h => hookName(h) !== "UserPromptSubmit");
   t.calls = t.events.filter(h => hookName(h) === "PostToolUse" || hookName(h) === "PostToolUseFailure");
   t.approvals = 0; t.approvalMs = 0;
   t.events.forEach((h, k) => {
@@ -373,7 +378,11 @@ turns.forEach((t, i) => {
     // The screen goes quiet while the permission prompt waits; it repaints once when the agent sends its idle
     // notification. The first other output after the prompt appeared is taken as the moment of the answer.
     const notes = t.events.filter(x => hookName(x) === "Notification" && x.t_ms >= h.t_ms && x.t_ms < limit).map(x => x.t_ms);
-    const resume = outputsMs.find(o => o > h.t_ms + 500 && o < limit && !notes.some(n => o >= n - 1000 && o <= n + 1000));
+    let resume;
+    for (let i = lowerBound(outputsMs, h.t_ms + 501, x => x); i < outputsMs.length && outputsMs[i] < limit; i++) {
+      const o = outputsMs[i];
+      if (!notes.some(n => o >= n - 1000 && o <= n + 1000)) { resume = o; break; }
+    }
     h.waitMs = h.cutAway ? null : Math.max(0, (resume ?? limit) - h.t_ms);
     h.waitMeasured = resume != null;
     // A refusal fires no hook; the screen changes when the person answers. No change at all means no answer.
@@ -430,7 +439,7 @@ turns.forEach(t => {
   });
   t.interrupts = interrupts.filter(ms => ms >= t.t_ms && ms < t.next);
   t.compactions = compactions.filter(ms => ms >= t.t_ms && ms < t.next);
-  t.shell = shell.filter(r => r.t_ms >= t.t_ms && r.t_ms < t.next);
+  t.shell = within(shell, t.t_ms, t.next);
   t.tests = t.calls.filter(isTest);
   t.edits = t.calls.filter(c => EDIT_TOOLS.has(c.payload.tool_name) && hookName(c) === "PostToolUse");
   t.refusals = (P.refusals || []).filter(ms => ms >= t.t_ms && ms < t.next);

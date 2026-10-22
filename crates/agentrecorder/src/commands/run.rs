@@ -157,9 +157,10 @@ fn last_log_line(layout: &Layout, id: &str) -> Option<String> {
 pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     let key = DetachKey::parse(&args.detach_key)?;
     let started = start(layout, &args, None)?;
-    if let Some(file) = &args.anchor {
-        start_anchor(&started.id, file)?;
-    }
+    let mut anchor_writer = match &args.anchor {
+        Some(file) => Some(start_anchor(&started.id, file)?),
+        None => None,
+    };
     let sharing = sharing_note(&args);
     if args.detached {
         println!("{}", started.id);
@@ -169,7 +170,9 @@ pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         return Ok(0);
     }
     if started.finished {
-        return print_finished(layout, &started.id);
+        let code = print_finished(layout, &started.id);
+        finish_anchor(anchor_writer.as_mut());
+        return code;
     }
     eprintln!(
         "[agentrecorder] session {} started{}{sharing}; detach with {}",
@@ -179,7 +182,27 @@ pub fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     );
     match attach::attach(layout, &started.id, &key)? {
         attach::Outcome::Ended => print_finished(layout, &started.id),
-        outcome => Ok(attach::report_outcome(&started.id, &outcome)),
+        outcome => {
+            let exited = matches!(outcome, attach::Outcome::Exited(_));
+            let code = attach::report_outcome(&started.id, &outcome);
+            if exited {
+                finish_anchor(anchor_writer.as_mut());
+            }
+            Ok(code)
+        }
+    }
+}
+
+/// Waits briefly for the anchor writer to append the line for the session's end, so the anchor file is complete
+/// when `run` returns.
+fn finish_anchor(writer: Option<&mut std::process::Child>) {
+    let Some(child) = writer else { return };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -194,7 +217,7 @@ fn sharing_note(args: &RunArgs) -> String {
     note
 }
 
-fn start_anchor(id: &str, file: &PathBuf) -> Result<()> {
+fn start_anchor(id: &str, file: &PathBuf) -> Result<std::process::Child> {
     let out = OpenOptions::new()
         .create(true)
         .append(true)
@@ -207,8 +230,7 @@ fn start_anchor(id: &str, file: &PathBuf) -> Result<()> {
         .stdout(out)
         .stderr(Stdio::null())
         .spawn()
-        .context("starting the anchor writer")?;
-    Ok(())
+        .context("starting the anchor writer")
 }
 
 fn new_id(store: &Store) -> Result<String> {

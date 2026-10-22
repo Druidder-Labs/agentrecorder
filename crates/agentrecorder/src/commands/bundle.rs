@@ -146,7 +146,7 @@ pub struct VerifyArgs {
 
 #[derive(clap::Args)]
 pub struct ViewArgs {
-    #[arg(help = "Bundle directory or zip file, or a session id or unique prefix")]
+    #[arg(help = "Bundle directory or zip file, or a session id, a unique prefix of it, or `last`")]
     pub target: String,
     #[arg(long, help = "Print the dashboard path instead of opening it in a browser")]
     pub no_open: bool,
@@ -282,10 +282,7 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
         }
     }
     if args.zip {
-        println!(
-            "  {} in one zip file; send it to the reviewer, who checks it against the anchors received while the session ran",
-            crate::fmt::bytes(bytes)
-        );
+        println!("  {} in one zip file to send to the reviewer", crate::fmt::bytes(bytes));
     } else {
         println!(
             "  {} in {} files; send the directory, or run again with --zip for one file",
@@ -294,7 +291,21 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
         );
     }
     println!("  open it with: agentrecorder view {}", out.display());
-    println!("  check it with: agentrecorder verify {}", out.display());
+    let token = if s.anchor_token_digest.is_some() { " --token TOKEN" } else { "" };
+    println!("  check it with: agentrecorder verify {} --anchors ANCHORS_FILE{token}", out.display());
+    println!(
+        "    ANCHORS_FILE is the anchor file the reviewer received while the session ran; without it, verify only shows the files agree with each other"
+    );
+    if let Some(root) = session_root(&items).or(s.cwd.clone())
+        && let (Ok(root), Some(parent)) = (fs::canonicalize(&root), out.parent())
+        && fs::canonicalize(if parent.as_os_str().is_empty() { Path::new(".") } else { parent })
+            .is_ok_and(|p| p.starts_with(&root))
+    {
+        eprintln!(
+            "agentrecorder: warning: the bundle is inside the session's repository ({}); a later bundle --diff of this session would include it. Move it, or write it elsewhere with -o",
+            root.display()
+        );
+    }
     Ok(0)
 }
 
@@ -333,7 +344,7 @@ fn dry_run(
         fates.get("redacted").copied().unwrap_or(0),
         fates.get("cut").copied().unwrap_or(0)
     );
-    println!("  {} redaction matches", matches.len());
+    println!("  {} redaction {}", matches.len(), if matches.len() == 1 { "match" } else { "matches" });
     for m in matches {
         println!("    {} {} {}", crate::fmt::offset_ms(m.mono_ns / 1_000_000), m.kind, m.preview);
     }
@@ -703,6 +714,7 @@ fn write_bundle(
         "events": items.len(),
         "fates": fates,
         "matches": matches,
+        "patterns": patterns.len(),
         "chain_head": chain::hex(&head),
         "token_bound": s.anchor_token_digest.is_some(),
         "prompts": manifest["prompts"].clone(),
@@ -807,8 +819,11 @@ fn session_diff(s: &Session, items: &[Item], patterns: &[Regex]) -> SessionDiff 
             .map(|it| &it.event.payload)
     };
     let unavailable = |reason: &str| SessionDiff { info: json!({"status": reason}), bytes: None, matches: Vec::new() };
-    let Some(base) = snapshot("start").and_then(|p| p["head"].as_str()).map(str::to_string) else {
-        return unavailable("unavailable: no git HEAD was recorded at start");
+    let Some(start) = snapshot("start") else {
+        return unavailable("unavailable: the session did not run in a git work tree");
+    };
+    let Some(base) = start["head"].as_str().map(str::to_string) else {
+        return unavailable("unavailable: the repository had no commit when the session started");
     };
     let at_exit = snapshot("exit").and_then(|p| p["diff_sha256"].as_str()).map(str::to_string);
     let Some(cwd) = s.cwd.as_deref() else {
@@ -826,16 +841,54 @@ fn session_diff(s: &Session, items: &[Item], patterns: &[Regex]) -> SessionDiff 
         Some(_) => "differs from the session end: the work tree changed after the session",
         None => "not compared: the recording has no diff hash from the session end",
     };
-    let matches: Vec<String> = mask(&mut bytes, patterns).into_iter().map(|(_, p)| p).collect();
+    let mut matches: Vec<String> = mask(&mut bytes, patterns).into_iter().map(|(_, p)| p).collect();
+    let mut binary_dropped = 0;
+    if !patterns.is_empty() {
+        (bytes, binary_dropped) = drop_binary_patches(&bytes);
+        if binary_dropped > 0 {
+            matches.push(format!("{binary_dropped} binary files reduced to \"Binary files differ\""));
+        }
+    }
     if !matches.is_empty() {
         status = "redacted: not comparable with the session end";
     }
     let files = bytes.split(|b| *b == b'\n').filter(|l| l.starts_with(b"diff --git ")).count();
     SessionDiff {
-        info: json!({"status": status, "bytes": bytes.len(), "files": files, "base": base, "sha256_at_exit": at_exit}),
+        info: json!({"status": status, "bytes": bytes.len(), "files": files, "base": base, "sha256_at_exit": at_exit, "binary_dropped": binary_dropped}),
         bytes: Some(bytes),
         matches,
     }
+}
+
+/// Redaction cannot read compressed binary patch data, so with redaction on, each binary patch is replaced by the
+/// line git prints for binary files without --binary.
+fn drop_binary_patches(diff: &[u8]) -> (Vec<u8>, usize) {
+    let text = String::from_utf8_lossy(diff);
+    if !text.contains("\nGIT binary patch\n") {
+        return (diff.to_vec(), 0);
+    }
+    let mut out = Vec::with_capacity(diff.len());
+    let mut dropped = 0;
+    let mut rest = diff;
+    while !rest.is_empty() {
+        let next = rest[1..].windows(12).position(|w| w == b"\ndiff --git ").map_or(rest.len(), |i| i + 2);
+        let (section, tail) = rest.split_at(next);
+        if let Some(at) = section.windows(17).position(|w| w == b"GIT binary patch\n") {
+            let header = &section[..at];
+            let name = String::from_utf8_lossy(header.split(|b| *b == b'\n').next().unwrap_or_default())
+                .trim_start_matches("diff --git ")
+                .to_string();
+            let (a, b) =
+                name.split_once(" b/").map_or((name.clone(), name.clone()), |(a, b)| (a.to_string(), format!("b/{b}")));
+            out.extend_from_slice(header);
+            out.extend_from_slice(format!("Binary files {a} and {b} differ\n").as_bytes());
+            dropped += 1;
+        } else {
+            out.extend_from_slice(section);
+        }
+        rest = tail;
+    }
+    (out, dropped)
 }
 
 fn story_line(story: &Value) -> String {
@@ -859,15 +912,26 @@ fn story_line(story: &Value) -> String {
 
 fn summary_line(summary: &Value) -> String {
     let f = &summary["fates"];
+    let matches = match summary["matches"].as_u64().unwrap_or(0) {
+        1 => ", 1 redaction match".to_string(),
+        n if summary["patterns"].as_u64().unwrap_or(0) > 0 => format!(", {n} redaction matches"),
+        _ => String::new(),
+    };
     format!(
-        "{} events ({} kept, {} redacted, {} cut), {} redaction matches, chain head {}",
+        "{} events ({} kept, {} redacted, {} cut){matches}, chain head {}",
         summary["events"],
         f["kept"].as_u64().unwrap_or(0),
         f["redacted"].as_u64().unwrap_or(0),
         f["cut"].as_u64().unwrap_or(0),
-        summary["matches"],
         &summary["chain_head"].as_str().unwrap_or("")[..16]
     )
+}
+
+fn session_root(items: &[Item]) -> Option<String> {
+    items
+        .iter()
+        .find(|it| it.event.kind == kind::GIT_SNAPSHOT)
+        .and_then(|it| it.event.payload["root"].as_str().map(str::to_string))
 }
 
 fn render_cast(store: &Store, s: &Session, items: &[Item], cuts: &[Value], patterns: &[Regex]) -> Result<String> {
@@ -1226,6 +1290,10 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
 
 pub fn view(layout: &Layout, args: ViewArgs) -> Result<i32> {
     let as_dir = Path::new(&args.target);
+    let looks_like_path = args.target.contains('/') || args.target.ends_with(".zip") || args.target.starts_with('.');
+    if looks_like_path && !as_dir.exists() {
+        bail!("{} does not exist; pass a bundle directory, a zip file or a session id", as_dir.display());
+    }
     let index = if as_dir.join("manifest.json").is_file() {
         as_dir.join("index.html")
     } else if as_dir.is_file() {
@@ -1366,6 +1434,22 @@ mod tests {
         );
         assert!(parse_cut("5-2").is_err());
         assert!(parse_cut("5").is_err());
+    }
+
+    #[test]
+    fn binary_patches_are_reduced_when_redacting() {
+        let diff = b"diff --git a/t.txt b/t.txt\n--- a/t.txt\n+++ b/t.txt\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/r.zip b/r.zip\nnew file mode 100644\nindex 0000000..1111111\nGIT binary patch\nliteral 3\nKcmZ?l0000\n\nliteral 0\nHcmV?d00001\n\ndiff --git a/u.txt b/u.txt\n--- a/u.txt\n+++ b/u.txt\n@@ -1 +1 @@\n-c\n+d\n";
+        let (out, dropped) = drop_binary_patches(diff);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(dropped, 1);
+        assert!(!text.contains("GIT binary patch") && !text.contains("KcmZ"), "{text}");
+        assert!(
+            text.contains("new file mode 100644\nindex 0000000..1111111\nBinary files a/r.zip and b/r.zip differ\n"),
+            "{text}"
+        );
+        assert!(text.contains("+b\n") && text.ends_with("+d\n"), "{text}");
+        let plain = b"diff --git a/t.txt b/t.txt\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(drop_binary_patches(plain), (plain.to_vec(), 0));
     }
 
     #[test]

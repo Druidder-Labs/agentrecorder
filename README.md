@@ -32,7 +32,7 @@ agentrecorder attach last
 agentrecorder inspect last
 agentrecorder replay last --speed 2
 agentrecorder view last                  # the dashboard, on this machine only
-agentrecorder bundle last --prompts --diff --redact-secrets --zip   # one file to send; it prints how to open and check it
+agentrecorder bundle last --prompts --diff --redact-secrets --zip -o ~/review.zip   # one file to send, outside the repository
 ```
 
 | Command | What it does |
