@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/Druidder-Labs/agentrecorder/compare/v0.3.0...v0.4.0) (2026-10-22)
+
+
+### Features
+
+* **bundle:** add an HR overview, evaluation guide and verified code diff ([e3bf927](https://github.com/Druidder-Labs/agentrecorder/commit/e3bf927d4378ce9fb2693ff8b43a21956e4a18cd))
+* **bundle:** separate approval wait from agent time in the prompts panel ([9757bcd](https://github.com/Druidder-Labs/agentrecorder/commit/9757bcd9c17ebe85f45b5b6cf817f70fd4f0e058))
+* **bundle:** show the prompts in order with wait, agent time, tools ([d1c738a](https://github.com/Druidder-Labs/agentrecorder/commit/d1c738a049d3f4d0428b582ad14241ec37e87887))
+
+
+### Bug Fixes
+
+* **bundle:** keep redacted secrets out of binary diffs ([1935e3a](https://github.com/Druidder-Labs/agentrecorder/commit/1935e3abe9f92aabe0adaf95d88f3d4e66b33d7a))
+* **store:** name the versions and the update command when the store is newer ([4a4a2a0](https://github.com/Druidder-Labs/agentrecorder/commit/4a4a2a025d7795df8549f57fa09427b211b89f75))
+
 ## [0.3.0](https://github.com/Druidder-Labs/agentrecorder/compare/v0.2.0...v0.3.0) (2026-10-21)
 
 
