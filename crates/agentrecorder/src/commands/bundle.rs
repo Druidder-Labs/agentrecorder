@@ -18,6 +18,7 @@ use super::export::{Cast, CastWriter, cast_header, cast_line, recorded_term};
 use super::{Follow, open_store};
 use crate::chain::{self, Hash};
 use crate::render::initial_size;
+use agentrecorder_supervisor::git::DIFF_FILE;
 
 pub const BUNDLE_FORMAT: &str = "agentrecorder-bundle";
 pub const BUNDLE_VERSION: u32 = 1;
@@ -59,21 +60,21 @@ pub struct BundleArgs {
         help = "Directory, or with --zip a file, to create (default: ./agentrecorder-<ID> or agentrecorder-<ID>.zip); it must not exist or be empty"
     )]
     pub out: Option<PathBuf>,
-    #[arg(long, help = "Write one zip file with the same five files instead of a directory")]
+    #[arg(long, help = "Write one zip file with the same files instead of a directory")]
     pub zip: bool,
     #[arg(long, help = "Replace the output directory or file if it exists")]
     pub force: bool,
     #[arg(
         long,
         value_name = "REGEX",
-        help = "Replace every match in output, input, snapshots and event payloads with '*' (repeatable)"
+        help = "Replace every match in output, input, snapshots, event payloads, prompt text and the diff with '*' (repeatable)"
     )]
     pub redact: Vec<String>,
     #[arg(long, value_name = "TEXT", help = "Replace every occurrence of this exact text with '*' (repeatable)")]
     pub redact_literal: Vec<String>,
     #[arg(
         long,
-        help = "Also redact common secret shapes: API keys, GitHub and GitLab tokens, AWS key ids, bearer tokens, JWTs, private key blocks"
+        help = "Also redact common secret shapes: OpenAI and Anthropic keys, GitHub and GitLab tokens, AWS key ids, Google API keys, Slack tokens, bearer tokens, JWTs, private key blocks"
     )]
     pub redact_secrets: bool,
     #[arg(
@@ -87,6 +88,11 @@ pub struct BundleArgs {
         help = "Include the text of each prompt from the agent transcript, after redaction; without it the bundle has only lengths, times and tokens"
     )]
     pub prompts: bool,
+    #[arg(
+        long,
+        help = "Include the code changes (git diff against the HEAD at start, plus untracked files), after redaction; verify compares them with the hash recorded when the session ended"
+    )]
+    pub diff: bool,
     #[arg(long, help = "List what --redact and --cut would change, with offsets, and write nothing")]
     pub dry_run: bool,
     #[arg(long, help = "Print the result as JSON")]
@@ -144,8 +150,6 @@ pub struct ViewArgs {
     pub target: String,
     #[arg(long, help = "Print the dashboard path instead of opening it in a browser")]
     pub no_open: bool,
-    #[arg(long, help = "For a session id: include the text of each prompt from the agent transcript")]
-    pub prompts: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -200,9 +204,16 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     let mut items = load(&store, &s.id)?;
     let duration_ns = items.last().map_or(0, |it| it.event.mono_ns);
     let cut_report = apply_cuts(&mut items, &cuts);
+    let diff = if args.diff { Some(session_diff(&s, &items, &patterns)) } else { None };
     let matches = apply_redactions(&mut items, &patterns);
-    let (story, prompt_matches) = agent_story(&store, &s, &items, &cut_report, &patterns, args.prompts)?;
+    let (story, mut prompt_matches) = agent_story(&store, &s, &items, &cut_report, &patterns, args.prompts)?;
     let mut warnings = Vec::new();
+    if let Some(d) = &diff {
+        prompt_matches.extend(d.matches.iter().cloned());
+        if d.bytes.is_none() || d.info["status"] != "matches the session end" {
+            warnings.push(format!("diff: {}", d.info["status"].as_str().unwrap_or("unavailable")));
+        }
+    }
     for (c, r) in cuts.iter().zip(&cut_report) {
         let (from, to) = (crate::fmt::offset_ms(c.from_ns / 1_000_000), crate::fmt::offset_ms(c.to_ns / 1_000_000));
         if c.from_ns > duration_ns {
@@ -240,6 +251,7 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
         &items,
         &Edits { patterns: &patterns, cut_report: &cut_report, matches: total_matches },
         story,
+        diff,
     )?;
     let bytes: u64 = if args.zip {
         write_zip(&out, &files)?;
@@ -260,13 +272,26 @@ pub fn bundle(layout: &Layout, args: BundleArgs) -> Result<i32> {
     println!("wrote bundle for session {} to {}", s.id, out.display());
     println!("  {}", summary_line(&summary));
     println!("  {}", story_line(&summary["prompts"]));
+    if let Some(d) = summary.get("diff").filter(|d| !d.is_null()) {
+        let status = d["status"].as_str().unwrap_or("unavailable");
+        match d["files"].as_u64() {
+            Some(n) => {
+                println!("  code changes: {n} files, {}, {status}", crate::fmt::bytes(d["bytes"].as_u64().unwrap_or(0)))
+            }
+            None => println!("  code changes: {status}"),
+        }
+    }
     if args.zip {
         println!(
             "  {} in one zip file; send it to the reviewer, who checks it against the anchors received while the session ran",
             crate::fmt::bytes(bytes)
         );
     } else {
-        println!("  {} in 5 files; send the directory, or run again with --zip for one file", crate::fmt::bytes(bytes));
+        println!(
+            "  {} in {} files; send the directory, or run again with --zip for one file",
+            crate::fmt::bytes(bytes),
+            files.len()
+        );
     }
     println!("  open it with: agentrecorder view {}", out.display());
     println!("  check it with: agentrecorder verify {}", out.display());
@@ -313,7 +338,11 @@ fn dry_run(
         println!("    {} {} {}", crate::fmt::offset_ms(m.mono_ns / 1_000_000), m.kind, m.preview);
     }
     if !prompt_matches.is_empty() {
-        println!("  {} redaction matches in prompt text: {}", prompt_matches.len(), prompt_matches.join(", "));
+        println!(
+            "  {} redaction matches in prompt text and the diff: {}",
+            prompt_matches.len(),
+            prompt_matches.join(", ")
+        );
     }
     for c in cut_report {
         println!(
@@ -392,14 +421,14 @@ fn prepare_file(path: &Path, replace: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_dir(dir: &Path, files: &[(&str, String)]) -> Result<()> {
+fn write_dir(dir: &Path, files: &[(&str, Vec<u8>)]) -> Result<()> {
     for (name, body) in files {
         fs::write(dir.join(name), body).with_context(|| format!("writing {name}"))?;
     }
     Ok(())
 }
 
-fn write_zip(path: &Path, files: &[(&str, String)]) -> Result<()> {
+fn write_zip(path: &Path, files: &[(&str, Vec<u8>)]) -> Result<()> {
     let prefix = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -410,7 +439,7 @@ fn write_zip(path: &Path, files: &[(&str, String)]) -> Result<()> {
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).unix_permissions(0o600);
     for (name, body) in files {
         zip.start_file(format!("{prefix}{name}"), options).with_context(|| format!("adding {name} to the zip"))?;
-        zip.write_all(body.as_bytes()).with_context(|| format!("writing {name} to the zip"))?;
+        zip.write_all(body).with_context(|| format!("writing {name} to the zip"))?;
     }
     zip.finish().with_context(|| format!("finishing {}", path.display()))?;
     Ok(())
@@ -569,7 +598,7 @@ fn apply_redactions(items: &mut [Item], patterns: &[Regex]) -> Vec<Match> {
     matches
 }
 
-type Files = Vec<(&'static str, String)>;
+type Files = Vec<(&'static str, Vec<u8>)>;
 
 struct Edits<'a> {
     patterns: &'a [Regex],
@@ -584,6 +613,7 @@ fn write_bundle(
     items: &[Item],
     edits: &Edits,
     story: Value,
+    diff: Option<SessionDiff>,
 ) -> Result<(Files, Value)> {
     let Edits { patterns, cut_report, matches } = *edits;
     let mut events = String::new();
@@ -620,11 +650,22 @@ fn write_bundle(
     }
 
     let cast = render_cast(store, s, items, cut_report, patterns)?;
-    let mut files: Files = vec![("events.jsonl", events), ("chain.jsonl", chain_lines), ("session.cast", cast)];
+    let shown_cast = cast.clone();
+    let mut files: Files = vec![
+        ("events.jsonl", events.into_bytes()),
+        ("chain.jsonl", chain_lines.into_bytes()),
+        ("session.cast", cast.into_bytes()),
+    ];
+    let diff_info = diff.as_ref().map(|d| d.info.clone());
+    let diff_bytes = diff.and_then(|d| d.bytes);
+    let shown =
+        diff_bytes.as_ref().filter(|b| b.len() <= MAX_DIFF_SHOWN).map(|b| String::from_utf8_lossy(b).into_owned());
+    if let Some(bytes) = diff_bytes {
+        files.push((DIFF_FILE, bytes));
+    }
     let mut digests = serde_json::Map::new();
     for (name, body) in &files {
-        digests
-            .insert((*name).to_string(), json!({"sha256": chain::file_digest(body.as_bytes()), "bytes": body.len()}));
+        digests.insert((*name).to_string(), json!({"sha256": chain::file_digest(body), "bytes": body.len()}));
     }
     let mut manifest = json!({
         "format": BUNDLE_FORMAT,
@@ -648,15 +689,16 @@ fn write_bundle(
         "cuts": cut_report,
         "files": digests,
         "prompts": story,
+        "diff": diff_info,
     });
     for field in ["session", "command_display", "program"] {
         mask_value(&mut manifest[field], patterns);
     }
     let manifest_text = serde_json::to_string_pretty(&manifest)? + "\n";
-    let data = json!({"manifest": manifest, "timeline": timeline, "cast": files[2].1, "bundle_name": bundle_name});
+    let data = json!({"manifest": manifest, "timeline": timeline, "cast": shown_cast, "bundle_name": bundle_name, "diff": shown});
     let html = dashboard(&data);
-    files.push(("manifest.json", manifest_text));
-    files.push(("index.html", html));
+    files.push(("manifest.json", manifest_text.into_bytes()));
+    files.push(("index.html", html.into_bytes()));
     let summary = json!({
         "events": items.len(),
         "fates": fates,
@@ -664,6 +706,7 @@ fn write_bundle(
         "chain_head": chain::hex(&head),
         "token_bound": s.anchor_token_digest.is_some(),
         "prompts": manifest["prompts"].clone(),
+        "diff": manifest["diff"].clone(),
     });
     Ok((files, summary))
 }
@@ -721,32 +764,96 @@ fn agent_story(
             "cache_read": t.cache_read,
             "cache_creation": t.cache_creation,
             "total": t.total(),
+            "reply_chars": t.reply_chars,
+            "model": t.model,
         });
         if with_text {
             v["text"] = json!(t.text);
         }
         list.push(v);
     }
+    let offsets = |list: &[i64]| -> Vec<i64> {
+        list.iter().map(|at| ((at - base_ns) / 1_000_000).max(0)).filter(|t| !in_cut(*t)).collect()
+    };
     let mut story = json!({
         "available": true,
         "source": format!("{agent} transcript"),
         "text": with_text,
         "cut": cut,
         "interactions": list,
+        "interrupts": offsets(&usage.interrupts),
+        "refusals": offsets(&usage.refusals),
+        "compactions": offsets(&usage.compactions),
     });
     let found = if with_text { mask_value(&mut story["interactions"], patterns) } else { Vec::new() };
     Ok((story, found))
+}
+
+const MAX_DIFF_SHOWN: usize = 4 << 20;
+
+struct SessionDiff {
+    info: Value,
+    bytes: Option<Vec<u8>>,
+    matches: Vec<String>,
+}
+
+fn session_diff(s: &Session, items: &[Item], patterns: &[Regex]) -> SessionDiff {
+    let snapshot = |phase: &str| {
+        items
+            .iter()
+            .find(|it| {
+                it.fate != Fate::Cut && it.event.kind == kind::GIT_SNAPSHOT && it.event.payload["phase"] == phase
+            })
+            .map(|it| &it.event.payload)
+    };
+    let unavailable = |reason: &str| SessionDiff { info: json!({"status": reason}), bytes: None, matches: Vec::new() };
+    let Some(base) = snapshot("start").and_then(|p| p["head"].as_str()).map(str::to_string) else {
+        return unavailable("unavailable: no git HEAD was recorded at start");
+    };
+    let at_exit = snapshot("exit").and_then(|p| p["diff_sha256"].as_str()).map(str::to_string);
+    let Some(cwd) = s.cwd.as_deref() else {
+        return unavailable("unavailable: the session has no working directory");
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let Some(mut bytes) = agentrecorder_supervisor::git::worktree_diff(Path::new(cwd), &base, deadline) else {
+        return unavailable(
+            "unavailable: git could not produce the diff in the session's working directory (it failed, timed out, or the diff or the untracked files are over 32 MiB)",
+        );
+    };
+    let digest = chain::file_digest(&bytes);
+    let mut status = match &at_exit {
+        Some(h) if *h == digest => "matches the session end",
+        Some(_) => "differs from the session end: the work tree changed after the session",
+        None => "not compared: the recording has no diff hash from the session end",
+    };
+    let matches: Vec<String> = mask(&mut bytes, patterns).into_iter().map(|(_, p)| p).collect();
+    if !matches.is_empty() {
+        status = "redacted: not comparable with the session end";
+    }
+    let files = bytes.split(|b| *b == b'\n').filter(|l| l.starts_with(b"diff --git ")).count();
+    SessionDiff {
+        info: json!({"status": status, "bytes": bytes.len(), "files": files, "base": base, "sha256_at_exit": at_exit}),
+        bytes: Some(bytes),
+        matches,
+    }
 }
 
 fn story_line(story: &Value) -> String {
     if story["available"] != true {
         return format!("prompts: unavailable ({})", story["reason"].as_str().unwrap_or("no transcript"));
     }
-    let n = story["interactions"].as_array().map_or(0, Vec::len);
+    let list = story["interactions"].as_array().cloned().unwrap_or_default();
+    let typed = list.iter().filter(|t| t["origin"] == "human" || t["origin"] == "user").count();
+    let other = list.iter().filter(|t| t["origin"] != "none").count() - typed;
+    let n = match other {
+        0 => format!("{typed}"),
+        1 => format!("{typed} typed and 1 command or notification"),
+        _ => format!("{typed} typed and {other} commands or notifications"),
+    };
     if story["text"] == true {
-        format!("prompts: {n} with their text, after redaction; read them before sending")
+        format!("prompts: {n}, with their text after redaction; read them before sending")
     } else {
-        format!("prompts: {n} with times and tokens, text not included (--prompts adds it)")
+        format!("prompts: {n}, with times and tokens; text not included (--prompts adds it)")
     }
 }
 
@@ -941,6 +1048,9 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
 
     let session_id = manifest["session"]["id"].as_str().unwrap_or("").to_string();
     let mut seen = vec![false; entries.len()];
+    let mut exit_diff: Option<String> = None;
+    let mut exit_seq: Option<i64> = None;
+    let mut exit_redacted = false;
     let (mut kept, mut redacted) = (0u64, 0u64);
     for (line, v) in parse_json_lines("events.jsonl", &src.text("events.jsonl")?)? {
         let seq = v["seq"].as_i64().unwrap_or(-1);
@@ -952,6 +1062,13 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
             failures.push(format!("events.jsonl seq {seq}: belongs to another session"));
         }
         seen[seq as usize] = true;
+        if v["event_type"] == "git.snapshot" && v["payload"]["phase"] == "exit" {
+            exit_seq = Some(seq);
+            exit_redacted = entry.fate == "redacted";
+            if entry.fate == "kept" {
+                exit_diff = v["payload"]["diff_sha256"].as_str().map(str::to_string);
+            }
+        }
         match entry.fate.as_str() {
             "kept" if chain::leaf(&line) == entry.leaf => kept += 1,
             "kept" => failures.push(format!("events.jsonl seq {seq}: content differs from its recorded hash")),
@@ -1000,6 +1117,11 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
     }
 
     let token_ok = token_bound && token_checked && !failures.iter().any(|f| f.starts_with("token:"));
+    let diff_digest =
+        manifest["files"].get(DIFF_FILE).and_then(|_| src.read(DIFF_FILE).ok()).map(|b| chain::file_digest(&b));
+    let exit_anchored = matches!((anchored, exit_seq), (Some(a), Some(e)) if e <= a);
+    let diff_edited = manifest["redaction"]["matches"].as_u64().unwrap_or(0) > 0
+        && manifest["diff"]["status"].as_str().is_some_and(|s| s.starts_with("redacted"));
     let mut proves: Vec<&str> = Vec::new();
     let mut gaps: Vec<&str> = Vec::new();
     if failures.is_empty() {
@@ -1013,6 +1135,16 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
             proves.push("token matched");
         } else if token_bound {
             gaps.push("token not checked");
+        }
+        if let Some(d) = &diff_digest {
+            match &exit_diff {
+                Some(h) if h == d && exit_anchored => proves.push("diff matches the session end"),
+                Some(h) if h == d => gaps.push("diff matches the recorded hash, but the session end is not anchored"),
+                Some(_) if diff_edited => gaps.push("diff differs; the bundle says it was redacted"),
+                Some(_) => gaps.push("diff differs from the session end"),
+                None if exit_redacted => gaps.push("diff not compared: the session-end record was redacted"),
+                None => gaps.push("diff not recorded at the session end"),
+            }
         }
     }
     if args.json {
@@ -1062,6 +1194,24 @@ pub fn verify(args: VerifyArgs) -> Result<i32> {
             "anchors:  not checked; without anchors this shows the files are consistent, not that they match the session"
         ),
     }
+    if let Some(d) = &diff_digest {
+        match &exit_diff {
+            Some(h) if h == d && exit_anchored => {
+                println!("diff:     matches the hash recorded when the session ended")
+            }
+            Some(h) if h == d => println!(
+                "diff:     matches the hash in the session-end record, but no anchor covers that record, so the bundle author could have written both"
+            ),
+            Some(_) if diff_edited => println!(
+                "diff:     differs from the hash recorded when the session ended; the bundle says redaction changed it"
+            ),
+            Some(_) => println!("diff:     differs from the hash recorded when the session ended"),
+            None if exit_redacted => {
+                println!("diff:     not compared; the session-end record was redacted for sharing")
+            }
+            None => println!("diff:     no hash was recorded when the session ended; not compared"),
+        }
+    }
     if failures.is_empty() {
         let gaps = if gaps.is_empty() { String::new() } else { format!("; {}", gaps.join(", ")) };
         println!("result:   ok: {}{gaps}", proves.join(", "));
@@ -1096,14 +1246,15 @@ pub fn view(layout: &Layout, args: ViewArgs) -> Result<i32> {
         let dir = layout.view_dir(&s.id);
         prepare_dir(&dir, true)?;
         let items = load(&store, &s.id)?;
-        let (story, _) = agent_story(&store, &s, &items, &[], &[], args.prompts)?;
+        let (story, _) = agent_story(&store, &s, &items, &[], &[], true)?;
         let (files, _) = write_bundle(
             &store,
             &s,
-            &format!("agentrecorder-{}", s.id),
+            &dir.display().to_string(),
             &items,
             &Edits { patterns: &[], cut_report: &[], matches: 0 },
             story,
+            Some(session_diff(&s, &items, &[])),
         )?;
         write_dir(&dir, &files)?;
         dir.join("index.html")
@@ -1186,6 +1337,7 @@ mod tests {
             redact_secrets: true,
             cut: vec![],
             prompts: false,
+            diff: false,
             dry_run: true,
             json: false,
         };

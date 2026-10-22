@@ -230,7 +230,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
                     "total": u.total(),
                     "models": u.models,
                     "outside_session": u.outside_session,
-                    "interactions": interactions_json(&u.interactions, win_from, prompts),
+                    "interactions": interactions_json(&u.interactions, s.created_at_ns, prompts),
+                    "interrupts": u.interrupts.len(),
+                    "refusals": u.refusals.len(),
+                    "compactions": u.compactions.len(),
                 })),
                 "files_changed": files.as_ref().ok(),
                 "unavailable": unavailable,
@@ -403,7 +406,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     }
     match &tokens {
         Ok((source, _, u)) if !u.interactions.is_empty() => {
-            print_interactions(&u.interactions, win_from, prompts, source)
+            print_interactions(&u.interactions, s.created_at_ns, prompts, source)
         }
         Ok((source, _, _)) => println!("Interactions:    0 (no prompts in the {source} during the session)"),
         Err(_) => na_line("Interactions:", "no transcript"),
@@ -446,6 +449,8 @@ fn interactions_json(list: &[transcript::Interaction], from_ns: i64, prompts: bo
                 "cache_read": t.cache_read,
                 "cache_creation": t.cache_creation,
                 "total": t.total(),
+                "reply_chars": t.reply_chars,
+                "model": t.model,
             });
             if prompts {
                 v["text"] = json!(t.text);
@@ -566,6 +571,11 @@ mod tests {
                 .iter()
                 .map(|(s, p)| ChangedPath { status: s.to_string(), path: p.to_string() })
                 .collect(),
+            new_commits: None,
+            commits: Vec::new(),
+            diff_sha256: None,
+            diff_bytes: None,
+            root: None,
         }
     }
 

@@ -10,8 +10,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub use events::{
-    AgentHook, Body, ChangedPath, DetachReason, GIT_MAX_PATHS, GitPhase, HookUsage, Notice, NotificationSource,
-    SnapshotReason, TerminationReason, kind,
+    AgentHook, Body, ChangedPath, DetachReason, GIT_MAX_PATHS, GitCommit, GitPhase, HookUsage, Notice,
+    NotificationSource, SnapshotReason, TerminationReason, ToolSummary, kind,
 };
 pub use time::{format_rfc3339, now_unix_ns, parse_rfc3339};
 

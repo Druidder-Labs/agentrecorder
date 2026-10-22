@@ -26,7 +26,7 @@ pub enum Meta {
 }
 
 enum Msg {
-    Event(NewEvent),
+    Event(Box<NewEvent>),
     Meta(Meta),
     Flush(Sender<()>),
     Shutdown,
@@ -123,7 +123,7 @@ impl Recorder {
             return false;
         }
         queued.fetch_add(bytes as u64, Ordering::Relaxed);
-        if self.tx.try_send(Msg::Event(ev)).is_err() {
+        if self.tx.try_send(Msg::Event(Box::new(ev))).is_err() {
             queued.fetch_sub(bytes as u64, Ordering::Relaxed);
             self.count_drop(bytes);
             return false;
@@ -138,14 +138,14 @@ impl Recorder {
 
     pub fn event(&self, body: Body) {
         let ev = self.new_event(body, None);
-        if self.tx.try_send(Msg::Event(ev)).is_err() {
+        if self.tx.try_send(Msg::Event(Box::new(ev))).is_err() {
             self.count_drop(0);
         }
     }
 
     pub fn event_with_data(&self, body: Body, data: Vec<u8>) {
         let ev = self.new_event(body, Some(data));
-        if self.tx.try_send(Msg::Event(ev)).is_err() {
+        if self.tx.try_send(Msg::Event(Box::new(ev))).is_err() {
             self.count_drop(0);
         }
     }
@@ -208,7 +208,7 @@ impl Worker {
                             let len = ev.data.as_ref().map_or(0, Vec::len) as u64;
                             self.counters.queued_bytes.fetch_sub(len, Ordering::Relaxed);
                         }
-                        self.push(&mut batch, ev);
+                        self.push(&mut batch, *ev);
                     }
                     Msg::Meta(m) => {
                         self.flush(&mut batch);

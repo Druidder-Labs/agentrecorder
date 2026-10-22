@@ -97,7 +97,9 @@ enum Command {
     Anchor(commands::bundle::AnchorArgs),
     #[command(about = "Check a bundle's files and hash chain, and optionally the anchors received for it")]
     Verify(commands::bundle::VerifyArgs),
-    #[command(about = "Open the dashboard of a bundle or of a finished session in a browser")]
+    #[command(
+        about = "Open the dashboard of a bundle, or of a finished session with its prompt text and code changes included (written to the private views/ID folder)"
+    )]
     View(commands::bundle::ViewArgs),
     #[command(about = "Delete finished sessions and their recordings")]
     Rm {

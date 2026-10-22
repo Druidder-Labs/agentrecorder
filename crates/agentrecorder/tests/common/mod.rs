@@ -30,6 +30,7 @@ impl Env {
     pub fn command(&self, args: &[&str]) -> Command {
         let mut c = Command::new(BIN);
         c.args(args)
+            .current_dir(self.home.path())
             .env("AGENTRECORDER_HOME", self.home.path())
             .env("PS1", "$ ")
             .env("BASH_SILENCE_DEPRECATION_WARNING", "1")

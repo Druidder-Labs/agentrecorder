@@ -2,13 +2,15 @@ use std::io::Read;
 
 use std::path::Path;
 
-use agentrecorder_store::{AgentHook, HookUsage, Store, now_unix_ns};
+use agentrecorder_store::{AgentHook, HookUsage, Store, ToolSummary, now_unix_ns};
 use agentrecorder_supervisor::{Layout, client};
 use serde_json::Value;
 
 const MAX_INPUT: u64 = 1 << 20;
 const MAX_TEXT: usize = 1024;
 const MAX_PATH: usize = 4096;
+const MAX_COMMAND: usize = 500;
+const MAX_ERROR: usize = 300;
 
 #[derive(clap::Args)]
 pub struct HookArgs {
@@ -78,7 +80,55 @@ pub fn parse(agent: &str, input: &[u8]) -> anyhow::Result<AgentHook> {
         message: text("message", MAX_TEXT),
         tool_name: text("tool_name", 128),
         usage: None,
+        tool: tool_summary(&v),
     })
+}
+
+fn lines(v: Option<&Value>) -> Option<u64> {
+    v.and_then(Value::as_str).map(|t| if t.is_empty() { 0 } else { t.lines().count() as u64 })
+}
+
+fn tool_summary(v: &Value) -> Option<ToolSummary> {
+    let name = v.get("tool_name")?.as_str()?;
+    let input = v.get("tool_input").filter(|i| i.is_object());
+    let field = |k: &str| input.and_then(|i| i.get(k));
+    let text = |k: &str, max: usize| field(k).and_then(Value::as_str).map(|s| truncate(s, max));
+    let command = field("command").and_then(Value::as_str).map(|c| {
+        let mut lines = c.lines();
+        let first = truncate(lines.next().unwrap_or(""), MAX_COMMAND);
+        match lines.count() {
+            0 => first,
+            n => format!("{first} [+{n} more lines not recorded]"),
+        }
+    });
+    let mut t = ToolSummary {
+        command,
+        description: text("description", 200),
+        path: text("file_path", MAX_PATH)
+            .or_else(|| text("notebook_path", MAX_PATH))
+            .or_else(|| text("path", MAX_PATH)),
+        pattern: text("pattern", 200),
+        url: text("url", 300),
+        subagent: text("subagent_type", 64),
+        error: v.get("error").and_then(Value::as_str).map(|e| truncate(e, MAX_ERROR)),
+        interrupted: v["tool_response"]["interrupted"].as_bool().unwrap_or(false),
+        ..ToolSummary::default()
+    };
+    match name {
+        "Edit" => {
+            t.lines_removed = lines(field("old_string"));
+            t.lines_added = lines(field("new_string"));
+        }
+        "MultiEdit" => {
+            let edits = field("edits").and_then(Value::as_array).cloned().unwrap_or_default();
+            t.lines_removed = Some(edits.iter().filter_map(|e| lines(e.get("old_string"))).sum());
+            t.lines_added = Some(edits.iter().filter_map(|e| lines(e.get("new_string"))).sum());
+        }
+        "Write" => t.lines_added = lines(field("content")),
+        "NotebookEdit" => t.lines_added = lines(field("new_source")),
+        _ => {}
+    }
+    (t != ToolSummary::default()).then_some(t)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -106,6 +156,45 @@ mod tests {
         assert_eq!(e.permission_mode.as_deref(), Some("default"));
         let stored = serde_json::to_string(&e).unwrap();
         assert!(!stored.contains("secret"), "{stored}");
+    }
+
+    #[test]
+    fn summarizes_tool_input_without_file_contents() {
+        let edit = br#"{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"/w/a.py",
+            "old_string":"old-secret\nx","new_string":"new-secret\ny\nz"}}"#;
+        let e = parse("claude", edit).unwrap();
+        let t = e.tool.clone().unwrap();
+        assert_eq!((t.path.as_deref(), t.lines_removed, t.lines_added), (Some("/w/a.py"), Some(2), Some(3)));
+        let stored = serde_json::to_string(&e).unwrap();
+        assert!(!stored.contains("secret"), "{stored}");
+        let multi = br#"{"hook_event_name":"PostToolUse","tool_name":"MultiEdit","tool_input":{"file_path":"b.rs",
+            "edits":[{"old_string":"a","new_string":"b\nc"},{"old_string":"d\ne","new_string":""}]}}"#;
+        let t = parse("claude", multi).unwrap().tool.unwrap();
+        assert_eq!((t.lines_removed, t.lines_added), (Some(3), Some(2)));
+        let write = br#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"c.md","content":"s1\ns2"}}"#;
+        let e = parse("claude", write).unwrap();
+        assert_eq!(e.tool.as_ref().unwrap().lines_added, Some(2));
+        assert!(!serde_json::to_string(&e).unwrap().contains("s1"));
+        let heredoc = br#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat > f.py <<'EOF'\nbody-secret\nEOF"}}"#;
+        let e = parse("claude", heredoc).unwrap();
+        assert_eq!(
+            e.tool.as_ref().unwrap().command.as_deref(),
+            Some("cat > f.py <<'EOF' [+2 more lines not recorded]")
+        );
+        assert!(!serde_json::to_string(&e).unwrap().contains("body-secret"));
+        let bash = br#"{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","error":"exit 1",
+            "tool_input":{"command":"python3 -m unittest","description":"Run tests"}}"#;
+        let t = parse("claude", bash).unwrap().tool.unwrap();
+        assert_eq!(
+            (t.command.as_deref(), t.description.as_deref(), t.error.as_deref()),
+            (Some("python3 -m unittest"), Some("Run tests"), Some("exit 1"))
+        );
+        let task = br#"{"hook_event_name":"PostToolUse","tool_name":"Task","tool_input":{"subagent_type":"Explore","prompt":"p-secret"},
+            "tool_response":{"interrupted":true}}"#;
+        let e = parse("claude", task).unwrap();
+        assert_eq!(e.tool.as_ref().map(|t| (t.subagent.as_deref(), t.interrupted)), Some((Some("Explore"), true)));
+        assert!(!serde_json::to_string(&e).unwrap().contains("p-secret"));
+        assert!(parse("claude", br#"{"hook_event_name":"Stop"}"#).unwrap().tool.is_none());
     }
 
     #[test]

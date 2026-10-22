@@ -1,4 +1,5 @@
 pub mod client;
+pub mod git;
 pub mod layout;
 mod modes;
 mod peer;

@@ -552,7 +552,7 @@ fn notifications_idle_time_and_git_state_are_measured() {
             "--",
             "sh",
             "-c",
-            "printf '\\033]9;build done\\007'; printf '\\007'; sleep 2; touch new-file; echo two >> tracked.txt; rm gone.txt; sleep 1",
+            "printf '\\033]9;build done\\007'; printf '\\007'; sleep 2; touch new-file; echo two >> tracked.txt; rm gone.txt; git -c user.email=a@b -c user.name=t commit -q --allow-empty -m 'feat: made during the session'; sleep 1",
         ])
         .trim()
         .to_string();
@@ -581,6 +581,42 @@ fn notifications_idle_time_and_git_state_are_measured() {
     let want = [("D", "gone.txt"), ("?", "new-file"), ("?", "pre-dirty.txt"), ("M", "tracked.txt")];
     assert_eq!(changed, want.map(|(s, p)| (s.to_string(), p.to_string())));
     assert_eq!(exit["payload"]["changed_paths"], 4);
+    assert_eq!(exit["payload"]["new_commits"], 1);
+    assert_eq!(exit["payload"]["commits"][0]["subject"], "feat: made during the session");
+    assert_eq!(exit["payload"]["commits"][0]["hash"].as_str().unwrap().len(), 40);
+    assert!(start["payload"]["commits"].is_null() && start["payload"]["new_commits"].is_null());
+    assert_eq!(exit["payload"]["diff_sha256"].as_str().unwrap().len(), 64);
+    assert!(start["payload"]["diff_sha256"].is_null());
+
+    let with_diff = env.path().join("with-diff");
+    let out = env.ok(&["bundle", &id, "--diff", "-o", with_diff.to_str().unwrap()]);
+    assert!(out.contains("code changes: 4 files") && out.contains("matches the session end"), "{out}");
+    let patch = std::fs::read_to_string(with_diff.join("diff.patch")).unwrap();
+    assert!(patch.contains("+two") && patch.contains("deleted file mode") && patch.contains("b/new-file"), "{patch}");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(with_diff.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["diff"]["status"], "matches the session end");
+    assert_eq!(manifest["diff"]["files"], 4);
+    let checked = env.ok(&["verify", with_diff.to_str().unwrap()]);
+    assert!(checked.contains("but no anchor covers that record"), "{checked}");
+    assert!(checked.contains("diff matches the recorded hash, but the session end is not anchored"), "{checked}");
+    let anchors = env.path().join("anchors.jsonl");
+    std::fs::write(&anchors, env.ok(&["anchor", &id])).unwrap();
+    let checked = env.ok(&["verify", with_diff.to_str().unwrap(), "--anchors", anchors.to_str().unwrap()]);
+    assert!(checked.contains("diff:     matches the hash recorded when the session ended"), "{checked}");
+    assert!(checked.contains("anchored, diff matches the session end"), "{checked}");
+    std::fs::write(repo.join("tracked.txt"), "changed after the session\n").unwrap();
+    let later = env.path().join("later");
+    let out = env.ok(&["bundle", &id, "--diff", "-o", later.to_str().unwrap()]);
+    assert!(out.contains("differs from the session end"), "{out}");
+    let checked = env.ok(&["verify", later.to_str().unwrap()]);
+    assert!(checked.contains("diff differs from the session end"), "{checked}");
+    let mut patch = std::fs::read_to_string(with_diff.join("diff.patch")).unwrap();
+    patch.push_str("+edited\n");
+    std::fs::write(with_diff.join("diff.patch"), patch).unwrap();
+    let tampered = env.command(&["verify", with_diff.to_str().unwrap()]).output().unwrap();
+    assert!(!tampered.status.success());
+    assert!(String::from_utf8_lossy(&tampered.stdout).contains("diff.patch: sha256 differs from manifest.json"));
     let files = &info["files_changed"];
     assert_eq!((files["count"].as_u64(), files["already_dirty_at_start"].as_u64()), (Some(4), Some(1)), "{files}");
     assert_eq!(files["since_head"].as_str().unwrap().len(), 12);
@@ -1048,12 +1084,15 @@ with open(transcript, "w") as f:
     f.write(json.dumps({"type": "user", "timestamp": now, "origin": {"kind": "human"}, "message": {"content": "the-secret-prompt\n\x1b]52;c;evil\x07"}}) + "\n")
     f.write(json.dumps({"type": "user", "timestamp": now, "message": {"content": [{"type": "tool_result", "content": "ok"}]}}) + "\n")
     f.write(line(now, "req_2", 3, 10, 600, 0) + "\n")
+    f.write(json.dumps({"type": "assistant", "timestamp": now, "uuid": "a1", "message": {"content": [{"type": "text", "text": "twelve chars"}]}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": now, "message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": now, "isCompactSummary": True, "message": {"content": "summary"}}) + "\n")
 fire("SessionStart", source="startup", model="haiku")
 fire("UserPromptSubmit", prompt="the-secret-prompt", permission_mode="default")
 fire("Notification", notification_type="permission_prompt", message="Claude needs your permission")
 fire("PostToolUse", tool_name="Bash", tool_input={"command": "the-secret-command"})
-fire("PostToolUse", tool_name="Edit")
-fire("PostToolUseFailure", tool_name="Bash")
+fire("PostToolUse", tool_name="Edit", tool_input={"file_path": "src/a.py", "old_string": "the-secret-old", "new_string": "x\ny"})
+fire("PostToolUseFailure", tool_name="Bash", tool_input={"command": "python3 -m unittest"}, error="exit 1")
 fire("PostToolUse", tool_name="Bash")
 fire("Stop", last_assistant_message="the-secret-reply")
 "#;
@@ -1099,6 +1138,7 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     assert_eq!(hooks[2]["payload"]["message"], "Claude needs your permission");
     assert_eq!(hooks[3]["payload"]["tool_name"], "Bash");
     assert!(hooks[3]["payload"]["tool_input"].is_null());
+    assert!(hooks[0]["payload"]["tool"].is_null());
     assert!(hooks[3]["payload"]["usage"].is_null());
     let stop_usage = &hooks[7]["payload"]["usage"];
     assert_eq!(
@@ -1115,9 +1155,15 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     );
     assert_eq!(stop_usage["models"], serde_json::json!(["claude-test-1"]));
     let all = env.ok(&["export", &id, "--format", "jsonl"]);
-    for secret in ["the-secret-prompt", "the-secret-reply", "the-secret-command"] {
+    for secret in ["the-secret-prompt", "the-secret-reply", "the-secret-old"] {
         assert!(!all.contains(secret), "{secret}");
     }
+    assert_eq!(hooks[3]["payload"]["tool"]["command"], "the-secret-command");
+    assert_eq!(
+        hooks[4]["payload"]["tool"],
+        serde_json::json!({"path": "src/a.py", "lines_added": 2, "lines_removed": 1})
+    );
+    assert_eq!(hooks[5]["payload"]["tool"], serde_json::json!({"command": "python3 -m unittest", "error": "exit 1"}));
     let db = std::fs::read(env.db()).unwrap();
     assert!(!db.windows(17).any(|w| w == b"the-secret-prompt"));
 
@@ -1185,12 +1231,15 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
 
     let plain = env.path().join("plain");
     let out = env.ok(&["bundle", &id, "-o", plain.to_str().unwrap()]);
-    assert!(out.contains("prompts: 2 with times and tokens, text not included (--prompts adds it)"), "{out}");
+    assert!(out.contains("prompts: 1, with times and tokens; text not included (--prompts adds it)"), "{out}");
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(plain.join("manifest.json")).unwrap()).unwrap();
     let story = &manifest["prompts"];
     assert_eq!((story["available"].as_bool(), story["text"].as_bool()), (Some(true), Some(false)), "{story}");
     assert_eq!(story["source"], "claude transcript");
+    assert_eq!((story["interrupts"].as_array().unwrap().len(), story["compactions"].as_array().unwrap().len()), (1, 1));
+    assert_eq!(story["interactions"][1]["reply_chars"], 12);
+    assert_eq!(story["interactions"][1]["model"], "claude-test-1");
     let listed: Vec<(u64, String, u64, bool)> = story["interactions"]
         .as_array()
         .unwrap()
@@ -1208,7 +1257,7 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     for f in ["manifest.json", "index.html", "events.jsonl", "session.cast"] {
         assert!(!std::fs::read_to_string(plain.join(f)).unwrap().contains("the-secret-prompt"), "{f}");
     }
-    assert!(std::fs::read_to_string(plain.join("index.html")).unwrap().contains("Waited: from the previous answer"));
+    assert!(std::fs::read_to_string(plain.join("index.html")).unwrap().contains("Thinking: from the previous answer"));
 
     let with_text = env.path().join("with-text.zip");
     let out = env.ok(&[
@@ -1221,9 +1270,9 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
         "-o",
         with_text.to_str().unwrap(),
     ]);
-    assert!(out.contains("prompts: 2 with their text, after redaction; read them before sending"), "{out}");
+    assert!(out.contains("prompts: 1, with their text after redaction; read them before sending"), "{out}");
     let dry = env.ok(&["bundle", &id, "--prompts", "--redact-literal", "the-secret", "--dry-run"]);
-    assert!(dry.contains("1 redaction matches in prompt text: the-***"), "{dry}");
+    assert!(dry.contains("1 redaction matches in prompt text and the diff: the-***"), "{dry}");
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&with_text).unwrap()).unwrap();
     let mut text = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("with-text/manifest.json").unwrap(), &mut text).unwrap();
@@ -1231,6 +1280,12 @@ fn injected_claude_hooks_record_agent_events_without_prompt_text() {
     assert_eq!(manifest["prompts"]["text"], true);
     assert_eq!(manifest["prompts"]["interactions"][1]["text"], "**********-prompt\n\u{1b}]52;c;evil\u{7}");
     assert!(!text.contains("the-secret"), "{text}");
+
+    let quiet = env.ok(&["run", "-d", "--no-record", "--", &claude]).trim().to_string();
+    env.wait_status(&quiet, "exited");
+    let quiet_hooks: Vec<_> = env.events(&quiet).into_iter().filter(|e| e["event_type"] == "agent.hook").collect();
+    assert_eq!(quiet_hooks.len(), 8);
+    assert!(quiet_hooks.iter().all(|e| e["payload"]["tool"].is_null()), "{quiet_hooks:?}");
 
     std::fs::remove_file(tokens["transcript_path"].as_str().unwrap()).unwrap();
     let gone = env.inspect(&id);

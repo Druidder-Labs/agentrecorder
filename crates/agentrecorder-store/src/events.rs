@@ -81,6 +81,16 @@ pub enum Body {
         changed_paths: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         changed: Vec<ChangedPath>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_commits: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        commits: Vec<GitCommit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff_sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
     },
     #[serde(rename = "runtime.warning")]
     RuntimeWarning(Notice),
@@ -120,6 +130,32 @@ pub struct AgentHook {
     pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<HookUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_removed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +227,12 @@ pub const GIT_MAX_PATHS: usize = 500;
 pub struct ChangedPath {
     pub status: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    pub hash: String,
+    pub subject: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +343,11 @@ mod tests {
                 dirty: vec!["a.rs".into(), "b.rs".into()],
                 changed_paths: None,
                 changed: Vec::new(),
+                new_commits: None,
+                commits: Vec::new(),
+                diff_sha256: None,
+                diff_bytes: None,
+                root: Some("/w".into()),
             },
             Body::GitSnapshot {
                 phase: GitPhase::Exit,
@@ -312,6 +359,11 @@ mod tests {
                     ChangedPath { status: "M".into(), path: "a.rs".into() },
                     ChangedPath { status: "?".into(), path: "new.rs".into() },
                 ],
+                new_commits: Some(1),
+                commits: vec![GitCommit { hash: "def".into(), subject: "fix: a".into() }],
+                diff_sha256: Some("ab".repeat(32)),
+                diff_bytes: Some(120),
+                root: Some("/w".into()),
             },
             Body::RuntimeWarning(Notice::new("events_dropped", "x").with("dropped_events", 3)),
             Body::RuntimeError(Notice::new("spawn_failed", "y")),
@@ -321,6 +373,18 @@ mod tests {
                 session_id: Some("4b41da33-24de-41bb-92ef-77589bb77d13".into()),
                 notification_type: Some("permission_prompt".into()),
                 message: Some("Claude needs your permission".into()),
+                ..AgentHook::default()
+            })),
+            Body::AgentHook(Box::new(AgentHook {
+                agent: "claude".into(),
+                hook_event_name: "PostToolUse".into(),
+                tool_name: Some("Edit".into()),
+                tool: Some(ToolSummary {
+                    path: Some("src/a.rs".into()),
+                    lines_added: Some(3),
+                    lines_removed: Some(1),
+                    ..ToolSummary::default()
+                }),
                 ..AgentHook::default()
             })),
             Body::ShellCommandFinished { exit_code: Some(2) },

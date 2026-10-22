@@ -18,6 +18,9 @@ pub struct Usage {
     pub models: Vec<String>,
     pub outside_session: u64,
     pub interactions: Vec<Interaction>,
+    pub interrupts: Vec<i64>,
+    pub refusals: Vec<i64>,
+    pub compactions: Vec<i64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -34,6 +37,8 @@ pub struct Interaction {
     pub output: u64,
     pub cache_read: u64,
     pub cache_creation: u64,
+    pub reply_chars: u64,
+    pub model: Option<String>,
 }
 
 impl Interaction {
@@ -43,6 +48,31 @@ impl Interaction {
 }
 
 const NOT_TYPED: [&str; 3] = ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"];
+const INTERRUPTED: &str = "[Request interrupted by user";
+const REFUSED: &str = "[Request interrupted by user for tool use";
+
+fn user_text_starts(v: &Value, prefix: &str) -> bool {
+    match &v["message"]["content"] {
+        Value::String(s) => s.trim_start().starts_with(prefix),
+        Value::Array(blocks) => blocks
+            .iter()
+            .any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| t.trim_start().starts_with(prefix))),
+        _ => false,
+    }
+}
+
+fn reply_chars(v: &Value) -> u64 {
+    match &v["message"]["content"] {
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .map(|t| t.chars().count() as u64)
+            .sum(),
+        Value::String(s) => s.chars().count() as u64,
+        _ => 0,
+    }
+}
 
 fn tag_value<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
@@ -76,7 +106,7 @@ fn prompt(v: &Value) -> Option<(String, String, u64)> {
         _ => return None,
     }
     let trimmed = text.trim_start();
-    if NOT_TYPED.iter().any(|t| trimmed.starts_with(t)) {
+    if trimmed.starts_with(INTERRUPTED) || NOT_TYPED.iter().any(|t| trimmed.starts_with(t)) {
         return None;
     }
     let command = tag_value(trimmed, "command-name").map(|name| match tag_value(trimmed, "command-args") {
@@ -117,10 +147,39 @@ pub fn fold(lines: impl Iterator<Item = Vec<u8>>, from_ns: i64, to_ns: i64) -> R
     let mut usage = Usage::default();
     let mut seen = BTreeSet::new();
     let mut models = BTreeSet::new();
+    let mut seen_lines = BTreeSet::new();
     for line in lines {
         let Ok(v) = serde_json::from_slice::<Value>(&line) else { continue };
         let ts = v["timestamp"].as_str().and_then(parse_rfc3339);
         let outside = ts.is_some_and(|t| t < from_ns || t > to_ns);
+        if v["type"] == "user" && !outside {
+            if v["isCompactSummary"] == true {
+                usage.compactions.extend(ts);
+                continue;
+            }
+            if user_text_starts(&v, REFUSED) {
+                usage.refusals.extend(ts);
+                continue;
+            }
+            if user_text_starts(&v, INTERRUPTED) {
+                usage.interrupts.extend(ts);
+                continue;
+            }
+        }
+        if v["type"] == "assistant"
+            && !outside
+            && v["message"]["model"] != "<synthetic>"
+            && v["uuid"].as_str().is_none_or(|u| seen_lines.insert(u.to_string()))
+        {
+            if usage.interactions.is_empty() {
+                usage.interactions.push(Interaction { at_ns: ts, origin: "none".into(), ..Interaction::default() });
+            }
+            let turn = usage.interactions.last_mut().expect("pushed above");
+            turn.reply_chars += reply_chars(&v);
+            if let Some(m) = v["message"]["model"].as_str() {
+                turn.model = Some(m.to_string());
+            }
+        }
         if let Some((origin, text, images)) = prompt(&v) {
             if !outside {
                 usage.interactions.push(Interaction {
@@ -230,6 +289,7 @@ mod tests {
                         output: 100,
                         cache_read: 500,
                         cache_creation: 50,
+                        model: Some("claude-fable-5-1".into()),
                         ..Interaction::default()
                     },
                     Interaction {
@@ -241,9 +301,11 @@ mod tests {
                         input: 3,
                         output: 10,
                         cache_read: 600,
+                        model: Some("claude-fable-5-1".into()),
                         ..Interaction::default()
                     },
                 ],
+                ..Usage::default()
             }
         );
         assert_eq!(u.total(), 1265);
@@ -274,6 +336,11 @@ mod tests {
                 serde_json::json!({"message": {"content": "<local-command-stdout>Set model</local-command-stdout>"}}),
             ),
             user(t, serde_json::json!({"isCompactSummary": true, "message": {"content": "summary"}})),
+            user(t, serde_json::json!({"message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]}})),
+            user(t, serde_json::json!({"message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}})),
+            br#"{"type":"assistant","timestamp":"2026-10-21T10:00:00Z","uuid":"a1","message":{"content":[{"type":"text","text":"done, 12 chars"},{"type":"tool_use","name":"Bash"}]}}"#.to_vec(),
+            br#"{"type":"assistant","timestamp":"2026-10-21T10:00:00Z","uuid":"a1","message":{"content":[{"type":"text","text":"done, 12 chars"}]}}"#.to_vec(),
+            br#"{"type":"assistant","timestamp":"2026-10-21T10:00:00Z","uuid":"s1","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#.to_vec(),
             user(
                 t,
                 serde_json::json!({"origin": {"kind": "human"}, "message": {"content": [
@@ -306,6 +373,12 @@ mod tests {
                 ("task-notification", "<task-notification>done", 0, 0, 0),
             ]
         );
+        let t_ns = parse_rfc3339(t).unwrap();
+        assert_eq!(
+            (u.compactions.clone(), u.interrupts.clone(), u.refusals.clone()),
+            (vec![t_ns], vec![t_ns], vec![t_ns])
+        );
+        assert_eq!(u.interactions.iter().map(|i| i.reply_chars).collect::<Vec<_>>(), [0, 14, 0, 0]);
     }
 
     #[test]

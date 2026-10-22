@@ -31,7 +31,8 @@ agentrecorder sessions
 agentrecorder attach last
 agentrecorder inspect last
 agentrecorder replay last --speed 2
-agentrecorder bundle last --redact-secrets --zip && agentrecorder view last
+agentrecorder view last                  # the dashboard, on this machine only
+agentrecorder bundle last --prompts --diff --redact-secrets --zip   # one file to send; it prints how to open and check it
 ```
 
 | Command | What it does |
@@ -45,7 +46,7 @@ agentrecorder bundle last --redact-secrets --zip && agentrecorder view last
 | `replay ID` | Play back; `--speed`, `--from`, `--instant`, `--follow` |
 | `stop ID` | Stop every process, escalating to SIGKILL |
 | `export ID` | JSON Lines or asciicast v2/v3; `--follow` |
-| `bundle ID` | Shareable directory or `--zip` with the prompts in order; `--prompts`, `--redact-secrets`, `--redact`, `--cut`, `--dry-run` |
+| `bundle ID` | Shareable directory or `--zip` with an overview and evaluation guide for reviewers, the prompts in order and the code changes; `--prompts`, `--diff`, `--redact-secrets`, `--redact`, `--cut`, `--dry-run` |
 | `view DIR\|ID` | Open a dashboard in the browser |
 | `anchor ID`, `verify DIR` | Stream anchors during a session; check a bundle against them and `--token` |
 | `rm ID`, `prune` | Delete finished sessions |
