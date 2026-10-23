@@ -18,6 +18,10 @@ pub fn offset_ms(ms: i64) -> String {
     format!("{:02}:{:02}:{:02}.{t}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
+pub fn offset_ns(ns: i64) -> String {
+    offset_ms(ns / 1_000_000)
+}
+
 pub fn ago(ms: i64) -> String {
     let s = ms.max(0) / 1000;
     if s < 60 {
@@ -66,8 +70,8 @@ pub fn parse_offset(s: &str) -> Result<i64> {
         |x: &str| x.parse::<f64>().map_err(|_| anyhow::anyhow!("offset {s:?} must be seconds, MM:SS or HH:MM:SS"));
     let secs = match parts.as_slice() {
         [s] => num(s)?,
-        [m, s] => num(m)? * 60.0 + num(s)?,
-        [h, m, s] => num(h)? * 3600.0 + num(m)? * 60.0 + num(s)?,
+        [m, s] => f64::mul_add(num(m)?, 60.0, num(s)?),
+        [h, m, s] => f64::mul_add(num(m)?, 60.0, num(h)? * 3600.0) + num(s)?,
         _ => bail!("offset {s:?} must be seconds, MM:SS or HH:MM:SS"),
     };
     if !secs.is_finite() || secs < 0.0 {
@@ -108,6 +112,7 @@ mod tests {
     fn offsets_round_trip_through_parse_offset() {
         assert_eq!(offset_ms(312), "00:00:00.3");
         assert_eq!(offset_ms(3_723_950), "01:02:03.9");
+        assert_eq!(offset_ns(3_723_950_000_000), "01:02:03.9");
         assert_eq!(parse_offset(&offset_ms(3_723_950)).unwrap(), 3_723_900_000_000);
     }
 

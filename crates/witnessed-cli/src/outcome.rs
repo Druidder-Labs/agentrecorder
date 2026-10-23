@@ -48,7 +48,7 @@ fn unavailable(reason: impl Into<String>) -> Outcome {
 }
 
 fn blank(line: &[u8]) -> bool {
-    line.iter().all(|b| b.is_ascii_whitespace())
+    line.iter().all(u8::is_ascii_whitespace)
 }
 
 fn unquote(raw: &[u8]) -> Option<Vec<u8>> {
@@ -550,7 +550,7 @@ diff --git a/i.png b/i.png\nBinary files a/i.png and b/i.png differ\n";
         let s = store.session("s1").unwrap().unwrap();
         let o = for_session(&store, &s);
         assert!(!o.available && o.reason.as_deref().unwrap().starts_with("no diff stored"));
-        store.put_session_diff("s1", &r.base, &diff).unwrap();
+        store.put_session_diff("s1", &r.base, &diff, 1).unwrap();
         let o = for_session(&store, &s);
         assert!(o.available, "{o:?}");
         assert_eq!((o.added, o.in_head, o.in_worktree), (1, 0, 1));

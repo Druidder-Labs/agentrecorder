@@ -64,7 +64,7 @@ pub struct ModeTracker {
 
 impl Default for ModeTracker {
     fn default() -> Self {
-        ModeTracker { state: State::Ground, buf: Vec::new(), command_running: false, modes: Modes::default() }
+        Self { state: State::Ground, buf: Vec::new(), command_running: false, modes: Modes::default() }
     }
 }
 
@@ -202,7 +202,7 @@ impl ModeTracker {
         match num {
             "0" | "2" => self.modes.title = Some(clean(rest, MAX_TITLE)),
             "9" if !rest.starts_with("4;") => {
-                notes.push(Observed::Notification(NotificationSource::Osc9, clean(rest, MAX_NOTIFICATION)))
+                notes.push(Observed::Notification(NotificationSource::Osc9, clean(rest, MAX_NOTIFICATION)));
             }
             "777" => {
                 if let Some(body) = rest.strip_prefix("notify;") {

@@ -29,7 +29,7 @@ pub struct Sanitizer {
 
 impl Default for Sanitizer {
     fn default() -> Self {
-        Sanitizer {
+        Self {
             state: State::Ground,
             buf: Vec::new(),
             overflow: false,

@@ -1,6 +1,7 @@
 mod adapters;
 mod agent_state;
 mod attach;
+mod bundle;
 mod chain;
 mod commands;
 mod decisions;
@@ -43,76 +44,35 @@ enum Command {
     #[command(about = "Walk through the moments you approved, declined, stopped or corrected the agent")]
     Review(commands::review::ReviewArgs),
     #[command(about = "Open a session or a bundle in the browser")]
-    View(commands::bundle::ViewArgs),
+    View(commands::view::ViewArgs),
     #[command(about = "Package a finished session for a reviewer")]
     Bundle(commands::bundle::BundleArgs),
     #[command(about = "Check that a bundle was not edited")]
-    Verify(commands::bundle::VerifyArgs),
+    Verify(commands::verify::VerifyArgs),
     #[command(about = "List sessions", visible_alias = "ls")]
-    Sessions {
-        #[arg(long, help = "Print JSON instead of a table")]
-        json: bool,
-    },
+    Sessions(commands::sessions::SessionsArgs),
     #[command(about = "Reconnect this terminal to a running session")]
-    Attach {
-        #[arg(default_value = "last", help = crate::SESSION_HELP)]
-        session: String,
-        #[arg(
-            long,
-            env = "WITNESSED_DETACH_KEY",
-            default_value = DEFAULT_DETACH_KEY,
-            help = "Key that detaches: ctrl-<key> or none"
-        )]
-        detach_key: String,
-    },
+    Attach(commands::sessions::AttachArgs),
     #[command(about = "Disconnect whichever terminal is attached to a session")]
-    Detach {
-        #[arg(help = crate::SESSION_HELP)]
-        session: String,
-    },
+    Detach(commands::sessions::DetachArgs),
     #[command(about = "Play a session back in this terminal")]
     Replay(commands::replay::ReplayArgs),
     #[command(about = "Show what was measured in a session: processes, git, tool calls, tokens")]
-    Inspect {
-        #[arg(default_value = "last", help = crate::SESSION_HELP)]
-        session: String,
-        #[arg(long, help = "Print JSON instead of text")]
-        json: bool,
-        #[arg(long, help = "Show the text of each prompt read from the agent transcript (hidden by default)")]
-        prompts: bool,
-    },
+    Inspect(commands::inspect::InspectArgs),
     #[command(about = "Reattach, restart or resume a session whose terminal is gone")]
     Recover(commands::recover::RecoverArgs),
     #[command(about = "Mark a moment in a running session; replay --from-mark starts there")]
-    Mark {
-        #[arg(help = crate::SESSION_HELP)]
-        session: String,
-        #[arg(default_value = "", help = "Label shown by inspect, replay and asciicast export")]
-        label: String,
-    },
+    Mark(commands::sessions::MarkArgs),
     #[command(about = "Stop a running session")]
-    Stop {
-        #[arg(help = crate::SESSION_HELP)]
-        session: String,
-        #[arg(long, default_value = "HUP", help = "First signal: HUP, TERM, INT or KILL")]
-        signal: String,
-        #[arg(long, default_value_t = 5.0, help = "Seconds before escalating to SIGKILL")]
-        timeout: f64,
-    },
+    Stop(commands::sessions::StopArgs),
     #[command(about = "Export events as JSON Lines or an asciicast file")]
     Export(commands::export::ExportArgs),
     #[command(about = "Stream hash-chain anchors to a reviewer while a session runs")]
-    Anchor(commands::bundle::AnchorArgs),
+    Anchor(commands::anchor::AnchorArgs),
     #[command(about = "Delete finished sessions")]
-    Rm {
-        #[arg(required = true, help = "Session ids or unique prefixes")]
-        sessions: Vec<String>,
-    },
+    Rm(commands::sessions::RmArgs),
     #[command(about = "Delete finished sessions older than an age")]
-    Prune {
-        #[arg(long, default_value = "30d", help = "Age such as 12h, 7d or 90m")]
-        older_than: String,
-    },
+    Prune(commands::sessions::PruneArgs),
     #[command(about = "Print a shell completion script: bash, zsh, fish or elvish")]
     Completions {
         #[arg(value_enum)]
@@ -159,7 +119,7 @@ struct SuperviseArgs {
 
 fn main() -> ExitCode {
     let previous = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
-    let _ = USER_UMASK.set(previous.bits() as u32);
+    let _ = USER_UMASK.set(u32::from(previous.bits()));
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
@@ -173,7 +133,7 @@ fn main() -> ExitCode {
 fn dispatch(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         Command::Hook(args) => return Ok(commands::hook::hook(args)),
-        Command::Verify(args) => return commands::bundle::verify(args),
+        Command::Verify(args) => return commands::verify::verify(&args),
         Command::Completions { shell } => {
             use clap::CommandFactory;
             clap_complete::generate(shell, &mut Cli::command(), "witnessed", &mut std::io::stdout());
@@ -187,21 +147,21 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
     }
     match cli.command {
         Command::Run(args) => commands::run::run(&layout, args),
-        Command::Sessions { json } => commands::sessions::list(&layout, json),
-        Command::Attach { session, detach_key } => commands::sessions::attach(&layout, &session, &detach_key),
-        Command::Detach { session } => commands::sessions::detach(&layout, &session),
-        Command::Mark { session, label } => commands::sessions::mark(&layout, &session, &label),
-        Command::Inspect { session, json, prompts } => commands::inspect::inspect(&layout, &session, json, prompts),
+        Command::Sessions(args) => commands::sessions::list(&layout, &args),
+        Command::Attach(args) => commands::sessions::attach(&layout, &args),
+        Command::Detach(args) => commands::sessions::detach(&layout, &args),
+        Command::Mark(args) => commands::sessions::mark(&layout, &args),
+        Command::Inspect(args) => commands::inspect::inspect(&layout, &args),
         Command::Recover(args) => commands::recover::recover(&layout, args),
         Command::Replay(args) => commands::replay::replay(&layout, args),
-        Command::Stop { session, signal, timeout } => commands::sessions::stop(&layout, &session, &signal, timeout),
+        Command::Stop(args) => commands::sessions::stop(&layout, &args),
         Command::Review(args) => commands::review::review(&layout, args),
         Command::Export(args) => commands::export::export(&layout, args),
-        Command::Bundle(args) => commands::bundle::bundle(&layout, args),
-        Command::Anchor(args) => commands::bundle::anchor(&layout, args),
-        Command::View(args) => commands::bundle::view(&layout, args),
-        Command::Rm { sessions } => commands::sessions::remove(&layout, &sessions),
-        Command::Prune { older_than } => commands::sessions::prune(&layout, &older_than),
+        Command::Bundle(args) => commands::bundle::bundle(&layout, &args),
+        Command::Anchor(args) => commands::anchor::anchor(&layout, &args),
+        Command::View(args) => commands::view::view(&layout, &args),
+        Command::Rm(args) => commands::sessions::remove(&layout, &args),
+        Command::Prune(args) => commands::sessions::prune(&layout, &args),
         Command::Hook(_) | Command::Verify(_) | Command::Completions { .. } => {
             unreachable!("handled before the state directory is resolved")
         }

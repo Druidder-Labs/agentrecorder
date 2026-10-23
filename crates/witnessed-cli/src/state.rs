@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use witnessed_store::{LostReason, Session, Status, Store, now_unix_ns};
 use witnessed_supervisor::Layout;
@@ -18,34 +18,64 @@ pub enum State {
 }
 
 impl State {
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
-            State::Starting => "starting",
-            State::Running(s) if s.attached => "running",
-            State::Running(_) => "detached",
-            State::Exited => "exited",
-            State::Lost => "lost",
-            State::Unreachable(_) => "unreachable",
+            Self::Starting => "starting",
+            Self::Running(s) if s.attached => "running",
+            Self::Running(_) => "detached",
+            Self::Exited => "exited",
+            Self::Lost => "lost",
+            Self::Unreachable(_) => "unreachable",
         }
     }
 
-    pub fn live(&self) -> Option<&SessionStatus> {
+    pub const fn live(&self) -> Option<&SessionStatus> {
         match self {
-            State::Running(s) => Some(s),
+            Self::Running(s) => Some(s),
             _ => None,
         }
     }
 
-    pub fn is_finished(&self) -> bool {
-        matches!(self, State::Exited | State::Lost)
+    pub const fn is_finished(&self) -> bool {
+        matches!(self, Self::Exited | Self::Lost)
     }
 }
 
+/// What a command requires of the resolved session; `Finished` names the thing that needs it in the error.
+#[derive(Clone, Copy)]
+pub enum Need<'a> {
+    Any,
+    Finished(&'a str),
+    Live,
+}
+
 pub fn open_and_resolve(layout: &Layout, id: &str) -> Result<(Store, Session, State)> {
+    open_needing(layout, id, Need::Any)
+}
+
+pub fn open_needing(layout: &Layout, id: &str, need: Need<'_>) -> Result<(Store, Session, State)> {
     let store = crate::commands::open_store(layout)?;
     let mut s = store.resolve(id)?;
     let st = resolve(layout, &store, &mut s);
+    check(&s, &st, need)?;
     Ok((store, s, st))
+}
+
+pub fn check(s: &Session, st: &State, need: Need<'_>) -> Result<()> {
+    match need {
+        Need::Any => {}
+        Need::Finished(what) if !st.is_finished() => bail!(
+            "session {} is {}; {what} needs a finished session. Stop it with `witnessed stop {}`, or follow it \
+             live with `witnessed replay {} --follow`",
+            s.id,
+            st.label(),
+            s.id,
+            s.id
+        ),
+        Need::Live if st.live().is_none() => bail!("session {} is {}", s.id, st.label()),
+        Need::Finished(_) | Need::Live => {}
+    }
+    Ok(())
 }
 
 pub fn resolve(layout: &Layout, store: &Store, s: &mut Session) -> State {
@@ -67,17 +97,21 @@ pub fn resolve(layout: &Layout, store: &Store, s: &mut Session) -> State {
         return State::Starting;
     }
     let restarted = host_restarted(s);
-    if !restarted && supervisor_alive(s) {
+    if !restarted && supervisor_alive(s).is_some() {
         if let Some(st) = ask_supervisor_to_rebind(layout, s) {
             return State::Running(st);
         }
         return State::Unreachable("the socket is missing but the supervisor process still exists".into());
     }
     let reason = if restarted { LostReason::HostRestarted } else { LostReason::SupervisorTerminated };
-    if store.mark_lost(&s.id, reason).unwrap_or(false) {
-        s.status = Status::Lost;
-        s.lost_reason = Some(reason);
-        s.attached = false;
+    match store.mark_lost(&s.id, reason) {
+        Ok(true) => {
+            s.status = Status::Lost;
+            s.lost_reason = Some(reason);
+            s.attached = false;
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("witnessed: warning: could not mark session {} lost: {e:#}", s.id),
     }
     match store.session(&s.id) {
         Ok(Some(fresh)) => {
@@ -88,7 +122,7 @@ pub fn resolve(layout: &Layout, store: &Store, s: &mut Session) -> State {
     }
 }
 
-fn finished_state(s: &Session) -> Option<State> {
+const fn finished_state(s: &Session) -> Option<State> {
     match s.status {
         Status::Exited => Some(State::Exited),
         Status::Lost => Some(State::Lost),
@@ -109,19 +143,19 @@ fn ask_supervisor_to_rebind(layout: &Layout, s: &Session) -> Option<SessionStatu
     None
 }
 
-pub fn supervisor_alive(s: &Session) -> bool {
-    let Some(pid) = s.supervisor_pid else { return false };
-    let pid = Pid::from_u32(pid as u32);
+/// The supervisor's pid when a `__supervise --id <session>` process with it still exists.
+pub fn supervisor_alive(s: &Session) -> Option<u32> {
+    let pid = u32::try_from(s.supervisor_pid?).ok()?;
+    let sys_pid = Pid::from_u32(pid);
     let mut sys = System::new();
     sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
+        ProcessesToUpdate::Some(&[sys_pid]),
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
-    sys.process(pid).is_some_and(|p| {
-        let cmd: Vec<&str> = p.cmd().iter().filter_map(|a| a.to_str()).collect();
-        cmd.contains(&"__supervise") && cmd.windows(2).any(|w| w[0] == "--id" && w[1] == s.id)
-    })
+    let p = sys.process(sys_pid)?;
+    let cmd: Vec<&str> = p.cmd().iter().filter_map(|a| a.to_str()).collect();
+    (cmd.contains(&"__supervise") && cmd.windows(2).any(|w| w[0] == "--id" && w[1] == s.id)).then_some(pid)
 }
 
 pub fn host_restarted(s: &Session) -> bool {
@@ -143,7 +177,6 @@ pub fn program(s: &Session) -> String {
     let p = crate::adapters::agent_index(&s.command)
         .and_then(|i| s.command.get(i))
         .or(s.command.first())
-        .map(String::as_str)
-        .unwrap_or("?");
-    std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string())
+        .map_or("?", String::as_str);
+    std::path::Path::new(p).file_name().map_or_else(|| p.to_string(), |f| f.to_string_lossy().into_owned())
 }

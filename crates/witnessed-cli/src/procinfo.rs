@@ -10,7 +10,7 @@ pub struct ProcNode {
     pub name: String,
     pub cpu_percent: f32,
     pub rss_bytes: u64,
-    pub children: Vec<ProcNode>,
+    pub children: Vec<Self>,
 }
 
 impl ProcNode {
@@ -19,11 +19,11 @@ impl ProcNode {
     }
 
     pub fn total_cpu(&self) -> f32 {
-        self.cpu_percent + self.children.iter().map(ProcNode::total_cpu).sum::<f32>()
+        self.cpu_percent + self.children.iter().map(Self::total_cpu).sum::<f32>()
     }
 
     pub fn total_rss(&self) -> u64 {
-        self.rss_bytes + self.children.iter().map(ProcNode::total_rss).sum::<u64>()
+        self.rss_bytes + self.children.iter().map(Self::total_rss).sum::<u64>()
     }
 }
 

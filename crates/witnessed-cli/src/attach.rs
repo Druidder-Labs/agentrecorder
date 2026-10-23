@@ -27,7 +27,7 @@ pub struct DetachKey {
 impl DetachKey {
     pub fn parse(s: &str) -> Result<Self> {
         if s.eq_ignore_ascii_case("none") {
-            return Ok(DetachKey { byte: None, sequences: Vec::new(), label: "none".into() });
+            return Ok(Self { byte: None, sequences: Vec::new(), label: "none".into() });
         }
         let lower = s.to_ascii_lowercase();
         let Some(key) = lower.strip_prefix("ctrl-").or_else(|| lower.strip_prefix("^")) else {
@@ -43,7 +43,7 @@ impl DetachKey {
         let byte = (c.to_ascii_uppercase() as u8) & 0x1f;
         let code = c as u32;
         let sequences = vec![format!("\x1b[{code};5u").into_bytes(), format!("\x1b[27;5;{code}~").into_bytes()];
-        Ok(DetachKey { byte: Some(byte), sequences, label: format!("Ctrl-{c}") })
+        Ok(Self { byte: Some(byte), sequences, label: format!("Ctrl-{c}") })
     }
 
     fn partial_suffix(&self, buf: &[u8]) -> usize {
@@ -95,10 +95,10 @@ impl RawMode {
         let saved = termios::tcgetattr(stdin.as_fd())?;
         let mut raw = saved.clone();
         termios::cfmakeraw(&mut raw);
-        *SAVED_TERMIOS.lock().unwrap_or_else(|p| p.into_inner()) = Some(saved);
+        *SAVED_TERMIOS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(saved);
         restore_on_signals()?;
         termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &raw)?;
-        Ok(Some(RawMode))
+        Ok(Some(Self))
     }
 }
 
@@ -164,7 +164,7 @@ static SAVED_TERMIOS: Mutex<Option<Termios>> = Mutex::new(None);
 static ALT_SCREEN: AtomicBool = AtomicBool::new(false);
 
 fn restore_terminal() {
-    if let Some(saved) = SAVED_TERMIOS.lock().unwrap_or_else(|p| p.into_inner()).take() {
+    if let Some(saved) = SAVED_TERMIOS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
         let _ = termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSANOW, &saved);
         let stdout = io::stdout();
         if ALT_SCREEN.load(Ordering::SeqCst) {
@@ -234,7 +234,7 @@ pub fn attach(layout: &Layout, id: &str, key: &DetachKey) -> Result<Outcome> {
             Ok(AttachEvent::Output(data)) => {
                 alt.observe(&data);
                 ALT_SCREEN.store(alt.active, Ordering::SeqCst);
-                if stdout.write_all(&data).and_then(|_| stdout.flush()).is_err() {
+                if stdout.write_all(&data).and_then(|()| stdout.flush()).is_err() {
                     break Outcome::Disconnected;
                 }
             }

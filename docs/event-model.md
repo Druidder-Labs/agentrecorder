@@ -48,7 +48,7 @@ A session without `session.terminated` was lost; `sessions` shows `lost` and `in
 
 ## Storage
 
-`state.db`, table `events` keyed by `(session_id, seq)`; `payload` as JSON text, `data` as a BLOB with `data_len` beside it. `PRAGMA user_version` is 6 (2: `data_len`; 3: kind index; 4: `agent_session_id`; 5: `anchor_token_digest`; 6: tables `annotations`, the verdicts from `review --mark`, and `session_diffs`, the diff at session end). Neither table is part of the hash chain. Older stores migrate in place on first open. There is no downgrade: an older binary refuses a newer store, naming both versions and the update command, and leaves the file as it was. The payload shapes are the `Body` enum in `events.rs`; a unit test round-trips every variant.
+`state.db`, table `events` keyed by `(session_id, seq)`; `payload` as JSON text, `data` as a BLOB with `data_len` beside it. `PRAGMA user_version` is 6 (2: `data_len`; 3: kind index; 4: `agent_session_id`; 5: `anchor_token_digest`; 6: tables `annotations`, the verdicts from `review --mark`, and `session_diffs`, the diff at session end). Neither table is part of the hash chain. Older stores migrate in place on first open. There is no downgrade: an older binary refuses a newer store, naming both versions and the update command, and leaves the file as it was. The payload shapes are the `Body` enum in `events.rs`; a unit test round-trips every variant, and the reason enums (`DetachReason`, `SnapshotReason`, `TerminationReason`, `NotificationSource`) decode a value this binary does not know as `unknown`, so events from a newer writer still decode. `docs/performance.md` has the measurement behind the table layout.
 
 ## Other formats
 

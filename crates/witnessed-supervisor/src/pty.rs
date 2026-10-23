@@ -52,8 +52,8 @@ fn reset_child_process_state(inheritable: &[libc::c_int]) {
             libc::signal(sig, libc::SIG_DFL);
         }
         let mut empty: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut empty);
-        libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+        libc::sigemptyset(&raw mut empty);
+        libc::sigprocmask(libc::SIG_SETMASK, &raw const empty, std::ptr::null_mut());
         for &fd in inheritable {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             if flags >= 0 {
@@ -98,7 +98,7 @@ pub fn spawn(
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+            if libc::ioctl(0, libc::TIOCSCTTY.into(), 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
@@ -163,5 +163,5 @@ pub fn session_members(sid: i32) -> Vec<i32> {
 }
 
 pub fn foreground_pgrp(master: &File) -> Option<i32> {
-    nix::unistd::tcgetpgrp(master).ok().map(|p| p.as_raw()).filter(|p| *p > 0)
+    nix::unistd::tcgetpgrp(master).ok().map(nix::unistd::Pid::as_raw).filter(|p| *p > 0)
 }

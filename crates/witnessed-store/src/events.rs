@@ -35,11 +35,11 @@ pub enum Body {
         record_input: bool,
         supervisor_pid: u32,
         restarted_from: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         max_record_bytes: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         term: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         agent_session_id: Option<String>,
     },
     #[serde(rename = "process.started")]
@@ -77,19 +77,19 @@ pub enum Body {
         dirty_paths: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dirty: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         changed_paths: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         changed: Vec<ChangedPath>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         new_commits: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         commits: Vec<GitCommit>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         diff_sha256: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         diff_bytes: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         root: Option<String>,
     },
     #[serde(rename = "runtime.warning")]
@@ -108,51 +108,51 @@ pub enum Body {
 pub struct AgentHook {
     pub agent: String,
     pub hook_event_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notification_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<HookUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolSummary>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSummary {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lines_added: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lines_removed: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
@@ -181,9 +181,12 @@ pub enum DetachReason {
     ProcessExited,
     PtyWriteFailed,
     ProtocolError,
+    #[serde(other)]
+    Unknown,
 }
 
 impl DetachReason {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             DetachReason::ClientRequest => "client_request",
@@ -194,6 +197,7 @@ impl DetachReason {
             DetachReason::ProcessExited => "process_exited",
             DetachReason::PtyWriteFailed => "pty_write_failed",
             DetachReason::ProtocolError => "protocol_error",
+            DetachReason::Unknown => "unknown",
         }
     }
 }
@@ -203,6 +207,8 @@ impl DetachReason {
 pub enum SnapshotReason {
     Interval,
     AfterDrop,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +218,8 @@ pub enum NotificationSource {
     Osc777,
     Osc99,
     Bell,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +249,8 @@ pub enum TerminationReason {
     ProcessExited,
     Stopped,
     SpawnFailed,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,10 +262,12 @@ pub struct Notice {
 }
 
 impl Notice {
+    #[must_use]
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         Notice { code: code.to_string(), message: message.into(), details: Map::new() }
     }
 
+    #[must_use]
     pub fn with(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.details.insert(key.to_string(), value.into());
         self
@@ -263,6 +275,7 @@ impl Notice {
 }
 
 impl Body {
+    #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
             Body::SessionCreated { .. } => kind::SESSION_CREATED,
@@ -287,6 +300,9 @@ impl Body {
     }
 
     pub(crate) fn payload(&self) -> Option<String> {
+        if matches!(self, Body::TerminalOutput | Body::TerminalInput) {
+            return None;
+        }
         let v = serde_json::to_value(self).expect("event bodies serialize");
         v.get("payload").filter(|p| !p.is_null()).map(Value::to_string)
     }
@@ -396,7 +412,7 @@ mod tests {
     #[test]
     fn every_body_round_trips_through_kind_and_payload() {
         for body in all() {
-            let payload = body.payload().map(|p| serde_json::from_str(&p).unwrap()).unwrap_or(Value::Null);
+            let payload = body.payload().map_or(Value::Null, |p| serde_json::from_str(&p).unwrap());
             assert_eq!(Body::decode(body.kind(), &payload).as_ref(), Some(&body), "{}", body.kind());
             let tagged = serde_json::to_value(&body).unwrap();
             assert_eq!(tagged["event_type"], body.kind());
@@ -409,6 +425,19 @@ mod tests {
         let p: Value = serde_json::from_str(&body.payload().unwrap()).unwrap();
         assert_eq!(p["dropped_bytes"], 7);
         assert_eq!(p["code"], "events_dropped");
+    }
+
+    #[test]
+    fn unknown_enum_values_and_fields_from_a_newer_writer_still_decode() {
+        let payload = serde_json::json!({"client": 1, "reason": "teleported", "extra": true});
+        let body = Body::decode("session.detached", &payload).expect("decodes");
+        assert_eq!(body, Body::SessionDetached { client: 1, reason: DetachReason::Unknown });
+        let payload = serde_json::json!({"reason": "evicted", "exit_code": null, "signal": null});
+        assert!(matches!(
+            Body::decode("session.terminated", &payload),
+            Some(Body::SessionTerminated { reason: TerminationReason::Unknown, .. })
+        ));
+        assert!(std::mem::size_of::<Body>() <= 256);
     }
 
     #[test]

@@ -1,3 +1,5 @@
+pub(crate) mod snapshot;
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,6 +58,7 @@ fn git(cwd: &Path, args: &[&str], run: &Run) -> Option<Vec<u8>> {
 }
 
 /// Runs git in `cwd` and returns stdout, or None when git fails or the deadline passes; git is killed then.
+#[must_use]
 pub fn output(cwd: &Path, args: &[&str], deadline: Instant) -> Option<Vec<u8>> {
     git(cwd, args, &Run { index: None, input: None, deadline, cap: 64 << 20 })
 }
@@ -216,7 +219,7 @@ mod tests {
         std::fs::remove_file(repo.join("huge.bin")).unwrap();
         let leftovers = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 e.file_name().to_string_lossy().starts_with(&format!("witnessed-index-{}-", std::process::id()))
             })

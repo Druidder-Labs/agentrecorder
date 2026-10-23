@@ -14,31 +14,31 @@ pub struct Layout {
 impl Layout {
     pub fn from_env() -> Result<Self> {
         if let Some(home) = std::env::var_os("WITNESSED_HOME").filter(|v| !v.is_empty()) {
-            return Ok(Layout { root: PathBuf::from(home) });
+            return Ok(Self { root: PathBuf::from(home) });
         }
         if let Some(home) = std::env::var_os("AGENTRECORDER_HOME").filter(|v| !v.is_empty()) {
-            return Ok(Layout { root: PathBuf::from(home) });
+            return Ok(Self { root: PathBuf::from(home) });
         }
-        let base = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
-            Some(state) => PathBuf::from(state),
-            None => {
-                let home = std::env::var_os("HOME").context("HOME is not set; set WITNESSED_HOME")?;
-                PathBuf::from(home).join(".local/state")
-            }
+        let base = if let Some(state) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+            PathBuf::from(state)
+        } else {
+            let home = std::env::var_os("HOME").context("HOME is not set; set WITNESSED_HOME")?;
+            PathBuf::from(home).join(".local/state")
         };
         let root = base.join("witnessed");
         let old = base.join("agentrecorder");
         // Recordings made under the previous name stay where they are until the new directory exists.
         if !root.exists() && old.is_dir() {
-            return Ok(Layout { root: old });
+            return Ok(Self { root: old });
         }
-        Ok(Layout { root })
+        Ok(Self { root })
     }
 
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Layout { root: root.into() }
+        Self { root: root.into() }
     }
 
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -50,14 +50,17 @@ impl Layout {
         Ok(())
     }
 
+    #[must_use]
     pub fn db_path(&self) -> PathBuf {
         self.root.join("state.db")
     }
 
+    #[must_use]
     pub fn run_dir(&self) -> PathBuf {
         self.root.join("run")
     }
 
+    #[must_use]
     pub fn log_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
@@ -73,10 +76,12 @@ impl Layout {
         Ok(p)
     }
 
+    #[must_use]
     pub fn view_dir(&self, id: &str) -> PathBuf {
         self.root.join("views").join(id)
     }
 
+    #[must_use]
     pub fn log_path(&self, id: &str) -> PathBuf {
         self.log_dir().join(format!("{id}.log"))
     }

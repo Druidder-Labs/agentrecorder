@@ -12,11 +12,9 @@ fn nonzero(v: u16) -> NonZeroU16 {
 }
 
 impl ScreenModel {
+    #[must_use]
     pub fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
-        ScreenModel {
-            parser: vt100::Parser::new(nonzero(rows), nonzero(cols), scrollback),
-            modes: ModeTracker::default(),
-        }
+        Self { parser: vt100::Parser::new(nonzero(rows), nonzero(cols), scrollback), modes: ModeTracker::default() }
     }
 
     pub fn process(&mut self, data: &[u8]) -> Vec<Observed> {
@@ -26,11 +24,13 @@ impl ScreenModel {
         notes
     }
 
+    #[must_use]
     pub fn size(&self) -> (u16, u16) {
         let (rows, cols) = self.parser.screen().size();
         (rows.get(), cols.get())
     }
 
+    #[must_use]
     pub fn title(&self) -> Option<&str> {
         self.modes.modes.title.as_deref()
     }
@@ -39,10 +39,12 @@ impl ScreenModel {
         self.parser.screen_mut().set_size(nonzero(rows), nonzero(cols));
     }
 
+    #[must_use]
     pub fn alternate_screen(&self) -> bool {
         self.parser.screen().alternate_screen()
     }
 
+    #[must_use]
     pub fn state(&self) -> String {
         let mut out = String::new();
         if self.alternate_screen() {

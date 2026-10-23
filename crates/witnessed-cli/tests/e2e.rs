@@ -116,9 +116,9 @@ fn interactive_input_and_resize_reach_the_process() {
     wait_for("resize event", || env.events(&id).iter().any(|e| e["event_type"] == "terminal.resized"));
     c.send(b"stty size\r");
     c.expect("50 132");
-    c.send(b"read -r v; echo got-$v\r");
+    c.send(b"echo ready; read -r v; echo got-$v\r");
     c.expect("echo got-$v");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    c.expect("ready");
     c.send(b"typed\r");
     c.expect("got-typed");
     c.send(b"exit 3\r");
@@ -478,7 +478,11 @@ fn a_stalled_pipe_client_does_not_freeze_the_session_or_block_stop() {
     let mut pipeline = bash_with_env(&env, &format!("{BIN} attach {id} </dev/null | sleep 60")).spawn().unwrap();
     wait_for("pipe client to attach", || env.status(&id) == "running");
     let bytes = |env: &Env| env.inspect(&id)["supervisor"]["output_bytes"].as_u64().unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    wait_for("the stalled pipe client to stop the output", || {
+        let before = bytes(&env);
+        std::thread::sleep(Duration::from_millis(100));
+        bytes(&env) == before
+    });
     env.ok(&["detach", &id]);
     let before = bytes(&env);
     wait_for("output to flow again after detach", || bytes(&env) > before + 100_000);

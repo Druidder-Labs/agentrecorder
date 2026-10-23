@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
-use witnessed_store::parse_rfc3339;
+use witnessed_store::{AgentHook, Body, Store, kind, parse_rfc3339};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct Usage {
@@ -42,9 +42,102 @@ pub struct Interaction {
 }
 
 impl Interaction {
-    pub fn total(&self) -> u64 {
+    pub const fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_creation
     }
+}
+
+/// One interaction as `inspect --json` and the bundle manifest print it; the callers add their own time fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InteractionJson {
+    pub index: usize,
+    pub origin: String,
+    pub chars: u64,
+    pub images: u64,
+    pub api_calls: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub total: u64,
+    pub reply_chars: u64,
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl InteractionJson {
+    pub fn new(index: usize, t: &Interaction, with_text: bool) -> Self {
+        Self {
+            index,
+            origin: t.origin.clone(),
+            chars: t.chars,
+            images: t.images,
+            api_calls: t.api_calls,
+            input: t.input,
+            output: t.output,
+            cache_read: t.cache_read,
+            cache_creation: t.cache_creation,
+            total: t.total(),
+            reply_chars: t.reply_chars,
+            model: t.model.clone(),
+            text: with_text.then(|| t.text.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub agent: String,
+    pub path: String,
+}
+
+#[derive(Debug)]
+pub enum Unavailable {
+    NotAgent,
+    NoTranscriptPath,
+    Unreadable { path: String, cause: String },
+}
+
+impl Unavailable {
+    pub fn reason(&self) -> String {
+        match self {
+            Self::NotAgent => crate::adapters::NOT_AGENT.into(),
+            Self::NoTranscriptPath => crate::adapters::NO_TRANSCRIPT_PATH.into(),
+            Self::Unreadable { path, cause } => crate::adapters::transcript_unreadable(path, cause),
+        }
+    }
+}
+
+impl Located {
+    pub fn usage(&self, from_ns: i64, to_ns: i64) -> std::result::Result<Usage, Unavailable> {
+        usage(Path::new(&self.path), from_ns, to_ns)
+            .map_err(|e| Unavailable::Unreadable { path: self.path.clone(), cause: e.root_cause().to_string() })
+    }
+}
+
+/// The transcript the agent reported last; `NotAgent` when the session recorded no hooks at all.
+pub fn locate_in<'a>(hooks: impl IntoIterator<Item = &'a AgentHook>) -> std::result::Result<Located, Unavailable> {
+    let mut any = false;
+    let mut found = None;
+    for h in hooks {
+        any = true;
+        if let Some(path) = &h.transcript_path {
+            found = Some(Located { agent: h.agent.clone(), path: path.clone() });
+        }
+    }
+    found.ok_or(if any { Unavailable::NoTranscriptPath } else { Unavailable::NotAgent })
+}
+
+pub fn locate(store: &Store, session_id: &str) -> Result<std::result::Result<Located, Unavailable>> {
+    let mut hooks = Vec::new();
+    store.for_each_event(session_id, Some(&[kind::AGENT_HOOK]), |e| {
+        if let Some(Body::AgentHook(h)) = e.body() {
+            hooks.push(*h);
+        }
+        Ok(())
+    })?;
+    Ok(locate_in(&hooks))
 }
 
 const NOT_TYPED: [&str; 3] = ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"];
@@ -123,8 +216,16 @@ fn prompt(v: &Value) -> Option<(String, String, u64)> {
 }
 
 impl Usage {
-    pub fn total(&self) -> u64 {
+    pub const fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_creation
+    }
+
+    fn current_turn(&mut self, at_ns: Option<i64>) -> &mut Interaction {
+        if self.interactions.is_empty() {
+            self.interactions.push(Interaction { at_ns, origin: "none".into(), ..Interaction::default() });
+        }
+        let last = self.interactions.len() - 1;
+        &mut self.interactions[last]
     }
 }
 
@@ -140,7 +241,7 @@ pub fn one_line(text: &str, max: usize) -> String {
 
 pub fn usage(path: &Path, from_ns: i64, to_ns: i64) -> Result<Usage> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    fold(BufReader::new(file).split(b'\n').map_while(|l| l.ok()), from_ns, to_ns)
+    fold(BufReader::new(file).split(b'\n').map_while(std::result::Result::ok), from_ns, to_ns)
 }
 
 pub fn fold(lines: impl Iterator<Item = Vec<u8>>, from_ns: i64, to_ns: i64) -> Result<Usage> {
@@ -171,10 +272,7 @@ pub fn fold(lines: impl Iterator<Item = Vec<u8>>, from_ns: i64, to_ns: i64) -> R
             && v["message"]["model"] != "<synthetic>"
             && v["uuid"].as_str().is_none_or(|u| seen_lines.insert(u.to_string()))
         {
-            if usage.interactions.is_empty() {
-                usage.interactions.push(Interaction { at_ns: ts, origin: "none".into(), ..Interaction::default() });
-            }
-            let turn = usage.interactions.last_mut().expect("pushed above");
+            let turn = usage.current_turn(ts);
             turn.reply_chars += reply_chars(&v);
             if let Some(m) = v["message"]["model"].as_str() {
                 turn.model = Some(m.to_string());
@@ -217,10 +315,7 @@ pub fn fold(lines: impl Iterator<Item = Vec<u8>>, from_ns: i64, to_ns: i64) -> R
         usage.output += n("output_tokens");
         usage.cache_read += n("cache_read_input_tokens");
         usage.cache_creation += n("cache_creation_input_tokens");
-        if usage.interactions.is_empty() {
-            usage.interactions.push(Interaction { at_ns: ts, origin: "none".into(), ..Interaction::default() });
-        }
-        let turn = usage.interactions.last_mut().expect("pushed above");
+        let turn = usage.current_turn(ts);
         turn.api_calls += 1;
         turn.input += n("input_tokens");
         turn.output += n("output_tokens");
@@ -396,6 +491,23 @@ mod tests {
         let u = fold(vec![a.clone(), a, b.clone(), b].into_iter(), 0, i64::MAX).unwrap();
         assert_eq!((u.api_calls, u.input, u.output), (2, 2, 2));
         assert!(u.models.is_empty());
+    }
+
+    #[test]
+    fn locates_the_last_reported_transcript_or_says_why_not() {
+        assert!(matches!(locate_in([]), Err(Unavailable::NotAgent)));
+        let h = |path: Option<&str>| AgentHook {
+            agent: "claude".into(),
+            hook_event_name: "Stop".into(),
+            transcript_path: path.map(str::to_string),
+            ..AgentHook::default()
+        };
+        assert!(matches!(locate_in(&[h(None)]), Err(Unavailable::NoTranscriptPath)));
+        let found = locate_in(&[h(Some("/a")), h(Some("/b")), h(None)]).unwrap();
+        assert_eq!(found, Located { agent: "claude".into(), path: "/b".into() });
+        let err = found.usage(0, i64::MAX).unwrap_err();
+        assert!(matches!(&err, Unavailable::Unreadable { path, .. } if path == "/b"));
+        assert!(err.reason().starts_with("the agent transcript cannot be read: /b ("), "{}", err.reason());
     }
 
     #[test]

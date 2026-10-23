@@ -144,11 +144,11 @@ fn a_detached_session_records_everything_and_a_late_pipe_client_gets_the_rest() 
     std::fs::write(&flag, b"").unwrap();
     let out = client.wait_with_output().unwrap();
     assert!(out.status.success(), "{out:?}");
-    let mut want = pre.clone();
+    let mut want = pre;
     want.extend_from_slice(&post);
     assert_recorded_completely(&env, &id, &want);
     let delivered = without_eof_echo(without_cr(&out.stdout));
-    let first = &post[..post.iter().position(|b| *b == b'\n').unwrap() + 1];
+    let first = &post[..=post.iter().position(|b| *b == b'\n').unwrap()];
     let start = delivered.windows(first.len()).position(|w| w == first).expect("first line after attach delivered");
     assert_same(&delivered[start..], &post, "output after the attach");
 }

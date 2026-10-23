@@ -199,8 +199,8 @@ struct Clock {
 }
 
 impl Clock {
-    fn new(speed: f64, max_idle_ns: Option<i64>) -> Self {
-        Clock { speed, max_idle_ns, wall_start: None, prev_mono: 0, virtual_ns: 0.0 }
+    const fn new(speed: f64, max_idle_ns: Option<i64>) -> Self {
+        Self { speed, max_idle_ns, wall_start: None, prev_mono: 0, virtual_ns: 0.0 }
     }
 
     fn start_at(&mut self, mono_ns: i64) {
@@ -211,15 +211,17 @@ impl Clock {
 
     fn deadline(&mut self, mono_ns: i64) -> Instant {
         if self.wall_start.is_none() {
-            self.start_at(mono_ns);
+            self.prev_mono = mono_ns;
+            self.virtual_ns = 0.0;
         }
+        let start = *self.wall_start.get_or_insert_with(Instant::now);
         let mut gap = (mono_ns - self.prev_mono).max(0);
         if let Some(cap) = self.max_idle_ns {
             gap = gap.min(cap);
         }
         self.prev_mono = self.prev_mono.max(mono_ns);
         self.virtual_ns += gap as f64 / self.speed;
-        self.wall_start.expect("started") + Duration::from_nanos(self.virtual_ns as u64)
+        start + Duration::from_nanos(self.virtual_ns as u64)
     }
 }
 

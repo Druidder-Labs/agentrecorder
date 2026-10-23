@@ -211,7 +211,7 @@ fn report_resume(layout: &Layout, id: &str, wait: Duration) {
                 if (c.verdict == Verdict::Pending || (exit_unrecorded && c.verdict == Verdict::Unconfirmed))
                     && Instant::now() < deadline =>
             {
-                std::thread::sleep(Duration::from_millis(100))
+                std::thread::sleep(Duration::from_millis(100));
             }
             Ok(Some((c, _))) => {
                 let hint = if c.verdict == Verdict::Pending {

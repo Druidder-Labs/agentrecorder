@@ -12,12 +12,12 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Phase::Working => "working",
-            Phase::NeedsInput => "needs_input",
-            Phase::Idle => "idle",
-            Phase::Ended => "ended",
+            Self::Working => "working",
+            Self::NeedsInput => "needs_input",
+            Self::Idle => "idle",
+            Self::Ended => "ended",
         }
     }
 }
@@ -63,21 +63,18 @@ pub fn fold<'a>(events: impl IntoIterator<Item = (i64, &'a AgentHook)>) -> Optio
     state
 }
 
-pub fn from_store(store: &Store, session_id: &str, process_running: bool) -> Result<Option<AgentState>> {
-    let mut hooks = Vec::new();
-    store.for_each_event(session_id, Some(&[kind::AGENT_HOOK]), |e| {
-        if let Some(Body::AgentHook(h)) = e.body() {
-            hooks.push((e.ts_ns, h));
-        }
-        Ok(())
-    })?;
-    let mut state = fold(hooks.iter().map(|(t, h)| (*t, h.as_ref())));
+/// The state after the last hook, ended when the process is gone even if no `SessionEnd` hook arrived.
+pub fn from_hooks<'a>(
+    hooks: impl IntoIterator<Item = (i64, &'a AgentHook)>,
+    process_running: bool,
+) -> Option<AgentState> {
+    let mut state = fold(hooks);
     if let Some(s) = state.as_mut().filter(|s| !process_running && s.state != Phase::Ended) {
         s.state = Phase::Ended;
         s.source = format!("{} and session status", s.source);
         s.detail = Some(format!("process not running; last hook {}", s.event));
     }
-    Ok(state)
+    state
 }
 
 pub const RESUME_TIMEOUT_MS: i64 = 90_000;
@@ -92,12 +89,12 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Verdict::Confirmed => "confirmed",
-            Verdict::Mismatch => "mismatch",
-            Verdict::Pending => "pending",
-            Verdict::Unconfirmed => "unconfirmed",
+            Self::Confirmed => "confirmed",
+            Self::Mismatch => "mismatch",
+            Self::Pending => "pending",
+            Self::Unconfirmed => "unconfirmed",
         }
     }
 }
@@ -144,20 +141,31 @@ pub fn judge_resume(
 }
 
 pub fn resume_check(store: &Store, s: &Session, running: bool, now_ns: i64) -> Result<Option<ResumeCheck>> {
-    let Some(expected) = crate::adapters::resumed_session(&s.command) else { return Ok(None) };
-    let mut first = None;
+    if crate::adapters::resumed_session(&s.command).is_none() {
+        return Ok(None);
+    }
+    let mut hooks = Vec::new();
     store.for_each_event(&s.id, Some(&[kind::AGENT_HOOK]), |e| {
-        if first.is_none()
-            && let Some(Body::AgentHook(h)) = e.body()
-            && h.hook_event_name == "SessionStart"
-        {
-            first = Some(h);
+        if let Some(Body::AgentHook(h)) = e.body() {
+            hooks.push(*h);
         }
         Ok(())
     })?;
+    Ok(resume_check_in(&hooks, s, running, now_ns))
+}
+
+/// `judge_resume` on the first `SessionStart` among the session's hooks; `None` when the command resumed nothing.
+pub fn resume_check_in<'a>(
+    hooks: impl IntoIterator<Item = &'a AgentHook>,
+    s: &Session,
+    running: bool,
+    now_ns: i64,
+) -> Option<ResumeCheck> {
+    let expected = crate::adapters::resumed_session(&s.command)?;
+    let first = hooks.into_iter().find(|h| h.hook_event_name == "SessionStart");
     let start = s.started_at_ns.unwrap_or(s.created_at_ns);
     let elapsed_ms = (now_ns - start) / 1_000_000;
-    Ok(Some(judge_resume(&expected, first.as_deref(), elapsed_ms, running, s.exit_code)))
+    Some(judge_resume(&expected, first, elapsed_ms, running, s.exit_code))
 }
 
 #[cfg(test)]

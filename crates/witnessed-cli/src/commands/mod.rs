@@ -1,3 +1,4 @@
+pub mod anchor;
 pub mod bundle;
 pub mod export;
 pub mod hook;
@@ -7,6 +8,8 @@ pub mod replay;
 pub mod review;
 pub mod run;
 pub mod sessions;
+pub mod verify;
+pub mod view;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

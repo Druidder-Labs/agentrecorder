@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fmt::Write as _;
 
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
-use witnessed_store::{AgentHook, Body, ChangedPath, GIT_MAX_PATHS, GitPhase, format_rfc3339, kind, now_unix_ns};
+use witnessed_store::{
+    AgentHook, Body, ChangedPath, GIT_MAX_PATHS, GitPhase, Store, format_rfc3339, kind, now_unix_ns,
+};
 use witnessed_supervisor::Layout;
 
 use crate::agent_state;
@@ -12,7 +14,92 @@ use crate::fmt;
 use crate::procinfo::{self, ProcNode};
 use crate::state;
 use crate::state::{duration_ms, open_and_resolve, program};
-use crate::transcript;
+use crate::transcript::{self, InteractionJson};
+
+#[derive(clap::Args)]
+pub struct InspectArgs {
+    #[arg(default_value = "last", help = crate::SESSION_HELP)]
+    pub session: String,
+    #[arg(long, help = "Print JSON instead of text")]
+    pub json: bool,
+    #[arg(long, help = "Show the text of each prompt read from the agent transcript (hidden by default)")]
+    pub prompts: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Commands {
+    pub count: u64,
+    pub failed: u64,
+    pub exit_unknown: u64,
+}
+
+/// Everything `inspect` reads from the event log, collected in one pass.
+#[derive(Debug, Default)]
+pub struct SessionFacts {
+    pub notices: Vec<Value>,
+    pub commands: Option<Commands>,
+    pub marks: Vec<(i64, String)>,
+    pub hooks: Vec<(i64, AgentHook)>,
+    pub notifications: Vec<Value>,
+    pub git: Vec<Value>,
+    pub snapshots: Vec<Body>,
+}
+
+const FACT_KINDS: &[&str] = &[
+    kind::RUNTIME_WARNING,
+    kind::RUNTIME_ERROR,
+    kind::SHELL_COMMAND_FINISHED,
+    kind::USER_MARK,
+    kind::AGENT_HOOK,
+    kind::TERMINAL_NOTIFICATION,
+    kind::GIT_SNAPSHOT,
+];
+
+impl SessionFacts {
+    pub fn collect(store: &Store, session_id: &str) -> Result<Self> {
+        let mut facts = Self::default();
+        store.for_each_event(session_id, Some(FACT_KINDS), |e| {
+            match e.kind.as_str() {
+                kind::RUNTIME_WARNING | kind::RUNTIME_ERROR => facts
+                    .notices
+                    .push(json!({"type": e.kind, "timestamp": format_rfc3339(e.ts_ns), "payload": e.payload})),
+                kind::SHELL_COMMAND_FINISHED => {
+                    let c = facts.commands.get_or_insert_default();
+                    c.count += 1;
+                    match e.payload.get("exit_code").and_then(Value::as_i64) {
+                        Some(0) => {}
+                        Some(_) => c.failed += 1,
+                        None => c.exit_unknown += 1,
+                    }
+                }
+                kind::USER_MARK => {
+                    if let Some(Body::UserMark { label }) = e.body() {
+                        facts.marks.push((e.mono_ns, label));
+                    }
+                }
+                kind::AGENT_HOOK => {
+                    if let Some(Body::AgentHook(h)) = e.body() {
+                        facts.hooks.push((e.ts_ns, *h));
+                    }
+                }
+                kind::TERMINAL_NOTIFICATION => {
+                    facts.notifications.push(json!({"timestamp": format_rfc3339(e.ts_ns), "payload": e.payload}));
+                }
+                kind::GIT_SNAPSHOT => {
+                    facts.snapshots.extend(e.body());
+                    facts.git.push(json!({"timestamp": format_rfc3339(e.ts_ns), "payload": e.payload}));
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+        Ok(facts)
+    }
+
+    pub fn hooks(&self) -> impl Iterator<Item = &AgentHook> {
+        self.hooks.iter().map(|(_, h)| h)
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ToolCalls {
@@ -107,71 +194,35 @@ pub fn files_changed(snapshots: &[Body]) -> Result<FilesChanged, &'static str> {
     })
 }
 
-pub(crate) fn session_window(s: &witnessed_store::Session) -> (i64, i64) {
+pub fn session_window(s: &witnessed_store::Session) -> (i64, i64) {
     (s.started_at_ns.unwrap_or(s.created_at_ns), s.ended_at_ns.unwrap_or_else(now_unix_ns))
 }
 
 const RULE: &str = "----------------------------------------";
 
-pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Result<i32> {
-    let (store, s, state) = open_and_resolve(layout, id)?;
+pub fn inspect(layout: &Layout, args: &InspectArgs) -> Result<i32> {
+    let (as_json, prompts) = (args.json, args.prompts);
+    let (store, s, state) = open_and_resolve(layout, &args.session)?;
     let st = state.label();
     let live = state.live();
     let counts = store.event_counts(&s.id)?;
     let count_of = |k: &str| counts.iter().find(|c| c.kind == k).map_or(0, |c| c.count);
     let bytes_of = |k: &str| counts.iter().find(|c| c.kind == k).map_or(0, |c| c.bytes);
-    let mut notices: Vec<Value> = Vec::new();
-    store.for_each_event(&s.id, Some(&[kind::RUNTIME_WARNING, kind::RUNTIME_ERROR]), |e| {
-        notices.push(json!({"type": e.kind, "timestamp": format_rfc3339(e.ts_ns), "payload": e.payload}));
-        Ok(())
-    })?;
+    let facts = SessionFacts::collect(&store, &s.id)?;
+    let SessionFacts { notices, commands, marks, notifications, git, snapshots, .. } = &facts;
     let tree = live.and_then(|l| procinfo::sample_tree(l.child_pid as u32));
-    let mut commands: Option<(u64, u64, u64)> = None;
-    store.for_each_event(&s.id, Some(&[kind::SHELL_COMMAND_FINISHED]), |e| {
-        let c = commands.get_or_insert((0, 0, 0));
-        c.0 += 1;
-        match e.payload.get("exit_code").and_then(Value::as_i64) {
-            Some(0) => {}
-            Some(_) => c.1 += 1,
-            None => c.2 += 1,
-        }
-        Ok(())
-    })?;
-    let marks = super::replay::marks(&store, &s.id)?;
     let running = live.is_some_and(|l| !l.exited);
-    let agent = agent_state::from_store(&store, &s.id, running)?;
-    let resume = agent_state::resume_check(&store, &s, running, now_unix_ns())?;
-    let mut hooks: Vec<AgentHook> = Vec::new();
-    store.for_each_event(&s.id, Some(&[kind::AGENT_HOOK]), |e| {
-        if let Some(Body::AgentHook(h)) = e.body() {
-            hooks.push(*h);
-        }
-        Ok(())
-    })?;
-    let tools = tool_calls(&hooks);
-    let transcript = hooks.iter().rev().find_map(|h| h.transcript_path.clone().map(|p| (h.agent.clone(), p)));
+    let agent = agent_state::from_hooks(facts.hooks.iter().map(|(t, h)| (*t, h)), running);
+    let resume = agent_state::resume_check_in(facts.hooks(), &s, running, now_unix_ns());
+    let tools = tool_calls(facts.hooks());
     let (win_from, win_to) = session_window(&s);
-    let tokens: Result<(String, String, transcript::Usage), String> = match &transcript {
-        None if hooks.is_empty() => Err(crate::adapters::NOT_AGENT.into()),
-        None => Err(crate::adapters::NO_TRANSCRIPT_PATH.into()),
-        Some((agent, path)) => transcript::usage(Path::new(path), win_from, win_to)
-            .map(|u| (format!("{agent} transcript"), path.clone(), u))
+    let tokens: Result<(String, String, transcript::Usage), String> = match transcript::locate_in(facts.hooks()) {
+        Err(u) => Err(u.reason()),
+        Ok(located) => transcript::usage(std::path::Path::new(&located.path), win_from, win_to)
+            .map(|u| (format!("{} transcript", located.agent), located.path.clone(), u))
             .map_err(|e| format!("{e:#}")),
     };
-    let mut notifications: Vec<Value> = Vec::new();
-    let mut git: Vec<Value> = Vec::new();
-    let mut snapshots: Vec<Body> = Vec::new();
-    store.for_each_event(&s.id, Some(&[kind::TERMINAL_NOTIFICATION, kind::GIT_SNAPSHOT]), |e| {
-        let entry = json!({"timestamp": format_rfc3339(e.ts_ns), "payload": e.payload});
-        if e.kind == kind::GIT_SNAPSHOT {
-            snapshots.extend(e.body());
-            git.push(entry)
-        } else {
-            notifications.push(entry)
-        }
-        Ok(())
-    })?;
-    let files = files_changed(&snapshots);
+    let files = files_changed(snapshots);
     let mut unavailable = vec!["model_latency", "cost"];
     if commands.is_none() {
         unavailable.extend(["commands", "failures"]);
@@ -212,10 +263,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
                     .iter()
                     .map(|(t, label)| json!({"offset_ms": t / 1_000_000, "label": label}))
                     .collect::<Vec<_>>(),
-                "commands": commands.map(|(count, failed, unknown)| json!({
-                    "count": count,
-                    "failed": failed,
-                    "exit_unknown": unknown,
+                "commands": commands.map(|c| json!({
+                    "count": c.count,
+                    "failed": c.failed,
+                    "exit_unknown": c.exit_unknown,
                     "source": "osc133",
                 })),
                 "tool_calls": tools,
@@ -256,7 +307,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     println!("Working dir:     {}", s.cwd.as_deref().unwrap_or(na));
     println!("Status:          {st}");
     println!("Created:         {}", witnessed_store::format_rfc3339_seconds(s.created_at_ns));
-    println!("Duration:        {}", duration_ms(&s).map(fmt::duration_ms).unwrap_or_else(|| na.into()));
+    println!("Duration:        {}", duration_ms(&s).map_or_else(|| na.into(), fmt::duration_ms));
     match (s.exit_code, s.exit_signal) {
         (Some(c), _) => println!("Exit:            code {c}"),
         (None, Some(sig)) => println!("Exit:            signal {sig}"),
@@ -286,23 +337,20 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     println!("PROCESS");
     println!("Supervisor PID:  {}", s.supervisor_pid.map_or(na.into(), |p| p.to_string()));
     println!("PID:             {}", s.child_pid.map_or(na.into(), |p| p.to_string()));
-    match &tree {
-        Some(t) => {
-            println!("CPU:             {:.1}% (process tree, 250 ms sample)", t.total_cpu());
-            println!("Memory:          {} RSS (process tree)", fmt::bytes(t.total_rss()));
-            println!("Child processes: {}", t.descendants());
-            print_tree(t, 0);
-        }
-        None => {
-            let why = if live.is_some() { "no sample" } else { "process not running" };
-            for label in ["CPU:", "Memory:", "Child processes:"] {
-                na_line(label, why);
-            }
+    if let Some(t) = &tree {
+        println!("CPU:             {:.1}% (process tree, 250 ms sample)", t.total_cpu());
+        println!("Memory:          {} RSS (process tree)", fmt::bytes(t.total_rss()));
+        println!("Child processes: {}", t.descendants());
+        print_tree(t, 0);
+    } else {
+        let why = if live.is_some() { "no sample" } else { "process not running" };
+        for label in ["CPU:", "Memory:", "Child processes:"] {
+            na_line(label, why);
         }
     }
     println!();
     println!("TERMINAL");
-    let (rows, cols) = live.map_or((s.rows, s.cols), |v| (v.rows as i64, v.cols as i64));
+    let (rows, cols) = live.map_or((s.rows, s.cols), |v| (i64::from(v.rows), i64::from(v.cols)));
     println!("Size:            {cols}x{rows}");
     println!("Attached:        {}", if st == "running" { "yes" } else { "no" });
     if let Some(v) = live {
@@ -330,7 +378,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
             p["text"].as_str().unwrap_or("")
         );
     }
-    match git_line(&git) {
+    match git_line(git) {
         Some(line) => println!("Git:             {line}"),
         None => na_line("Git:", "not a git work tree, or git not installed"),
     }
@@ -338,10 +386,10 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
         Ok(f) => {
             let mut line = format!("Files changed:   {} since HEAD {} at start", f.count, f.since_head);
             if f.already_dirty_at_start > 0 {
-                line.push_str(&format!(", {} already modified when the session started", f.already_dirty_at_start));
+                let _ = write!(line, ", {} already modified when the session started", f.already_dirty_at_start);
             }
             if f.capped {
-                line.push_str(&format!(" (first {GIT_MAX_PATHS} paths recorded)"));
+                let _ = write!(line, " (first {GIT_MAX_PATHS} paths recorded)");
             }
             println!("{line}");
             for p in f.paths.iter().take(10) {
@@ -364,7 +412,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     );
     println!("Markers:         {}", marks.len());
     for (i, (t, label)) in marks.iter().enumerate().take(10) {
-        println!("  {} at {} {label}", i + 1, fmt::offset_ms(t / 1_000_000));
+        println!("  {} at {} {label}", i + 1, fmt::offset_ns(*t));
     }
     println!("Attaches:        {}", count_of(kind::SESSION_ATTACHED));
     println!("Resizes:         {}", count_of(kind::TERMINAL_RESIZED));
@@ -373,16 +421,13 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     }
     println!();
     println!("EXECUTION");
-    match commands {
-        Some((count, failed, unknown)) => {
-            println!("Commands:        {count} (OSC 133 shell integration marks)");
-            let unknown = if unknown > 0 { format!(", {unknown} without an exit code") } else { String::new() };
-            println!("Failures:        {failed} (non-zero exit code{unknown})");
-        }
-        None => {
-            na_line("Commands:", "no OSC 133 command marks; the shell has no integration enabled");
-            na_line("Failures:", "no OSC 133 command marks");
-        }
+    if let Some(Commands { count, failed, exit_unknown }) = *commands {
+        println!("Commands:        {count} (OSC 133 shell integration marks)");
+        let unknown = if exit_unknown > 0 { format!(", {exit_unknown} without an exit code") } else { String::new() };
+        println!("Failures:        {failed} (non-zero exit code{unknown})");
+    } else {
+        na_line("Commands:", "no OSC 133 command marks; the shell has no integration enabled");
+        na_line("Failures:", "no OSC 133 command marks");
     }
     match &tools {
         Some(t) => {
@@ -409,7 +454,7 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
     }
     match &tokens {
         Ok((source, _, u)) if !u.interactions.is_empty() => {
-            print_interactions(&u.interactions, s.created_at_ns, prompts, source)
+            print_interactions(&u.interactions, s.created_at_ns, prompts, source);
         }
         Ok((source, _, _)) => println!("Interactions:    0 (no prompts in the {source} during the session)"),
         Err(_) => na_line("Interactions:", "no transcript"),
@@ -435,30 +480,21 @@ pub fn inspect(layout: &Layout, id: &str, as_json: bool, prompts: bool) -> Resul
 
 const INTERACTIONS_SHOWN: usize = 50;
 
-fn interactions_json(list: &[transcript::Interaction], from_ns: i64, prompts: bool) -> Vec<Value> {
+#[derive(Serialize)]
+struct InspectInteraction {
+    timestamp: Option<String>,
+    offset_ms: Option<i64>,
+    #[serde(flatten)]
+    base: InteractionJson,
+}
+
+fn interactions_json(list: &[transcript::Interaction], from_ns: i64, prompts: bool) -> Vec<InspectInteraction> {
     list.iter()
         .enumerate()
-        .map(|(i, t)| {
-            let mut v = json!({
-                "index": i + 1,
-                "timestamp": t.at_ns.map(format_rfc3339),
-                "offset_ms": t.at_ns.map(|at| (at - from_ns).max(0) / 1_000_000),
-                "origin": t.origin,
-                "chars": t.chars,
-                "images": t.images,
-                "api_calls": t.api_calls,
-                "input": t.input,
-                "output": t.output,
-                "cache_read": t.cache_read,
-                "cache_creation": t.cache_creation,
-                "total": t.total(),
-                "reply_chars": t.reply_chars,
-                "model": t.model,
-            });
-            if prompts {
-                v["text"] = json!(t.text);
-            }
-            v
+        .map(|(i, t)| InspectInteraction {
+            timestamp: t.at_ns.map(format_rfc3339),
+            offset_ms: t.at_ns.map(|at| (at - from_ns).max(0) / 1_000_000),
+            base: InteractionJson::new(i + 1, t, prompts),
         })
         .collect()
 }
@@ -472,7 +508,7 @@ fn print_interactions(list: &[transcript::Interaction], from_ns: i64, prompts: b
     let hint = if prompts { "" } else { "; prompt text hidden, --prompts shows it" };
     println!("Interactions:    {} ({}; tokens per prompt from the {source}{hint})", list.len(), kinds.join(", "));
     for (i, t) in list.iter().enumerate().take(INTERACTIONS_SHOWN) {
-        let at = t.at_ns.map_or("-".into(), |at| fmt::offset_ms((at - from_ns).max(0) / 1_000_000));
+        let at = t.at_ns.map_or("-".into(), |at| fmt::offset_ns((at - from_ns).max(0)));
         let images = match t.images {
             0 => String::new(),
             1 => ", 1 image".into(),
@@ -488,7 +524,7 @@ fn print_interactions(list: &[transcript::Interaction], from_ns: i64, prompts: b
             t.chars
         );
         if prompts && !t.text.is_empty() {
-            line.push_str(&format!("  \"{}\"", transcript::one_line(&t.text, 100)));
+            let _ = write!(line, "  \"{}\"", transcript::one_line(&t.text, 100));
         }
         println!("{line}");
     }
@@ -524,7 +560,7 @@ fn git_line(git: &[Value]) -> Option<String> {
             let mut line =
                 format!("HEAD {} -> {}", head(start), if exit.is_some() { head(exit) } else { "(running)".into() });
             if let Some(d) = dirty {
-                line.push_str(&format!(", {d} paths modified or untracked"));
+                let _ = write!(line, ", {d} paths modified or untracked");
             }
             Some(line)
         }

@@ -10,9 +10,65 @@ use witnessed_supervisor::client;
 use super::open_store;
 use crate::attach::{self, DetachKey};
 use crate::fmt;
-use crate::state::{self, State, duration_ms, open_and_resolve};
+use crate::state::{self, Need, State, duration_ms, open_and_resolve, open_needing};
 
-pub fn list(layout: &Layout, as_json: bool) -> Result<i32> {
+#[derive(clap::Args)]
+pub struct SessionsArgs {
+    #[arg(long, help = "Print JSON instead of a table")]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct AttachArgs {
+    #[arg(default_value = "last", help = crate::SESSION_HELP)]
+    pub session: String,
+    #[arg(
+        long,
+        env = "WITNESSED_DETACH_KEY",
+        default_value = crate::DEFAULT_DETACH_KEY,
+        help = "Key that detaches: ctrl-<key> or none"
+    )]
+    pub detach_key: String,
+}
+
+#[derive(clap::Args)]
+pub struct DetachArgs {
+    #[arg(help = crate::SESSION_HELP)]
+    pub session: String,
+}
+
+#[derive(clap::Args)]
+pub struct MarkArgs {
+    #[arg(help = crate::SESSION_HELP)]
+    pub session: String,
+    #[arg(default_value = "", help = "Label shown by inspect, replay and asciicast export")]
+    pub label: String,
+}
+
+#[derive(clap::Args)]
+pub struct StopArgs {
+    #[arg(help = crate::SESSION_HELP)]
+    pub session: String,
+    #[arg(long, default_value = "HUP", help = "First signal: HUP, TERM, INT or KILL")]
+    pub signal: String,
+    #[arg(long, default_value_t = 5.0, help = "Seconds before escalating to SIGKILL")]
+    pub timeout: f64,
+}
+
+#[derive(clap::Args)]
+pub struct RmArgs {
+    #[arg(required = true, help = "Session ids or unique prefixes")]
+    pub sessions: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct PruneArgs {
+    #[arg(long, default_value = "30d", help = "Age such as 12h, 7d or 90m")]
+    pub older_than: String,
+}
+
+pub fn list(layout: &Layout, args: &SessionsArgs) -> Result<i32> {
+    let as_json = args.json;
     if !layout.db_path().exists() {
         println!("{}", if as_json { "[]" } else { "no sessions" });
         return Ok(0);
@@ -57,9 +113,9 @@ pub fn list(layout: &Layout, as_json: bool) -> Result<i32> {
             (None, Some(sig)) => format!("signal {sig}"),
             _ => "-".to_string(),
         };
-        let dur = duration_ms(s).map(fmt::duration_ms).unwrap_or_else(|| "-".into());
+        let dur = duration_ms(s).map_or_else(|| "-".into(), fmt::duration_ms);
         let ago = fmt::ago((now - s.created_at_ns) / 1_000_000);
-        let dir = s.cwd.as_deref().map(fmt::abbreviate_home).unwrap_or_else(|| "-".into());
+        let dir = s.cwd.as_deref().map_or_else(|| "-".into(), fmt::abbreviate_home);
         let cmd = crate::adapters::display_quoted(&crate::adapters::without_injected(
             &s.command,
             s.agent_session_id.as_deref(),
@@ -78,9 +134,9 @@ pub fn list(layout: &Layout, as_json: bool) -> Result<i32> {
     Ok(0)
 }
 
-pub fn attach(layout: &Layout, id: &str, detach_key: &str) -> Result<i32> {
-    let key = DetachKey::parse(detach_key)?;
-    let (_, s, st) = open_and_resolve(layout, id)?;
+pub fn attach(layout: &Layout, args: &AttachArgs) -> Result<i32> {
+    let key = DetachKey::parse(&args.detach_key)?;
+    let (_, s, st) = open_and_resolve(layout, &args.session)?;
     if st.live().is_none() {
         bail!("session {} is {}; nothing to attach to. See `witnessed recover {}`", s.id, st.label(), s.id);
     }
@@ -89,22 +145,19 @@ pub fn attach(layout: &Layout, id: &str, detach_key: &str) -> Result<i32> {
     Ok(attach::report_outcome(&s.id, &outcome))
 }
 
-pub fn mark(layout: &Layout, id: &str, label: &str) -> Result<i32> {
-    let (_, s, st) = open_and_resolve(layout, id)?;
+pub fn mark(layout: &Layout, args: &MarkArgs) -> Result<i32> {
+    let (_, s, st) = open_and_resolve(layout, &args.session)?;
     if st.live().is_none_or(|l| l.exited) {
         bail!("session {} is {}; markers can only be added while it runs", s.id, st.label());
     }
-    let m = client::mark(layout, &s.id, label)?;
+    let m = client::mark(layout, &s.id, &args.label)?;
     let shown = if m.label.is_empty() { String::new() } else { format!(": {}", m.label) };
     println!("marked session {} at {}{shown}", s.id, crate::fmt::offset_ms(m.uptime_ms as i64));
     Ok(0)
 }
 
-pub fn detach(layout: &Layout, id: &str) -> Result<i32> {
-    let (_, s, st) = open_and_resolve(layout, id)?;
-    if st.live().is_none() {
-        bail!("session {} is {}", s.id, st.label());
-    }
+pub fn detach(layout: &Layout, args: &DetachArgs) -> Result<i32> {
+    let (_, s, _) = open_needing(layout, &args.session, Need::Live)?;
     if client::detach(layout, &s.id)? {
         println!("detached the client from session {}", s.id);
     } else {
@@ -123,21 +176,25 @@ fn parse_signal(s: &str) -> Result<Signal> {
     })
 }
 
-pub fn stop(layout: &Layout, id: &str, signal: &str, timeout: f64) -> Result<i32> {
-    let sig = parse_signal(signal)?;
-    if !(0.0..=3600.0).contains(&timeout) {
+pub fn stop(layout: &Layout, args: &StopArgs) -> Result<i32> {
+    let sig = parse_signal(&args.signal)?;
+    if !(0.0..=3600.0).contains(&args.timeout) {
         bail!("--timeout must be between 0 and 3600 seconds");
     }
-    let (store, s, st) = open_and_resolve(layout, id)?;
-    let grace = Duration::from_secs_f64(timeout);
+    let (store, s, st) = open_and_resolve(layout, &args.session)?;
+    let grace = Duration::from_secs_f64(args.timeout);
     match &st {
         State::Running(_) => client::stop(layout, &s.id, sig as i32, grace)?,
-        State::Unreachable(why) if state::supervisor_alive(&s) => {
-            let pid = s.supervisor_pid.expect("checked by supervisor_alive") as i32;
-            eprintln!("witnessed: session {} is unreachable ({why}); sending SIGTERM to supervisor pid {pid}", s.id);
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), Signal::SIGTERM)?;
-        }
-        State::Unreachable(why) => bail!("session {} is unreachable: {why}", s.id),
+        State::Unreachable(why) => match state::supervisor_alive(&s) {
+            Some(pid) => {
+                eprintln!(
+                    "witnessed: session {} is unreachable ({why}); sending SIGTERM to supervisor pid {pid}",
+                    s.id
+                );
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGTERM)?;
+            }
+            None => bail!("session {} is unreachable: {why}", s.id),
+        },
         State::Starting => bail!("session {} is still starting; try again in a moment", s.id),
         State::Exited | State::Lost => {
             println!("session {} is already {}", s.id, st.label());
@@ -161,9 +218,9 @@ pub fn stop(layout: &Layout, id: &str, signal: &str, timeout: f64) -> Result<i32
     bail!("session {} did not stop within {:.1}s", s.id, grace.as_secs_f64() + 5.0)
 }
 
-pub fn remove(layout: &Layout, ids: &[String]) -> Result<i32> {
+pub fn remove(layout: &Layout, args: &RmArgs) -> Result<i32> {
     let mut store = open_store(layout)?;
-    for id in ids {
+    for id in &args.sessions {
         let mut s = store.resolve(id)?;
         let st = state::resolve(layout, &store, &mut s);
         if !st.is_finished() {
@@ -216,7 +273,8 @@ pub fn prune_before(layout: &Layout, store: &mut Store, cutoff_ns: i64, verbose:
     Ok(n)
 }
 
-pub fn prune(layout: &Layout, older_than: &str) -> Result<i32> {
+pub fn prune(layout: &Layout, args: &PruneArgs) -> Result<i32> {
+    let older_than = &args.older_than;
     let age = fmt::parse_age(older_than)?;
     if !layout.db_path().exists() {
         println!("no sessions");

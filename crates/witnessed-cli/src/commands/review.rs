@@ -8,13 +8,11 @@ use serde_json::json;
 use witnessed_store::{Annotation, Store};
 use witnessed_supervisor::Layout;
 
-use crate::decisions::{self, Decisions, Moment};
+use crate::decisions::{self, Decisions, Kind, Moment};
 use crate::fmt;
 use crate::outcome::{self, Outcome};
 use crate::state::{duration_ms, open_and_resolve};
 
-pub const KINDS: [&str; 8] =
-    ["approved", "declined", "stopped", "unanswered", "not_approved", "unknown", "interrupted", "corrected"];
 const HINT_BUDGET: Duration = Duration::from_millis(300);
 
 #[derive(clap::Args)]
@@ -23,13 +21,8 @@ pub struct ReviewArgs {
     pub session: String,
     #[arg(long, help = "Print JSON instead of text")]
     pub json: bool,
-    #[arg(
-        long = "kind",
-        value_name = "KIND",
-        value_parser = KINDS,
-        help = "Show only moments of this kind; repeat for several"
-    )]
-    pub kinds: Vec<String>,
+    #[arg(long = "kind", value_name = "KIND", value_enum, help = "Show only moments of this kind; repeat for several")]
+    pub kinds: Vec<Kind>,
     #[arg(
         long,
         value_name = "MOMENT_ID",
@@ -54,11 +47,11 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Verdict::Again => "again",
-            Verdict::Differently => "differently",
-            Verdict::Unsure => "unsure",
+            Self::Again => "again",
+            Self::Differently => "differently",
+            Self::Unsure => "unsure",
         }
     }
 }
@@ -128,7 +121,7 @@ pub fn annotate(store: &Store, id: &str, d: &Decisions, action: &Action) -> Resu
                 bail!("session {id} has no moment {moment:?}; list its moments with `witnessed review {id}`");
             }
             let note = note.map(str::trim).filter(|n| !n.is_empty());
-            store.set_annotation(id, moment, verdict.as_str(), note)?;
+            store.set_annotation(id, moment, verdict.as_str(), note, witnessed_store::now_unix_ns())?;
             Ok(format!("{id} {moment}: you would decide {}{}", verdict.as_str(), note_suffix(note)))
         }
         Action::Clear { moment } => {
@@ -144,7 +137,7 @@ fn note_suffix(note: Option<&str>) -> String {
     note.map(|n| format!(" - {n}")).unwrap_or_default()
 }
 
-fn filter(d: &Decisions, kinds: &[String]) -> Decisions {
+fn filter(d: &Decisions, kinds: &[Kind]) -> Decisions {
     let mut out = d.clone();
     if !kinds.is_empty() {
         out.moments.retain(|m| kinds.contains(&m.kind));
@@ -160,9 +153,9 @@ fn subject(m: &Moment) -> String {
     }
 }
 
-pub fn render(head: &Header, d: &Decisions, kinds: &[String], annotations: &[Annotation], out: &Outcome) -> String {
+pub fn render(head: &Header, d: &Decisions, kinds: &[Kind], annotations: &[Annotation], out: &Outcome) -> String {
     let mut o = String::new();
-    let dur = head.duration_ms.map(fmt::duration_ms).unwrap_or_else(|| "duration unavailable".into());
+    let dur = head.duration_ms.map_or_else(|| "duration unavailable".into(), fmt::duration_ms);
     let _ = writeln!(o, "Session {}  {}  {dur}", head.id, head.command);
     if !d.available {
         let reason = d.reason.as_deref().unwrap_or("no reason given");
@@ -181,11 +174,12 @@ pub fn render(head: &Header, d: &Decisions, kinds: &[String], annotations: &[Ann
     o.push('\n');
     let shown: Vec<&Moment> = d.moments.iter().filter(|m| kinds.is_empty() || kinds.contains(&m.kind)).collect();
     if !kinds.is_empty() {
-        let _ = writeln!(o, "Showing {} of {total} (--kind {})", shown.len(), kinds.join(", "));
+        let names: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        let _ = writeln!(o, "Showing {} of {total} (--kind {})", shown.len(), names.join(", "));
     }
     if !shown.is_empty() {
         let idw = shown.iter().map(|m| m.id.chars().count()).max().unwrap_or(2).max(2);
-        let kw = shown.iter().map(|m| m.kind.len()).max().unwrap_or(4).max(4);
+        let kw = shown.iter().map(|m| m.kind.as_str().len()).max().unwrap_or(4).max(4);
         o.push('\n');
         let _ = writeln!(o, "{:<idw$}  {:<10}  {:<kw$}  SUBJECT", "ID", "OFFSET", "KIND");
         for m in &shown {
@@ -278,12 +272,23 @@ mod tests {
     use super::*;
     use crate::outcome::CommitOutcome;
 
-    fn moment(id: &str, t_ms: i64, kind: &str) -> Moment {
-        Moment { id: id.into(), t_ms, kind: kind.into(), ..Moment::default() }
+    fn moment(id: &str, t_ms: i64, kind: Kind) -> Moment {
+        Moment {
+            id: id.into(),
+            t_ms,
+            kind,
+            prompt: None,
+            tool: None,
+            subject: None,
+            wait_ms: None,
+            checked_before: None,
+            then: None,
+            facts: Vec::new(),
+        }
     }
 
     fn sample() -> Decisions {
-        let mut a = moment("m-1", 62_300, "approved");
+        let mut a = moment("m-1", 62_300, Kind::Approved);
         a.tool = Some("Bash".into());
         a.subject = Some("cargo test".into());
         a.prompt = Some(2);
@@ -291,13 +296,13 @@ mod tests {
         a.checked_before = Some(false);
         a.facts = vec!["Approved in 4.0 s without a test run earlier in this prompt.".into(), "Tests failed.".into()];
         a.then = Some("the agent edited src/lib.rs".into());
-        let mut b = moment("m-2", 125_000, "interrupted");
+        let mut b = moment("m-2", 125_000, Kind::Interrupted);
         b.subject = Some("Edit src/main.rs".into());
         Decisions {
             available: true,
             reason: None,
             moments: vec![a, b],
-            counts: BTreeMap::from([("approved".into(), 1), ("interrupted".into(), 1)]),
+            counts: BTreeMap::from([(Kind::Approved, 1), (Kind::Interrupted, 1)]),
         }
     }
 
@@ -347,13 +352,13 @@ Watch:    witnessed replay a91f2c --from 00:01:02.3
 
     #[test]
     fn filters_by_kind_and_notes_a_running_session() {
-        let text = render(&head(true), &sample(), &["interrupted".into()], &[], &Outcome::default());
+        let text = render(&head(true), &sample(), &[Kind::Interrupted], &[], &Outcome::default());
         assert!(text.contains("still running; the list may grow"), "{text}");
         assert!(text.contains("Showing 1 of 2 (--kind interrupted)"), "{text}");
         assert!(!text.contains("m-1 "), "{text}");
         assert!(text.contains("--mark m-2"), "{text}");
         assert!(!text.contains("lines the session added"), "{text}");
-        assert_eq!(filter(&sample(), &["interrupted".into()]).moments.len(), 1);
+        assert_eq!(filter(&sample(), &[Kind::Interrupted]).moments.len(), 1);
     }
 
     #[test]

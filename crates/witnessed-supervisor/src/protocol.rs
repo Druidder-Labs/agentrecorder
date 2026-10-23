@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use witnessed_store::AgentHook;
+use witnessed_store::{AgentHook, DetachReason};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 4 << 20;
@@ -42,6 +42,7 @@ pub struct ExitInfo {
 }
 
 impl ExitInfo {
+    #[must_use]
     pub fn shell_code(&self) -> i32 {
         self.exit_code.unwrap_or_else(|| 128 + self.signal.unwrap_or(0))
     }
@@ -56,7 +57,7 @@ pub enum Frame {
     Control(Control),
     Output(Vec<u8>),
     Exited(ExitInfo),
-    Detached { reason: String },
+    Detached { reason: DetachReason },
     Reply(Value),
     Error(String),
 }
@@ -89,7 +90,7 @@ pub fn write_frame(w: &mut impl Write, frame: &Frame) -> io::Result<()> {
         Frame::Control(c) => (CONTROL, json(c).into()),
         Frame::Output(d) => (OUTPUT, d.as_slice().into()),
         Frame::Exited(e) => (EXITED, json(e).into()),
-        Frame::Detached { reason } => (DETACHED, reason.as_bytes().into()),
+        Frame::Detached { reason } => (DETACHED, reason.as_str().as_bytes().into()),
         Frame::Reply(v) => (REPLY, json(v).into()),
         Frame::Error(m) => (ERROR, m.as_bytes().into()),
     };
@@ -111,24 +112,30 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Frame>> {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let len = u32::from_be_bytes(header[1..].try_into().expect("4 bytes")) as usize;
+    let [kind, len @ ..] = header;
+    let len = u32::from_be_bytes(len) as usize;
     if len > MAX_FRAME {
         return Err(invalid(format!("frame of {len} bytes exceeds limit")));
     }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;
-    let frame = match header[0] {
+    let frame = match kind {
         HELLO => Frame::Hello(parse(&payload)?),
         INPUT => Frame::Input(payload),
-        RESIZE if len == 4 => Frame::Resize {
-            rows: u16::from_be_bytes([payload[0], payload[1]]),
-            cols: u16::from_be_bytes([payload[2], payload[3]]),
+        RESIZE => match payload.as_slice() {
+            &[r0, r1, c0, c1] => {
+                Frame::Resize { rows: u16::from_be_bytes([r0, r1]), cols: u16::from_be_bytes([c0, c1]) }
+            }
+            _ => return Err(invalid(format!("resize frame carries {len} bytes, expected 4"))),
         },
         DETACH => Frame::Detach,
         CONTROL => Frame::Control(parse(&payload)?),
         OUTPUT => Frame::Output(payload),
         EXITED => Frame::Exited(parse(&payload)?),
-        DETACHED => Frame::Detached { reason: String::from_utf8_lossy(&payload).into_owned() },
+        DETACHED => Frame::Detached {
+            reason: serde_json::from_value(Value::String(String::from_utf8_lossy(&payload).into_owned()))
+                .unwrap_or(DetachReason::Unknown),
+        },
         REPLY => Frame::Reply(parse(&payload)?),
         ERROR => Frame::Error(String::from_utf8_lossy(&payload).into_owned()),
         k => return Err(invalid(format!("unknown frame kind {k}"))),
@@ -164,7 +171,7 @@ mod tests {
             Frame::Detach,
             Frame::Control(Control::Stop { signal: 1, grace_ms: 10 }),
             Frame::Exited(ExitInfo { exit_code: Some(3), signal: None }),
-            Frame::Detached { reason: "x".into() },
+            Frame::Detached { reason: DetachReason::ClientTooSlow },
         ];
         let mut buf = Vec::new();
         for f in &frames {
@@ -184,5 +191,29 @@ mod tests {
         let mut buf = vec![INPUT];
         buf.extend_from_slice(&u32::MAX.to_be_bytes());
         assert!(read_frame(&mut buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_resize_without_four_bytes_is_invalid_data() {
+        for len in [0u32, 3, 5] {
+            let mut buf = vec![RESIZE];
+            buf.extend_from_slice(&len.to_be_bytes());
+            buf.extend(std::iter::repeat_n(0u8, len as usize));
+            let err = read_frame(&mut buf.as_slice()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(err.to_string(), format!("resize frame carries {len} bytes, expected 4"));
+        }
+    }
+
+    #[test]
+    fn detached_reasons_keep_their_wire_names_and_unknown_ones_fall_back() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &Frame::Detached { reason: DetachReason::AttachedElsewhere }).unwrap();
+        assert_eq!(&buf[5..], b"attached_elsewhere");
+        let mut buf = vec![DETACHED];
+        buf.extend_from_slice(&3u32.to_be_bytes());
+        buf.extend_from_slice(b"new");
+        let Some(Frame::Detached { reason }) = read_frame(&mut buf.as_slice()).unwrap() else { panic!("detached") };
+        assert_eq!(reason, DetachReason::Unknown);
     }
 }

@@ -14,7 +14,7 @@ pub fn initial_size(store: &Store, s: &Session) -> Result<(u16, u16)> {
         }
         Ok(())
     })?;
-    Ok(size.unwrap_or((s.rows.clamp(1, u16::MAX as i64) as u16, s.cols.clamp(1, u16::MAX as i64) as u16)))
+    Ok(size.unwrap_or((s.rows.clamp(1, i64::from(u16::MAX)) as u16, s.cols.clamp(1, i64::from(u16::MAX)) as u16)))
 }
 
 pub fn recorded_screen((rows, cols): (u16, u16)) -> ScreenModel {

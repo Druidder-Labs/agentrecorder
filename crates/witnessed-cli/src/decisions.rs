@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::Result;
@@ -7,20 +6,69 @@ use regex::Regex;
 use serde::Serialize;
 use witnessed_store::{AgentHook, Body, Session, Store, kind};
 
+/// What the person did at a decision moment; the JSON and `--kind` names are the snake_case variant names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "snake_case")]
+pub enum Kind {
+    Approved,
+    Declined,
+    Stopped,
+    Unanswered,
+    NotApproved,
+    Unknown,
+    Interrupted,
+    Corrected,
+}
+
+impl Kind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Declined => "declined",
+            Self::Stopped => "stopped",
+            Self::Unanswered => "unanswered",
+            Self::NotApproved => "not_approved",
+            Self::Unknown => "unknown",
+            Self::Interrupted => "interrupted",
+            Self::Corrected => "corrected",
+        }
+    }
+}
+
+/// Sorted by name, so maps keyed by `Kind` print in the same order as the string-keyed ones they replaced.
+impl Ord for Kind {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for Kind {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct Decisions {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub moments: Vec<Moment>,
-    pub counts: BTreeMap<String, u64>,
+    pub counts: BTreeMap<Kind, u64>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Moment {
     pub id: String,
     pub t_ms: i64,
-    pub kind: String,
+    pub kind: Kind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,35 +84,48 @@ pub struct Moment {
     pub facts: Vec<String>,
 }
 
+impl Moment {
+    fn new(id: String, t_ms: i64, kind: Kind) -> Self {
+        Self {
+            id,
+            t_ms,
+            kind,
+            prompt: None,
+            tool: None,
+            subject: None,
+            wait_ms: None,
+            checked_before: None,
+            then: None,
+            facts: Vec::new(),
+        }
+    }
+}
+
 pub fn derive(store: &Store, s: &Session, cuts_ms: &[(i64, i64)]) -> Result<Decisions> {
     let mut base_ns = None;
     let mut inputs = Inputs { duration_ms: crate::state::duration_ms(s), cwd: s.cwd.clone(), ..Inputs::default() };
-    let mut transcript = None;
-    store.for_each_event(&s.id, None, |e| {
+    inputs.outputs =
+        store.event_times(&s.id, kind::TERMINAL_OUTPUT)?.into_iter().map(|(_, mono)| mono / 1_000_000).collect();
+    store.for_each_event(&s.id, Some(&[kind::SESSION_CREATED, kind::AGENT_HOOK]), |e| {
         base_ns.get_or_insert(e.ts_ns - e.mono_ns);
         let t_ms = e.mono_ns / 1_000_000;
-        if e.kind == kind::TERMINAL_OUTPUT {
-            inputs.outputs.push(t_ms);
-        } else if e.kind == kind::AGENT_HOOK
+        if e.kind == kind::AGENT_HOOK
             && let Some(Body::AgentHook(h)) = e.body()
         {
-            if let Some(p) = &h.transcript_path {
-                transcript = Some(p.clone());
-            }
-            inputs.hooks.push(Hook { seq: e.seq, t_ms, h: *h });
+            inputs.hooks.push(Hook::new(e.seq, t_ms, *h));
         }
         Ok(())
     })?;
-    let unavailable = |reason: String| Ok(Decisions { reason: Some(reason), ..Decisions::default() });
-    let Some(path) = transcript else {
-        let reason =
-            if inputs.hooks.is_empty() { crate::adapters::NOT_AGENT } else { crate::adapters::NO_TRANSCRIPT_PATH };
-        return unavailable(reason.into());
+    let unavailable =
+        |u: &crate::transcript::Unavailable| Ok(Decisions { reason: Some(u.reason()), ..Decisions::default() });
+    let located = match crate::transcript::locate_in(inputs.hooks.iter().map(|h| &h.h)) {
+        Ok(l) => l,
+        Err(u) => return unavailable(&u),
     };
     let (from_ns, to_ns) = crate::commands::inspect::session_window(s);
-    let usage = match crate::transcript::usage(Path::new(&path), from_ns, to_ns) {
+    let usage = match located.usage(from_ns, to_ns) {
         Ok(u) => u,
-        Err(_) => return unavailable(crate::adapters::transcript_unreadable(&path)),
+        Err(u) => return unavailable(&u),
     };
     let base_ns = base_ns.unwrap_or(s.created_at_ns);
     let ms = |at: i64| ((at - base_ns) / 1_000_000).max(0);
@@ -99,7 +160,19 @@ static SEPARATORS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*(?:&&|\|\|
 struct Hook {
     seq: i64,
     t_ms: i64,
+    test: bool,
     h: AgentHook,
+}
+
+impl Hook {
+    fn new(seq: i64, t_ms: i64, h: AgentHook) -> Self {
+        let test = h.tool_name.as_deref() == Some("Bash")
+            && h.tool
+                .as_ref()
+                .and_then(|t| t.command.as_deref())
+                .is_some_and(|c| segments(c).iter().any(|x| TEST_RE.is_match(x)));
+        Self { seq, t_ms, test, h }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,13 +206,13 @@ struct Turn {
     interrupted_at: Option<i64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Ask {
     turn: usize,
     pos: usize,
     wait_ms: Option<i64>,
     measured: bool,
-    outcome: &'static str,
+    outcome: Kind,
     ran: Option<usize>,
 }
 
@@ -167,8 +240,8 @@ fn segments(cmd: &str) -> Vec<String> {
     SEPARATORS.split(cmd).map(|x| x.trim_start_matches(['(', '{', ' ', '\t', '\n']).trim().to_string()).collect()
 }
 
-fn is_test(h: &Hook) -> bool {
-    tool_name(h) == "Bash" && command(h).is_some_and(|c| segments(c).iter().any(|x| TEST_RE.is_match(x)))
+const fn is_test(h: &Hook) -> bool {
+    h.test
 }
 
 fn chained(cmd: &str) -> bool {
@@ -238,7 +311,7 @@ fn decide(mut inp: Inputs, cuts: &[(i64, i64)]) -> Decisions {
     let moments: Vec<Moment> = moments(&inp, cuts).into_iter().filter(|m| !in_cut(m.t_ms)).collect();
     let mut counts = BTreeMap::new();
     for m in &moments {
-        *counts.entry(m.kind.clone()).or_default() += 1;
+        *counts.entry(m.kind).or_default() += 1;
     }
     Decisions { available: true, reason: None, moments, counts }
 }
@@ -351,17 +424,17 @@ fn asks(inp: &Inputs, turns: &[Turn], cuts: &[(i64, i64)], escaped: &mut BTreeSe
                 is_call(x) && x.h.tool_name == h.h.tool_name && same_cmd(x)
             });
             let outcome = if refused.is_some() {
-                "declined"
+                Kind::Declined
             } else if esc.is_some() {
-                "stopped"
+                Kind::Stopped
             } else if ran.is_some() {
-                "approved"
+                Kind::Approved
             } else if cut_away {
-                "unknown"
+                Kind::Unknown
             } else if unanswered {
-                "unanswered"
+                Kind::Unanswered
             } else {
-                "not_approved"
+                Kind::NotApproved
             };
             out.push((j, Ask { turn: ti, pos: k, wait_ms, measured: resume.is_some(), outcome, ran }));
         }
@@ -379,27 +452,22 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
     for (j, a) in &asks {
         let h = &hooks[*j];
         let t = &turns[a.turn];
-        let mut m = Moment {
-            id: format!("p{}", h.seq),
-            t_ms: h.t_ms,
-            kind: a.outcome.into(),
-            prompt: t.index,
-            tool: h.h.tool_name.clone(),
-            subject: subject(h, cwd),
-            wait_ms: a.wait_ms,
-            ..Moment::default()
-        };
+        let mut m = Moment::new(format!("p{}", h.seq), h.t_ms, a.outcome);
+        m.prompt = t.index;
+        m.tool = h.h.tool_name.clone();
+        m.subject = subject(h, cwd);
+        m.wait_ms = a.wait_ms;
         let wait = a.wait_ms.map(secs).unwrap_or_default();
         match a.outcome {
-            "approved" => approved(&mut m, inp, &turns, a, wait),
-            "declined" => m.facts.push(format!("Declined at the permission prompt {wait} after the request.")),
-            "stopped" => m.facts.push(format!("Pressed Esc at the permission prompt {wait} after the request.")),
-            "unknown" => m.facts.push("The answer falls inside a cut range of this bundle.".into()),
-            "unanswered" => m.facts.push(
+            Kind::Approved => approved(&mut m, inp, &turns, a, wait),
+            Kind::Declined => m.facts.push(format!("Declined at the permission prompt {wait} after the request.")),
+            Kind::Stopped => m.facts.push(format!("Pressed Esc at the permission prompt {wait} after the request.")),
+            Kind::Unknown => m.facts.push("The answer falls inside a cut range of this bundle.".into()),
+            Kind::Unanswered => m.facts.push(
                 "No answer recorded: the screen did not change after the request and the agent did not continue."
                     .into(),
             ),
-            _ => m.facts.push(format!(
+            Kind::NotApproved | Kind::Interrupted | Kind::Corrected => m.facts.push(format!(
                 "No {} call followed the request before the next request or stop; the screen changed {wait} after it.",
                 h.h.tool_name.as_deref().unwrap_or("tool")
             )),
@@ -415,15 +483,10 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
                 .map(|&j| &hooks[j])
                 .find(|h| h.t_ms <= ms && matches!(name(h), "PreToolUse" | "PostToolUse" | "PostToolUseFailure"))
         });
-        let mut m = Moment {
-            id: format!("i{ms}"),
-            t_ms: ms,
-            kind: "interrupted".into(),
-            prompt: turn.and_then(|t| t.index),
-            tool: last.and_then(|h| h.h.tool_name.clone()),
-            subject: last.and_then(|h| subject(h, cwd)),
-            ..Moment::default()
-        };
+        let mut m = Moment::new(format!("i{ms}"), ms, Kind::Interrupted);
+        m.prompt = turn.and_then(|t| t.index);
+        m.tool = last.and_then(|h| h.h.tool_name.clone());
+        m.subject = last.and_then(|h| subject(h, cwd));
         m.facts.push(match turn.and_then(|t| t.index.map(|i| (i, t.t_ms))) {
             Some((i, start)) => {
                 format!("Pressed Esc {} after prompt {i} started, while the agent worked.", secs(ms - start))
@@ -453,8 +516,11 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
             causes.push((ms, what.into(), None));
         }
         if let Some(&ms) = prev.refusals.last() {
-            let ask =
-                asks.iter().rev().find(|(_, a)| a.turn == i - 1 && a.outcome == "declined").map(|(j, _)| &hooks[*j]);
+            let ask = asks
+                .iter()
+                .rev()
+                .find(|(_, a)| a.turn == i - 1 && a.outcome == Kind::Declined)
+                .map(|(j, _)| &hooks[*j]);
             causes.push((ms, "a declined permission request".into(), ask));
         }
         if let Some(h) = calls.iter().rev().find(|h| is_test(h)).filter(|h| failed(h)) {
@@ -469,16 +535,11 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
             (_, None, Some(at)) => Some((t.t_ms - at).max(0)),
             _ => None,
         };
-        let mut m = Moment {
-            id: format!("c{index}"),
-            t_ms: t.t_ms,
-            kind: "corrected".into(),
-            prompt: Some(index),
-            tool: by.and_then(|h| h.h.tool_name.clone()),
-            subject: by.and_then(|h| subject(h, cwd)),
-            wait_ms,
-            ..Moment::default()
-        };
+        let mut m = Moment::new(format!("c{index}"), t.t_ms, Kind::Corrected);
+        m.prompt = Some(index);
+        m.tool = by.and_then(|h| h.h.tool_name.clone());
+        m.subject = by.and_then(|h| subject(h, cwd));
+        m.wait_ms = wait_ms;
         let when = wait_ms.map(|w| format!(" {} later", secs(w))).unwrap_or_default();
         m.facts.push(match prev.index {
             Some(p) => format!("Redirected the agent{when}, after {cause} in prompt {p}."),
@@ -575,17 +636,11 @@ mod tests {
 
     fn hook(seq: i64, t_ms: i64, name: &str, tool: Option<(&str, ToolSummary)>) -> Hook {
         let (tool_name, tool) = tool.map_or((None, None), |(n, t)| (Some(n.to_string()), Some(t)));
-        Hook {
+        Hook::new(
             seq,
             t_ms,
-            h: AgentHook {
-                agent: "claude".into(),
-                hook_event_name: name.into(),
-                tool_name,
-                tool,
-                ..AgentHook::default()
-            },
-        }
+            AgentHook { agent: "claude".into(), hook_event_name: name.into(), tool_name, tool, ..AgentHook::default() },
+        )
     }
 
     fn bash(cmd: &str) -> Option<(&'static str, ToolSummary)> {
@@ -604,7 +659,7 @@ mod tests {
         Inputs { hooks, outputs, prompts, duration_ms: Some(60_000), cwd: Some("/w".into()), ..Inputs::default() }
     }
 
-    fn only(d: &Decisions, kind: &str) -> Moment {
+    fn only(d: &Decisions, kind: Kind) -> Moment {
         let found: Vec<&Moment> = d.moments.iter().filter(|m| m.kind == kind).collect();
         assert_eq!(found.len(), 1, "{kind}: {:#?}", d.moments);
         found[0].clone()
@@ -620,13 +675,13 @@ mod tests {
             hook(5, 12_000, "Stop", None),
         ];
         let d = decide(inputs(hooks, vec![2100, 7500, 8200, 9500], vec![prompt(1, 0)]), &[]);
-        let m = only(&d, "approved");
+        let m = only(&d, Kind::Approved);
         assert_eq!((m.id.as_str(), m.prompt, m.wait_ms), ("p2", Some(1), Some(7500)));
         assert_eq!((m.tool.as_deref(), m.subject.as_deref()), (Some("Bash"), Some("rm -rf build")));
         assert_eq!(m.checked_before, Some(false));
         assert_eq!(m.then.as_deref(), Some("the command exited 0"));
         assert_eq!(m.facts[0], "Approved in 7.5 s without a test run since the last edit.");
-        assert_eq!(d.counts, BTreeMap::from([("approved".to_string(), 1)]));
+        assert_eq!(d.counts, BTreeMap::from([(Kind::Approved, 1)]));
     }
 
     #[test]
@@ -636,7 +691,7 @@ mod tests {
             hook(2, 2000, "Notification", None),
             hook(3, 4000, "PostToolUse", bash("ls")),
         ];
-        let m = only(&decide(inputs(hooks, vec![2600], vec![prompt(1, 0)]), &[]), "approved");
+        let m = only(&decide(inputs(hooks, vec![2600], vec![prompt(1, 0)]), &[]), Kind::Approved);
         assert_eq!(m.wait_ms, Some(2000));
         assert!(m.facts[1].contains("upper bound"), "{:?}", m.facts);
     }
@@ -670,7 +725,7 @@ mod tests {
         let last = by_id("p11");
         assert_eq!((last.checked_before, last.then.as_deref()), (Some(false), Some("no test ran next")));
         assert_eq!(last.facts[0], "Approved in 0.2 s without a test or a read of the file since the last edit.");
-        assert_eq!(d.counts["approved"], 4);
+        assert_eq!(d.counts[&Kind::Approved], 4);
     }
 
     #[test]
@@ -679,9 +734,9 @@ mod tests {
         let mut inp = inputs(hooks, vec![5100], vec![prompt(1, 0), prompt(2, 9000)]);
         inp.refusals = vec![5000];
         let d = decide(inp, &[]);
-        let m = only(&d, "declined");
+        let m = only(&d, Kind::Declined);
         assert_eq!((m.id.as_str(), m.wait_ms), ("p1", Some(3000)));
-        let c = only(&d, "corrected");
+        let c = only(&d, Kind::Corrected);
         assert_eq!((c.id.as_str(), c.prompt, c.wait_ms, c.t_ms), ("c2", Some(2), Some(4000), 9000));
         assert_eq!(c.subject.as_deref(), Some("rm -rf dist"));
         assert_eq!(c.facts[0], "Redirected the agent 4.0 s later, after a declined permission request in prompt 1.");
@@ -697,15 +752,15 @@ mod tests {
         let mut inp = inputs(hooks, vec![4100], vec![prompt(1, 0), prompt(2, 20_000)]);
         inp.interrupts = vec![4000, 7000];
         let d = decide(inp, &[]);
-        let s = only(&d, "stopped");
+        let s = only(&d, Kind::Stopped);
         assert_eq!((s.id.as_str(), s.wait_ms), ("p2", Some(2000)));
-        let i = only(&d, "interrupted");
+        let i = only(&d, Kind::Interrupted);
         assert_eq!(
             (i.id.as_str(), i.prompt, i.tool.as_deref(), i.subject.as_deref()),
             ("i7000", Some(1), Some("Read"), Some("README.md"))
         );
         assert_eq!(i.facts[0], "Pressed Esc 7.0 s after prompt 1 started, while the agent worked.");
-        let c = only(&d, "corrected");
+        let c = only(&d, Kind::Corrected);
         assert_eq!(
             (c.wait_ms, c.facts[0].as_str()),
             (Some(13_000), "Redirected the agent 13 s later, after an interruption in prompt 1.")
@@ -722,10 +777,10 @@ mod tests {
         ];
         let notice = Prompt { index: 2, t_ms: 10_000, origin: "task-notification".into() };
         let d = decide(inputs(hooks, vec![1900, 2500], vec![prompt(1, 0), notice]), &[]);
-        assert_eq!(only(&d, "not_approved").id, "p1");
-        let u = only(&d, "unanswered");
+        assert_eq!(only(&d, Kind::NotApproved).id, "p1");
+        let u = only(&d, Kind::Unanswered);
         assert_eq!((u.id.as_str(), u.prompt, u.wait_ms), ("p4", Some(2), Some(49_000)));
-        assert!(d.moments.iter().all(|m| m.kind != "corrected"));
+        assert!(d.moments.iter().all(|m| m.kind != Kind::Corrected));
     }
 
     #[test]
@@ -737,10 +792,10 @@ mod tests {
         ];
         let d = decide(inputs(hooks.clone(), vec![], vec![prompt(1, 0)]), &[(1500, 3000), (8000, 9000)]);
         assert_eq!(d.moments.len(), 1, "{:#?}", d.moments);
-        let m = only(&d, "unknown");
+        let m = only(&d, Kind::Unknown);
         assert_eq!((m.id.as_str(), m.wait_ms), ("p3", None));
         let all = decide(inputs(hooks, vec![], vec![prompt(1, 0)]), &[]);
-        assert_eq!(all.counts, BTreeMap::from([("approved".to_string(), 1), ("unanswered".to_string(), 1)]));
+        assert_eq!(all.counts, BTreeMap::from([(Kind::Approved, 1), (Kind::Unanswered, 1)]));
     }
 
     #[test]
@@ -754,7 +809,7 @@ mod tests {
         ];
         let prompts = vec![prompt(1, 0), prompt(2, 5000), prompt(3, 9000)];
         let d = decide(inputs(hooks, vec![], prompts), &[]);
-        let c = only(&d, "corrected");
+        let c = only(&d, Kind::Corrected);
         assert_eq!((c.id.as_str(), c.prompt, c.wait_ms), ("c2", Some(2), Some(3000)));
         assert_eq!(
             (c.tool.as_deref(), c.subject.as_deref()),
@@ -779,6 +834,20 @@ mod tests {
         let ids: Vec<&str> = a.moments.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["p7", "i4000", "c2"]);
         assert_eq!(a.moments[0].then.as_deref(), Some("the command failed"));
+    }
+
+    #[test]
+    fn kinds_serialize_and_parse_as_snake_case() {
+        use clap::ValueEnum;
+        assert_eq!(serde_json::to_string(&Kind::NotApproved).unwrap(), "\"not_approved\"");
+        assert_eq!(Kind::from_str("not_approved", false), Ok(Kind::NotApproved));
+        assert!(Kind::from_str("not-approved", false).is_err());
+        let counts: BTreeMap<Kind, u64> = BTreeMap::from([(Kind::Unanswered, 2), (Kind::NotApproved, 1)]);
+        assert_eq!(serde_json::to_string(&counts).unwrap(), r#"{"not_approved":1,"unanswered":2}"#);
+        assert_eq!(
+            Kind::value_variants().iter().map(|k| k.as_str()).collect::<Vec<_>>(),
+            ["approved", "declined", "stopped", "unanswered", "not_approved", "unknown", "interrupted", "corrected"]
+        );
     }
 
     #[test]
@@ -856,7 +925,7 @@ mod tests {
         assert!(d.available, "{:?}", d.reason);
         assert_eq!(d.moments.len(), 1);
         let m = &d.moments[0];
-        assert_eq!((m.id.as_str(), m.kind.as_str(), m.prompt, m.wait_ms), ("p1", "declined", Some(1), Some(2800)));
+        assert_eq!((m.id.as_str(), m.kind, m.prompt, m.wait_ms), ("p1", Kind::Declined, Some(1), Some(2800)));
         assert_eq!(derive(&store, &s, &[(1000, 3000)]).unwrap().moments, vec![]);
     }
 }

@@ -39,9 +39,9 @@ const LAYOUTS: &[Layout] = &[
 
 struct Workload {
     name: &'static str,
-    events: usize,
+    events: i64,
     blob: usize,
-    small_every: usize,
+    small_every: i64,
 }
 
 const WORKLOADS: &[Workload] = &[
@@ -66,8 +66,9 @@ fn open(path: &Path, l: &Layout) -> rusqlite::Result<Connection> {
 
 fn insert(c: &mut Connection, l: &Layout, w: &Workload, session: &str) -> rusqlite::Result<()> {
     let blob = vec![b'x'; w.blob];
+    let blob_len = i64::try_from(w.blob).expect("blob fits i64");
     let mut seq = 0i64;
-    while (seq as usize) < w.events {
+    while seq < w.events {
         let tx = c.transaction()?;
         {
             let mut ev = if l.side_table {
@@ -77,14 +78,14 @@ fn insert(c: &mut Connection, l: &Layout, w: &Workload, session: &str) -> rusqli
             };
             let mut data = tx.prepare_cached("INSERT INTO event_data (data) VALUES (?1)").ok();
             for _ in 0..BATCH {
-                if seq as usize >= w.events {
+                if seq >= w.events {
                     break;
                 }
-                let small = (seq as usize).is_multiple_of(w.small_every);
+                let small = seq % w.small_every == 0;
                 let (kind, payload, len) = if small {
                     ("terminal.resized", Some(r#"{"rows":24,"cols":80}"#), 0)
                 } else {
-                    ("terminal.output", None, w.blob as i64)
+                    ("terminal.output", None, blob_len)
                 };
                 if l.side_table {
                     let id = if small {
@@ -160,7 +161,7 @@ fn delete(c: &Connection, l: &Layout, session: &str) -> rusqlite::Result<()> {
 }
 
 fn size(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
 fn secs(t: Instant) -> f64 {

@@ -20,7 +20,7 @@ pub struct Env {
 impl Env {
     pub fn new() -> Self {
         let home = tempfile::Builder::new().prefix("agt").tempdir_in("/tmp").expect("tempdir");
-        Env { home }
+        Self { home }
     }
 
     pub fn path(&self) -> &Path {
@@ -100,7 +100,7 @@ impl Env {
     pub fn spawn_pty(&self, args: &[&str], rows: u16, cols: u16) -> PtyClient {
         let cmd = self.command(args);
         let mut argv = vec![BIN.to_string()];
-        argv.extend(args.iter().map(|s| s.to_string()));
+        argv.extend(args.iter().map(std::string::ToString::to_string));
         let envs: Vec<(String, String)> =
             cmd.get_envs().filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string()))).collect();
         let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -229,7 +229,7 @@ fn spawn_in_pty(argv: &[String], rows: u16, cols: u16, env: &[(&str, &str)]) -> 
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
-            libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+            libc::ioctl(0, libc::TIOCSCTTY.into(), 0);
             Ok(())
         });
     }

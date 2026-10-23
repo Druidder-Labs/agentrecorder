@@ -14,7 +14,7 @@ pub use crate::protocol::ExitInfo;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
     pub session_id: String,
     pub supervisor_pid: u32,
@@ -50,9 +50,9 @@ pub enum ConnectError {
 impl fmt::Display for ConnectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConnectError::NotRunning => write!(f, "the session supervisor is not running"),
-            ConnectError::Io(e) => write!(f, "session supervisor unreachable: {e}"),
-            ConnectError::Rejected(m) => write!(f, "session supervisor refused the request: {m}"),
+            Self::NotRunning => write!(f, "the session supervisor is not running"),
+            Self::Io(e) => write!(f, "session supervisor unreachable: {e}"),
+            Self::Rejected(m) => write!(f, "session supervisor refused the request: {m}"),
         }
     }
 }
@@ -62,8 +62,8 @@ impl std::error::Error for ConnectError {}
 impl From<io::Error> for ConnectError {
     fn from(e: io::Error) -> Self {
         match e.kind() {
-            ErrorKind::NotFound | ErrorKind::ConnectionRefused => ConnectError::NotRunning,
-            _ => ConnectError::Io(e),
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused => Self::NotRunning,
+            _ => Self::Io(e),
         }
     }
 }
@@ -91,6 +91,7 @@ fn control(layout: &Layout, id: &str, req: Control) -> Result<serde_json::Value,
     }
 }
 
+#[must_use]
 pub fn is_ready(layout: &Layout, id: &str) -> bool {
     status(layout, id).is_ok()
 }
@@ -149,19 +150,14 @@ pub struct AttachSender {
 }
 
 impl Attachment {
-    pub fn open(
-        layout: &Layout,
-        id: &str,
-        rows: u16,
-        cols: u16,
-        backpressure: bool,
-    ) -> Result<Attachment, ConnectError> {
+    pub fn open(layout: &Layout, id: &str, rows: u16, cols: u16, backpressure: bool) -> Result<Self, ConnectError> {
         let stream = connect(layout, id)?;
         let mut writer = stream.try_clone()?;
         write_frame(&mut writer, &hello(Mode::Attach, rows, cols, backpressure))?;
-        Ok(Attachment { reader: stream, sender: AttachSender { stream: Arc::new(Mutex::new(writer)) } })
+        Ok(Self { reader: stream, sender: AttachSender { stream: Arc::new(Mutex::new(writer)) } })
     }
 
+    #[must_use]
     pub fn sender(&self) -> AttachSender {
         self.sender.clone()
     }
@@ -171,9 +167,7 @@ impl Attachment {
             return match read_frame(&mut self.reader) {
                 Ok(Some(Frame::Output(d))) => Ok(AttachEvent::Output(d)),
                 Ok(Some(Frame::Exited(info))) => Ok(AttachEvent::Exited(info)),
-                Ok(Some(Frame::Detached { reason })) => Ok(AttachEvent::Detached(
-                    serde_json::from_value(serde_json::Value::String(reason)).unwrap_or(DetachReason::ProtocolError),
-                )),
+                Ok(Some(Frame::Detached { reason })) => Ok(AttachEvent::Detached(reason)),
                 Ok(Some(Frame::Error(m))) => Err(ConnectError::Rejected(m)),
                 Ok(Some(_)) => continue,
                 Ok(None) | Err(_) => Ok(AttachEvent::Closed),
@@ -184,7 +178,7 @@ impl Attachment {
 
 impl AttachSender {
     fn send(&self, frame: &Frame) -> io::Result<()> {
-        let mut s = self.stream.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = self.stream.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         write_frame(&mut *s, frame)
     }
 

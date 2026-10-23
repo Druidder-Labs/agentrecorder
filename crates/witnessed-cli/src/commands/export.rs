@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 
 use anyhow::{Result, bail};
@@ -37,7 +38,7 @@ pub struct ExportArgs {
     pub follow: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Cast {
     V2,
     V3,
@@ -104,7 +105,7 @@ fn escape_controls(line: String) -> String {
     let mut out = String::with_capacity(line.len() + 16);
     for c in line.chars() {
         if c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c) {
-            out.push_str(&format!("\\u{:04x}", c as u32));
+            let _ = write!(out, "\\u{:04x}", c as u32);
         } else {
             out.push(c);
         }
@@ -175,8 +176,8 @@ pub struct CastWriter {
 }
 
 impl CastWriter {
-    pub fn new(cast: Cast) -> Self {
-        CastWriter { cast, timeline: Timeline { cast, last_ns: 0, emitted_us: 0 }, pending: Vec::new() }
+    pub const fn new(cast: Cast) -> Self {
+        Self { cast, timeline: Timeline { cast, last_ns: 0, emitted_us: 0 }, pending: Vec::new() }
     }
 
     pub fn event(&mut self, e: &Event) -> Option<Value> {
@@ -246,15 +247,12 @@ fn take_utf8(pending: &mut Vec<u8>) -> String {
             Err(e) => {
                 let (ok, bad) = rest.split_at(e.valid_up_to());
                 text.push_str(std::str::from_utf8(ok).expect("validated"));
-                match e.error_len() {
-                    Some(n) => {
-                        text.push('\u{fffd}');
-                        rest = &bad[n..];
-                    }
-                    None => {
-                        rest = bad;
-                        break;
-                    }
+                if let Some(n) = e.error_len() {
+                    text.push('\u{fffd}');
+                    rest = &bad[n..];
+                } else {
+                    rest = bad;
+                    break;
                 }
             }
         }

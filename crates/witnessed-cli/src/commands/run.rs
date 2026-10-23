@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::PathBuf;
@@ -217,7 +218,7 @@ fn finish_anchor(writer: Option<&mut std::process::Child>) {
 fn sharing_note(args: &RunArgs) -> String {
     let mut note = String::new();
     if let Some(file) = &args.anchor {
-        note.push_str(&format!("; anchors -> {}", file.display()));
+        let _ = write!(note, "; anchors -> {}", file.display());
     }
     if args.anchor_token.is_some() {
         note.push_str("; chain bound to a token");
@@ -263,7 +264,9 @@ fn apply_retention(layout: &Layout, store: &mut Store) {
         return;
     }
     let cutoff = now_unix_ns() - days * 86_400 * 1_000_000_000;
-    let _ = super::sessions::prune_before(layout, store, cutoff, false);
+    if let Err(e) = super::sessions::prune_before(layout, store, cutoff, false) {
+        eprintln!("witnessed: warning: retention pruning failed: {e:#}");
+    }
 }
 
 pub fn print_finished(layout: &Layout, id: &str) -> Result<i32> {

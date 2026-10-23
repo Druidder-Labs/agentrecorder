@@ -74,8 +74,8 @@ const CLAUDE_NO_INJECT: &[&str] = &[
 pub const NOT_AGENT: &str = "not an agent session; decisions come from Claude Code sessions: witnessed run -- claude";
 pub const NO_TRANSCRIPT_PATH: &str = "the agent did not report where its transcript is";
 
-pub fn transcript_unreadable(path: &str) -> String {
-    format!("the agent transcript cannot be read: {path}")
+pub fn transcript_unreadable(path: &str, cause: &dyn std::fmt::Display) -> String {
+    format!("the agent transcript cannot be read: {path} ({cause})")
 }
 
 pub fn agent_index(argv: &[String]) -> Option<usize> {
@@ -218,21 +218,19 @@ fn claude_session_in(args: &[String]) -> Option<String> {
 
 pub fn without_injected(argv: &[String], id: Option<&str>) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
-    let mut i = 0;
-    while i < argv.len() {
-        let next = argv.get(i + 1);
-        let pair = (argv[i] == "--session-id" && next.map(String::as_str) == id && id.is_some())
-            || (argv[i] == "--settings" && next.is_some_and(|v| is_injected_settings(v)));
+    let mut args = argv.iter().peekable();
+    while let Some(a) = args.next() {
+        let next = args.peek().map(|s| s.as_str());
+        let pair = (a == "--session-id" && id.is_some() && next == id)
+            || (a == "--settings" && next.is_some_and(is_injected_settings));
         if pair {
-            i += 2;
+            args.next();
             continue;
         }
-        if id.is_some() && argv[i].strip_prefix("--session-id=") == id {
-            i += 1;
+        if id.is_some() && a.strip_prefix("--session-id=") == id {
             continue;
         }
-        out.push(argv[i].clone());
-        i += 1;
+        out.push(a.clone());
     }
     out
 }

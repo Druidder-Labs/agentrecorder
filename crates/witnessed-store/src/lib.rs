@@ -1,10 +1,13 @@
+#![allow(clippy::missing_errors_doc, reason = "every fallible function fails with the `Error` variants of this crate")]
+
 mod events;
 mod time;
 
-use std::path::Path;
+use std::fmt::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::Value;
@@ -18,15 +21,92 @@ pub use time::{format_rfc3339, format_rfc3339_seconds, now_unix_ns, parse_rfc333
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
 const DB_USER_VERSION: i64 = 6;
-const PAGE_ROWS: i64 = 256;
+const PAGE_ROWS: usize = 256;
 const WAL_SIZE_LIMIT: i64 = 4 << 20;
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const INIT_RETRY_FOR: Duration = Duration::from_secs(10);
+const INIT_RETRY_STEP: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Deletion {
     Scrubbed,
     WalPending,
 }
+
+#[derive(Debug)]
+pub enum Error {
+    Busy,
+    Corrupt { path: PathBuf },
+    NewerSchema { found: i64, supported: i64, binary: &'static str },
+    InvalidId(String),
+    NotFound(String),
+    Ambiguous { prefix: String, ids: Vec<String> },
+    NoSessions,
+    Sqlite(rusqlite::Error),
+    Json(serde_json::Error),
+}
+
+impl Error {
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Error::Busy)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Busy => f.write_str("database is locked"),
+            Error::Corrupt { path } => write!(
+                f,
+                "event store {} is corrupt; move it aside to start a new one (existing recordings stay in the moved file)",
+                path.display()
+            ),
+            Error::NewerSchema { found, supported, binary } => write!(
+                f,
+                "written by a newer witnessed (store schema {found}; this binary is {binary} and reads up to schema {supported}); \
+                 update this binary with install.sh, then run the command again; the store was not changed"
+            ),
+            Error::InvalidId(id) => write!(f, "invalid session id {id:?}"),
+            Error::NotFound(id) => write!(f, "no session matches {id:?}; run `witnessed sessions` to list sessions"),
+            Error::Ambiguous { prefix, ids } => write!(f, "{prefix:?} is ambiguous: {}", ids.join(", ")),
+            Error::NoSessions => f.write_str("no sessions yet; record one with: witnessed run -- claude"),
+            Error::Sqlite(e) => fmt::Display::fmt(e, f),
+            Error::Json(e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Sqlite(e) => Some(e),
+            Error::Json(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) =>
+            {
+                Error::Busy
+            }
+            e => Error::Sqlite(e),
+        }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Json(e)
+    }
+}
+
+type Res<T> = std::result::Result<T, Error>;
 
 fn sqlite_code(e: &anyhow::Error) -> Option<rusqlite::ErrorCode> {
     e.chain().find_map(|c| match c.downcast_ref::<rusqlite::Error>() {
@@ -35,16 +115,19 @@ fn sqlite_code(e: &anyhow::Error) -> Option<rusqlite::ErrorCode> {
     })
 }
 
+#[must_use]
 pub fn is_transient(e: &anyhow::Error) -> bool {
-    is_busy(e)
+    e.chain().any(|c| c.downcast_ref::<Error>().is_some_and(Error::is_transient))
+        || e.downcast_ref::<Error>().is_some_and(Error::is_transient)
+        || matches!(sqlite_code(e), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
 }
 
-fn is_busy(e: &anyhow::Error) -> bool {
-    matches!(sqlite_code(e), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
-}
-
-fn is_corrupt(e: &anyhow::Error) -> bool {
-    matches!(sqlite_code(e), Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
+fn is_corrupt(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -57,6 +140,7 @@ pub enum Status {
 }
 
 impl Status {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Starting => "starting",
@@ -66,15 +150,17 @@ impl Status {
         }
     }
 
-    fn parse(s: &str) -> Status {
+    fn parse(s: &str) -> Option<Status> {
         match s {
-            "starting" => Status::Starting,
-            "running" => Status::Running,
-            "exited" => Status::Exited,
-            _ => Status::Lost,
+            "starting" => Some(Status::Starting),
+            "running" => Some(Status::Running),
+            "exited" => Some(Status::Exited),
+            "lost" => Some(Status::Lost),
+            _ => None,
         }
     }
 
+    #[must_use]
     pub fn is_live(self) -> bool {
         matches!(self, Status::Starting | Status::Running)
     }
@@ -88,6 +174,7 @@ pub enum LostReason {
 }
 
 impl LostReason {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             LostReason::HostRestarted => "host_restarted",
@@ -165,10 +252,12 @@ pub struct Event {
 }
 
 impl Event {
+    #[must_use]
     pub fn body(&self) -> Option<Body> {
         Body::decode(&self.kind, &self.payload)
     }
 
+    #[must_use]
     pub fn to_json(&self) -> Value {
         use base64::Engine;
         let mut v = serde_json::json!({
@@ -213,33 +302,72 @@ pub struct SessionDiffRow {
     pub diff: Vec<u8>,
 }
 
+macro_rules! session_cols {
+    () => {
+        "id, command, cwd, status, created_at_ns, started_at_ns, ended_at_ns,
+    supervisor_pid, child_pid, exit_code, exit_signal, rows, cols, attached, record_output,
+    record_input, boot_time, lost_reason, restarted_from, agent_session_id, anchor_token_digest"
+    };
+}
+
+const SQL_SESSION_BY_ID: &str = concat!("SELECT ", session_cols!(), " FROM sessions WHERE id = ?1");
+const SQL_SESSIONS: &str = concat!("SELECT ", session_cols!(), " FROM sessions ORDER BY created_at_ns");
+const SQL_LAST_SESSION: &str =
+    concat!("SELECT ", session_cols!(), " FROM sessions ORDER BY created_at_ns DESC LIMIT 1");
+const SQL_SESSIONS_BY_PREFIX: &str =
+    concat!("SELECT ", session_cols!(), " FROM sessions WHERE id >= ?1 AND id < ?1 || X'7F' ORDER BY id");
+const SQL_INSERT_SESSION: &str =
+    "INSERT INTO sessions (id, command, cwd, status, created_at_ns, supervisor_pid, rows, cols,
+        record_output, record_input, boot_time, restarted_from, agent_session_id, anchor_token_digest)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+const SQL_MARK_STARTED: &str = "UPDATE sessions SET status = 'running', child_pid = ?2, started_at_ns = ?3
+     WHERE id = ?1 AND status = 'starting'";
+const SQL_SET_ATTACHED: &str = "UPDATE sessions SET attached = ?2 WHERE id = ?1";
+const SQL_SET_SIZE: &str = "UPDATE sessions SET rows = ?2, cols = ?3 WHERE id = ?1";
+const SQL_MARK_EXITED: &str =
+    "UPDATE sessions SET status = 'exited', ended_at_ns = ?2, exit_code = ?3, exit_signal = ?4,
+        attached = 0, lost_reason = NULL WHERE id = ?1 AND status IN ('starting', 'running', 'lost')";
+const SQL_MARK_LOST: &str = "UPDATE sessions SET status = 'lost', lost_reason = ?2, attached = 0
+     WHERE id = ?1 AND status IN ('starting', 'running')";
+const SQL_INSERT_EVENT: &str = "INSERT INTO events (session_id, seq, ts_ns, mono_ns, kind, payload, data, data_len)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+const SQL_EVENT_TIMES: &str = "SELECT seq, mono_ns FROM events WHERE session_id = ?1 AND kind = ?2 ORDER BY seq";
+const SQL_LAST_SEQ_AT_OR_BEFORE: &str =
+    "SELECT MAX(seq) FROM events WHERE session_id = ?1 AND kind = ?2 AND mono_ns <= ?3";
+const SQL_EVENT_COUNTS: &str = "SELECT kind, COUNT(*), COALESCE(SUM(data_len), 0) FROM events
+     WHERE session_id = ?1 GROUP BY kind ORDER BY kind";
+const SQL_PUT_SESSION_DIFF: &str =
+    "INSERT OR REPLACE INTO session_diffs (session_id, base, diff, created_at_ns) VALUES (?1, ?2, ?3, ?4)";
+const SQL_SESSION_DIFF: &str = "SELECT base, diff FROM session_diffs WHERE session_id = ?1";
+const SQL_SET_ANNOTATION: &str = "INSERT OR REPLACE INTO annotations (session_id, moment, verdict, note, updated_at_ns)
+     VALUES (?1, ?2, ?3, ?4, ?5)";
+const SQL_CLEAR_ANNOTATION: &str = "DELETE FROM annotations WHERE session_id = ?1 AND moment = ?2";
+const SQL_ANNOTATIONS: &str =
+    "SELECT moment, verdict, note, updated_at_ns FROM annotations WHERE session_id = ?1 ORDER BY moment";
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path).with_context(|| format!("opening event store {}", path.display()))?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        let conn = Connection::open(path)
+            .map_err(Error::from)
+            .with_context(|| format!("opening event store {}", path.display()))?;
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(Error::from)?;
         let mut store = Store { conn };
         let deadline = std::time::Instant::now() + INIT_RETRY_FOR;
         loop {
             match store.init() {
                 Ok(()) => return Ok(store),
-                Err(e) if is_busy(&e) && std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(50));
+                Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(INIT_RETRY_STEP);
                 }
                 Err(e) if is_corrupt(&e) => {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "event store {} is corrupt; move it aside to start a new one \
-                             (existing recordings stay in the moved file)",
-                            path.display()
-                        )
-                    });
+                    return Err(e).context(Error::Corrupt { path: path.to_path_buf() });
                 }
                 Err(e) => return Err(e).with_context(|| format!("opening event store {}", path.display())),
             }
         }
     }
 
-    fn init(&mut self) -> Result<()> {
+    fn init(&mut self) -> Res<()> {
         let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version == 0 {
             self.conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
@@ -252,45 +380,21 @@ impl Store {
             return Ok(());
         }
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        match version {
-            0 => {
-                tx.execute_batch(SCHEMA)?;
-                tx.execute_batch(MIGRATE_2_TO_3)?;
-                tx.execute_batch(MIGRATE_3_TO_4)?;
-                tx.execute_batch(MIGRATE_4_TO_5)?;
-                tx.execute_batch(MIGRATE_5_TO_6)?;
-            }
-            1 => {
-                tx.execute_batch(MIGRATE_1_TO_2)?;
-                tx.execute_batch(MIGRATE_2_TO_3)?;
-                tx.execute_batch(MIGRATE_3_TO_4)?;
-                tx.execute_batch(MIGRATE_4_TO_5)?;
-                tx.execute_batch(MIGRATE_5_TO_6)?;
-            }
-            2 => {
-                tx.execute_batch(MIGRATE_2_TO_3)?;
-                tx.execute_batch(MIGRATE_3_TO_4)?;
-                tx.execute_batch(MIGRATE_4_TO_5)?;
-                tx.execute_batch(MIGRATE_5_TO_6)?;
-            }
-            3 => {
-                tx.execute_batch(MIGRATE_3_TO_4)?;
-                tx.execute_batch(MIGRATE_4_TO_5)?;
-                tx.execute_batch(MIGRATE_5_TO_6)?;
-            }
-            4 => {
-                tx.execute_batch(MIGRATE_4_TO_5)?;
-                tx.execute_batch(MIGRATE_5_TO_6)?;
-            }
-            5 => tx.execute_batch(MIGRATE_5_TO_6)?,
-            DB_USER_VERSION => {}
-            v => bail!(
-                "written by a newer witnessed (store schema {v}; this binary is {} and reads up to schema {DB_USER_VERSION}); \
-                 update this binary with install.sh or `cargo install witnessed --locked`, then run the command again; \
-                 the store was not changed",
-                env!("CARGO_PKG_VERSION")
-            ),
+        let mut version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > DB_USER_VERSION {
+            return Err(Error::NewerSchema {
+                found: version,
+                supported: DB_USER_VERSION,
+                binary: env!("CARGO_PKG_VERSION"),
+            });
+        }
+        if version == 0 {
+            tx.execute_batch(SCHEMA)?;
+            version = SCHEMA_VERSION;
+        }
+        for (to, sql) in MIGRATIONS.iter().filter(|(to, _)| *to > version) {
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", to)?;
         }
         tx.pragma_update(None, "user_version", DB_USER_VERSION)?;
         tx.commit()?;
@@ -298,46 +402,47 @@ impl Store {
     }
 
     pub fn create_session(&self, s: &NewSession<'_>) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO sessions (id, command, cwd, status, created_at_ns, supervisor_pid, rows, cols,
-                record_output, record_input, boot_time, restarted_from, agent_session_id, anchor_token_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                s.id,
-                serde_json::to_string(s.command)?,
-                s.cwd,
-                Status::Starting.as_str(),
-                s.created_at_ns,
-                s.supervisor_pid,
-                s.rows,
-                s.cols,
-                s.record_output,
-                s.record_input,
-                s.boot_time,
-                s.restarted_from,
-                s.agent_session_id,
-                s.anchor_token_digest,
-            ],
-        )?;
+        let command = serde_json::to_string(s.command).map_err(Error::from)?;
+        self.conn
+            .prepare_cached(SQL_INSERT_SESSION)
+            .and_then(|mut stmt| {
+                stmt.execute(params![
+                    s.id,
+                    command,
+                    s.cwd,
+                    Status::Starting.as_str(),
+                    s.created_at_ns,
+                    s.supervisor_pid,
+                    s.rows,
+                    s.cols,
+                    s.record_output,
+                    s.record_input,
+                    s.boot_time,
+                    s.restarted_from,
+                    s.agent_session_id,
+                    s.anchor_token_digest,
+                ])
+            })
+            .map_err(Error::from)?;
         Ok(())
     }
 
+    fn execute_cached(&self, sql: &str, args: impl rusqlite::Params) -> Res<usize> {
+        Ok(self.conn.prepare_cached(sql)?.execute(args)?)
+    }
+
     pub fn mark_started(&self, id: &str, child_pid: i64, started_at_ns: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET status = 'running', child_pid = ?2, started_at_ns = ?3
-             WHERE id = ?1 AND status = 'starting'",
-            params![id, child_pid, started_at_ns],
-        )?;
+        self.execute_cached(SQL_MARK_STARTED, params![id, child_pid, started_at_ns])?;
         Ok(())
     }
 
     pub fn set_attached(&self, id: &str, attached: bool) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET attached = ?2 WHERE id = ?1", params![id, attached])?;
+        self.execute_cached(SQL_SET_ATTACHED, params![id, attached])?;
         Ok(())
     }
 
     pub fn set_size(&self, id: &str, rows: u16, cols: u16) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET rows = ?2, cols = ?3 WHERE id = ?1", params![id, rows, cols])?;
+        self.execute_cached(SQL_SET_SIZE, params![id, rows, cols])?;
         Ok(())
     }
 
@@ -348,33 +453,25 @@ impl Store {
         exit_code: Option<i32>,
         exit_signal: Option<i32>,
     ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET status = 'exited', ended_at_ns = ?2, exit_code = ?3, exit_signal = ?4,
-                attached = 0, lost_reason = NULL WHERE id = ?1 AND status IN ('starting', 'running', 'lost')",
-            params![id, ended_at_ns, exit_code, exit_signal],
-        )?;
+        self.execute_cached(SQL_MARK_EXITED, params![id, ended_at_ns, exit_code, exit_signal])?;
         Ok(())
     }
 
     pub fn mark_lost(&self, id: &str, reason: LostReason) -> Result<bool> {
-        let n = self.conn.execute(
-            "UPDATE sessions SET status = 'lost', lost_reason = ?2, attached = 0
-             WHERE id = ?1 AND status IN ('starting', 'running')",
-            params![id, reason.as_str()],
-        )?;
-        Ok(n > 0)
+        Ok(self.execute_cached(SQL_MARK_LOST, params![id, reason.as_str()])? > 0)
     }
 
     pub fn append_events(&mut self, session_id: &str, first_seq: i64, events: &[NewEvent]) -> Result<i64> {
-        let tx = self.conn.transaction()?;
+        Ok(self.append(session_id, first_seq, events)?)
+    }
+
+    fn append(&mut self, session_id: &str, first_seq: i64, events: &[NewEvent]) -> Res<i64> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut seq = first_seq;
         {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO events (session_id, seq, ts_ns, mono_ns, kind, payload, data, data_len)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?;
+            let mut stmt = tx.prepare_cached(SQL_INSERT_EVENT)?;
             for e in events {
-                let len = e.data.as_ref().map_or(0, Vec::len) as i64;
+                let len = i64::try_from(e.data.as_ref().map_or(0, Vec::len)).unwrap_or(i64::MAX);
                 stmt.execute(params![
                     session_id,
                     seq,
@@ -393,44 +490,51 @@ impl Store {
     }
 
     pub fn resolve(&self, id_or_prefix: &str) -> Result<Session> {
+        Ok(self.lookup(id_or_prefix)?)
+    }
+
+    fn lookup(&self, id_or_prefix: &str) -> Res<Session> {
         if id_or_prefix == "last" || id_or_prefix == "latest" {
-            let mut stmt = self
-                .conn
-                .prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY created_at_ns DESC LIMIT 1"))?;
+            let mut stmt = self.conn.prepare_cached(SQL_LAST_SESSION)?;
             return match stmt.query_map([], row_to_session)?.next() {
                 Some(s) => Ok(s?),
-                None => bail!("no sessions yet; record one with: witnessed run -- claude"),
+                None => Err(Error::NoSessions),
             };
         }
         if id_or_prefix.is_empty() || !id_or_prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
-            bail!("invalid session id {id_or_prefix:?}");
+            return Err(Error::InvalidId(id_or_prefix.to_string()));
         }
-        let mut stmt =
-            self.conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id LIKE ?1 || '%' ORDER BY id"))?;
-        let found: Vec<Session> = stmt.query_map([id_or_prefix], row_to_session)?.collect::<Result<_, _>>()?;
-        match found.len() {
-            0 => bail!("no session matches {id_or_prefix:?}; run `witnessed sessions` to list sessions"),
-            1 => Ok(found.into_iter().next().expect("one element")),
-            _ => {
-                if let Some(exact) = found.iter().find(|s| s.id == id_or_prefix) {
-                    return Ok(exact.clone());
-                }
-                let ids: Vec<_> = found.iter().map(|s| s.id.as_str()).collect();
-                bail!("{id_or_prefix:?} is ambiguous: {}", ids.join(", "))
-            }
+        let mut stmt = self.conn.prepare_cached(SQL_SESSIONS_BY_PREFIX)?;
+        let mut found: Vec<Session> =
+            stmt.query_map([id_or_prefix], row_to_session)?.collect::<rusqlite::Result<_>>()?;
+        if found.is_empty() {
+            return Err(Error::NotFound(id_or_prefix.to_string()));
+        }
+        let pick = if found.len() == 1 { Some(0) } else { found.iter().position(|s| s.id == id_or_prefix) };
+        match pick {
+            Some(i) => Ok(found.swap_remove(i)),
+            None => Err(Error::Ambiguous {
+                prefix: id_or_prefix.to_string(),
+                ids: found.into_iter().map(|s| s.id).collect(),
+            }),
         }
     }
 
     pub fn session(&self, id: &str) -> Result<Option<Session>> {
-        Ok(self
+        let row = self
             .conn
-            .query_row(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"), [id], row_to_session)
-            .optional()?)
+            .prepare_cached(SQL_SESSION_BY_ID)
+            .and_then(|mut stmt| stmt.query_row([id], row_to_session).optional())
+            .map_err(Error::from)?;
+        Ok(row)
     }
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
-        let mut stmt = self.conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY created_at_ns"))?;
-        let rows = stmt.query_map([], row_to_session)?.collect::<Result<_, _>>()?;
+        let rows = self
+            .conn
+            .prepare_cached(SQL_SESSIONS)
+            .and_then(|mut stmt| stmt.query_map([], row_to_session)?.collect::<rusqlite::Result<_>>())
+            .map_err(Error::from)?;
         Ok(rows)
     }
 
@@ -454,142 +558,215 @@ impl Store {
         kinds: Option<&[&str]>,
         mut f: impl FnMut(Event) -> Result<()>,
     ) -> Result<()> {
+        for e in self.events(session_id, after_seq, kinds) {
+            f(e?)?;
+        }
+        Ok(())
+    }
+
+    /// The events of a session after `after_seq`, oldest first, read 256 rows per short read transaction so a
+    /// writer is never blocked and a checkpoint can run between pages; a page fetched after an append includes
+    /// the appended rows, so a reader sees a contiguous prefix of the session at every point.
+    pub fn events(
+        &self,
+        session_id: &str,
+        after_seq: i64,
+        kinds: Option<&[&str]>,
+    ) -> impl Iterator<Item = Result<Event>> + '_ {
         let mut sql = String::from(
             "SELECT session_id, seq, ts_ns, mono_ns, kind, payload, data FROM events
              WHERE session_id = ?1 AND seq > ?2",
         );
         if let Some(ks) = kinds {
             let marks: Vec<String> = (0..ks.len()).map(|i| format!("?{}", i + 3)).collect();
-            sql.push_str(&format!(" AND kind IN ({})", marks.join(", ")));
+            let _ = write!(sql, " AND kind IN ({})", marks.join(", "));
         }
-        sql.push_str(&format!(" ORDER BY seq LIMIT {PAGE_ROWS}"));
-        let mut last = after_seq;
-        loop {
-            let page = {
-                let mut args: Vec<&dyn rusqlite::ToSql> = vec![&session_id, &last];
-                if let Some(ks) = kinds {
-                    args.extend(ks.iter().map(|k| k as &dyn rusqlite::ToSql));
-                }
-                let mut stmt = self.conn.prepare_cached(&sql)?;
-                let rows = stmt.query_map(args.as_slice(), |row| {
-                    let payload: Option<String> = row.get(5)?;
-                    Ok(Event {
-                        session_id: row.get(0)?,
-                        seq: row.get(1)?,
-                        ts_ns: row.get(2)?,
-                        mono_ns: row.get(3)?,
-                        kind: row.get(4)?,
-                        payload: match payload {
-                            Some(p) => serde_json::from_str(&p).unwrap_or(Value::String(p)),
-                            None => Value::Null,
-                        },
-                        data: row.get(6)?,
-                    })
-                })?;
-                rows.collect::<rusqlite::Result<Vec<Event>>>()?
-            };
-            let Some(tail) = page.last() else { return Ok(()) };
-            last = tail.seq;
-            let full = page.len() as i64 == PAGE_ROWS;
-            for e in page {
-                f(e)?;
-            }
-            if !full {
-                return Ok(());
-            }
+        let _ = write!(sql, " ORDER BY seq LIMIT {PAGE_ROWS}");
+        Events {
+            store: self,
+            sql,
+            session_id: session_id.to_string(),
+            kinds: kinds.map_or_else(Vec::new, |ks| ks.iter().map(ToString::to_string).collect()),
+            last: after_seq,
+            page: Vec::new().into_iter(),
+            done: false,
         }
+    }
+
+    fn page(&self, sql: &str, session_id: &str, last: i64, kinds: &[String]) -> Res<Vec<Event>> {
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&session_id, &last];
+        args.extend(kinds.iter().map(|k| k as &dyn rusqlite::ToSql));
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        let rows = stmt.query_map(args.as_slice(), |row| {
+            let payload: Option<String> = row.get(5)?;
+            Ok(Event {
+                session_id: row.get(0)?,
+                seq: row.get(1)?,
+                ts_ns: row.get(2)?,
+                mono_ns: row.get(3)?,
+                kind: row.get(4)?,
+                payload: match payload {
+                    Some(p) => serde_json::from_str(&p).unwrap_or(Value::String(p)),
+                    None => Value::Null,
+                },
+                data: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<Event>>>()?)
+    }
+
+    /// Sequence numbers and monotonic times of the events of one kind, without their payloads or data.
+    pub fn event_times(&self, session_id: &str, kind: &str) -> Result<Vec<(i64, i64)>> {
+        let rows = self
+            .conn
+            .prepare_cached(SQL_EVENT_TIMES)
+            .and_then(|mut stmt| {
+                stmt.query_map(params![session_id, kind], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()
+            })
+            .map_err(Error::from)?;
+        Ok(rows)
     }
 
     pub fn last_seq_at_or_before(&self, session_id: &str, kind: &str, mono_ns: i64) -> Result<Option<i64>> {
-        Ok(self.conn.query_row(
-            "SELECT MAX(seq) FROM events WHERE session_id = ?1 AND kind = ?2 AND mono_ns <= ?3",
-            params![session_id, kind, mono_ns],
-            |r| r.get(0),
-        )?)
+        let seq = self
+            .conn
+            .prepare_cached(SQL_LAST_SEQ_AT_OR_BEFORE)
+            .and_then(|mut stmt| stmt.query_row(params![session_id, kind, mono_ns], |r| r.get(0)))
+            .map_err(Error::from)?;
+        Ok(seq)
     }
 
     pub fn event_counts(&self, session_id: &str) -> Result<Vec<KindCount>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT kind, COUNT(*), COALESCE(SUM(data_len), 0) FROM events
-             WHERE session_id = ?1 GROUP BY kind ORDER BY kind",
-        )?;
-        let rows = stmt
-            .query_map([session_id], |r| Ok(KindCount { kind: r.get(0)?, count: r.get(1)?, bytes: r.get(2)? }))?
-            .collect::<Result<_, _>>()?;
+        let rows = self
+            .conn
+            .prepare_cached(SQL_EVENT_COUNTS)
+            .and_then(|mut stmt| {
+                stmt.query_map([session_id], |r| Ok(KindCount { kind: r.get(0)?, count: r.get(1)?, bytes: r.get(2)? }))?
+                    .collect::<rusqlite::Result<_>>()
+            })
+            .map_err(Error::from)?;
         Ok(rows)
     }
 
     pub fn delete_session(&mut self, id: &str) -> Result<Deletion> {
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM events WHERE session_id = ?1", [id])?;
-        tx.execute("DELETE FROM annotations WHERE session_id = ?1", [id])?;
-        tx.execute("DELETE FROM session_diffs WHERE session_id = ?1", [id])?;
-        tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
-        tx.commit()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(Error::from)?;
+        tx.execute("DELETE FROM events WHERE session_id = ?1", [id]).map_err(Error::from)?;
+        tx.execute("DELETE FROM annotations WHERE session_id = ?1", [id]).map_err(Error::from)?;
+        tx.execute("DELETE FROM session_diffs WHERE session_id = ?1", [id]).map_err(Error::from)?;
+        tx.execute("DELETE FROM sessions WHERE id = ?1", [id]).map_err(Error::from)?;
+        tx.commit().map_err(Error::from)?;
         self.checkpoint()
     }
 
     pub fn delete_orphan_events(&mut self) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let n = tx.execute("DELETE FROM events WHERE session_id NOT IN (SELECT id FROM sessions)", [])?;
-        tx.execute("DELETE FROM annotations WHERE session_id NOT IN (SELECT id FROM sessions)", [])?;
-        tx.execute("DELETE FROM session_diffs WHERE session_id NOT IN (SELECT id FROM sessions)", [])?;
-        tx.commit()?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(Error::from)?;
+        let n = tx
+            .execute("DELETE FROM events WHERE session_id NOT IN (SELECT id FROM sessions)", [])
+            .map_err(Error::from)?;
+        tx.execute("DELETE FROM annotations WHERE session_id NOT IN (SELECT id FROM sessions)", [])
+            .map_err(Error::from)?;
+        tx.execute("DELETE FROM session_diffs WHERE session_id NOT IN (SELECT id FROM sessions)", [])
+            .map_err(Error::from)?;
+        tx.commit().map_err(Error::from)?;
         Ok(n)
     }
 
     /// Stores the diff of the work tree at session end, so outcomes can be measured after the work tree changes.
-    pub fn put_session_diff(&self, session_id: &str, base: &str, diff: &[u8]) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO session_diffs (session_id, base, diff, created_at_ns) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, base, diff, now_unix_ns()],
-        )?;
+    pub fn put_session_diff(&self, session_id: &str, base: &str, diff: &[u8], at_ns: i64) -> Result<()> {
+        self.execute_cached(SQL_PUT_SESSION_DIFF, params![session_id, base, diff, at_ns])?;
         Ok(())
     }
 
     pub fn session_diff(&self, session_id: &str) -> Result<Option<SessionDiffRow>> {
-        Ok(self
+        let row = self
             .conn
-            .query_row("SELECT base, diff FROM session_diffs WHERE session_id = ?1", [session_id], |r| {
-                Ok(SessionDiffRow { base: r.get(0)?, diff: r.get(1)? })
+            .prepare_cached(SQL_SESSION_DIFF)
+            .and_then(|mut stmt| {
+                stmt.query_row([session_id], |r| Ok(SessionDiffRow { base: r.get(0)?, diff: r.get(1)? })).optional()
             })
-            .optional()?)
+            .map_err(Error::from)?;
+        Ok(row)
     }
 
-    pub fn set_annotation(&self, session_id: &str, moment: &str, verdict: &str, note: Option<&str>) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO annotations (session_id, moment, verdict, note, updated_at_ns)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, moment, verdict, note, now_unix_ns()],
-        )?;
+    pub fn set_annotation(
+        &self,
+        session_id: &str,
+        moment: &str,
+        verdict: &str,
+        note: Option<&str>,
+        at_ns: i64,
+    ) -> Result<()> {
+        self.execute_cached(SQL_SET_ANNOTATION, params![session_id, moment, verdict, note, at_ns])?;
         Ok(())
     }
 
     pub fn clear_annotation(&self, session_id: &str, moment: &str) -> Result<bool> {
-        Ok(self.conn.execute("DELETE FROM annotations WHERE session_id = ?1 AND moment = ?2", [session_id, moment])?
-            > 0)
+        Ok(self.execute_cached(SQL_CLEAR_ANNOTATION, [session_id, moment])? > 0)
     }
 
     pub fn annotations(&self, session_id: &str) -> Result<Vec<Annotation>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT moment, verdict, note, updated_at_ns FROM annotations WHERE session_id = ?1 ORDER BY moment",
-        )?;
-        let rows = stmt
-            .query_map([session_id], |r| {
-                Ok(Annotation { moment: r.get(0)?, verdict: r.get(1)?, note: r.get(2)?, updated_at_ns: r.get(3)? })
-            })?
-            .collect::<Result<_, _>>()?;
+        let rows = self
+            .conn
+            .prepare_cached(SQL_ANNOTATIONS)
+            .and_then(|mut stmt| {
+                stmt.query_map([session_id], |r| {
+                    Ok(Annotation { moment: r.get(0)?, verdict: r.get(1)?, note: r.get(2)?, updated_at_ns: r.get(3)? })
+                })?
+                .collect::<rusqlite::Result<_>>()
+            })
+            .map_err(Error::from)?;
         Ok(rows)
     }
 
     pub fn checkpoint(&self) -> Result<Deletion> {
+        let busy = self.truncate_wal()?;
+        Ok(if busy == 0 { Deletion::Scrubbed } else { Deletion::WalPending })
+    }
+
+    fn truncate_wal(&self) -> Res<i64> {
         let mut vacuum = self.conn.prepare("PRAGMA incremental_vacuum")?;
         let mut freed = vacuum.query([])?;
         while freed.next()?.is_some() {}
         drop(freed);
         drop(vacuum);
-        let busy: i64 = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
-        Ok(if busy == 0 { Deletion::Scrubbed } else { Deletion::WalPending })
+        Ok(self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?)
+    }
+}
+
+struct Events<'a> {
+    store: &'a Store,
+    sql: String,
+    session_id: String,
+    kinds: Vec<String>,
+    last: i64,
+    page: std::vec::IntoIter<Event>,
+    done: bool,
+}
+
+impl Iterator for Events<'_> {
+    type Item = Result<Event>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(e) = self.page.next() {
+                self.last = e.seq;
+                return Some(Ok(e));
+            }
+            if self.done {
+                return None;
+            }
+            match self.store.page(&self.sql, &self.session_id, self.last, &self.kinds) {
+                Ok(page) => {
+                    self.done = page.len() < PAGE_ROWS;
+                    self.page = page.into_iter();
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e.into()));
+                }
+            }
+        }
     }
 }
 
@@ -628,6 +805,14 @@ CREATE TABLE events (
 ) WITHOUT ROWID;
 ";
 
+/// `SCHEMA` creates the tables as of this version; `MIGRATIONS` carries every later step.
+const SCHEMA_VERSION: i64 = 2;
+
+const MIGRATIONS: &[(i64, &str)] =
+    &[(2, MIGRATE_1_TO_2), (3, MIGRATE_2_TO_3), (4, MIGRATE_3_TO_4), (5, MIGRATE_4_TO_5), (6, MIGRATE_5_TO_6)];
+
+const _: () = assert!(MIGRATIONS[MIGRATIONS.len() - 1].0 == DB_USER_VERSION);
+
 const MIGRATE_1_TO_2: &str = "
 ALTER TABLE events ADD COLUMN data_len INTEGER NOT NULL DEFAULT 0;
 UPDATE events SET data_len = COALESCE(LENGTH(data), 0);
@@ -662,17 +847,22 @@ CREATE TABLE IF NOT EXISTS session_diffs (
 );
 ";
 
-const SESSION_COLS: &str = "id, command, cwd, status, created_at_ns, started_at_ns, ended_at_ns,
-    supervisor_pid, child_pid, exit_code, exit_signal, rows, cols, attached, record_output,
-    record_input, boot_time, lost_reason, restarted_from, agent_session_id, anchor_token_digest";
-
 fn row_to_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let command: String = r.get(1)?;
     Ok(Session {
         id: r.get(0)?,
         command: serde_json::from_str(&command).unwrap_or_else(|_| vec![command]),
         cwd: r.get(2)?,
-        status: Status::parse(&r.get::<_, String>(3)?),
+        status: {
+            let raw: String = r.get(3)?;
+            Status::parse(&raw).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    format!("unknown status {raw:?}").into(),
+                )
+            })?
+        },
         created_at_ns: r.get(4)?,
         started_at_ns: r.get(5)?,
         ended_at_ns: r.get(6)?,
@@ -800,9 +990,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("s.db")).unwrap();
         new_session(&store, "abc123");
-        store.set_annotation("abc123", "m-7", "again", None).unwrap();
-        store.set_annotation("abc123", "m-7", "differently", Some("should have run the tests")).unwrap();
-        store.set_annotation("abc123", "m-2", "unsure", None).unwrap();
+        store.set_annotation("abc123", "m-7", "again", None, 1).unwrap();
+        store.set_annotation("abc123", "m-7", "differently", Some("should have run the tests"), 2).unwrap();
+        store.set_annotation("abc123", "m-2", "unsure", None, 3).unwrap();
         let got: Vec<(String, String, Option<String>)> =
             store.annotations("abc123").unwrap().into_iter().map(|a| (a.moment, a.verdict, a.note)).collect();
         assert_eq!(
@@ -815,15 +1005,39 @@ mod tests {
         assert!(store.clear_annotation("abc123", "m-2").unwrap());
         assert!(!store.clear_annotation("abc123", "m-2").unwrap());
         assert!(store.session_diff("abc123").unwrap().is_none());
-        store.put_session_diff("abc123", "deadbeef", b"diff --git a/x b/x\nsecret-diff").unwrap();
+        store.put_session_diff("abc123", "deadbeef", b"diff --git a/x b/x\nsecret-diff", 4).unwrap();
         let row = store.session_diff("abc123").unwrap().unwrap();
         assert_eq!((row.base.as_str(), row.diff.len()), ("deadbeef", 30));
         store.delete_session("abc123").unwrap();
-        assert!(store.annotations("abc123").unwrap().is_empty());
+        assert_eq!(store.annotations("abc123").unwrap(), []);
         assert!(store.session_diff("abc123").unwrap().is_none());
         drop(store);
         let raw = std::fs::read(dir.path().join("s.db")).unwrap();
         assert!(!raw.windows(11).any(|w| w == b"secret-diff"));
+    }
+
+    #[test]
+    fn migrates_from_every_schema_version() {
+        for from in 1..DB_USER_VERSION {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("s.db");
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(&SCHEMA.replace("    data_len    INTEGER NOT NULL DEFAULT 0,\n", "")).unwrap();
+                for (to, sql) in MIGRATIONS.iter().filter(|(to, _)| *to <= from) {
+                    conn.execute_batch(sql).unwrap();
+                    conn.pragma_update(None, "user_version", to).unwrap();
+                }
+                conn.pragma_update(None, "user_version", from).unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            let v: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(v, DB_USER_VERSION, "from {from}");
+            new_session(&store, "abc123");
+            store.set_annotation("abc123", "m", "again", None, 1).unwrap();
+            store.put_session_diff("abc123", "base", b"d", 1).unwrap();
+            assert_eq!(store.session("abc123").unwrap().unwrap().anchor_token_digest, None);
+        }
     }
 
     #[test]
@@ -870,7 +1084,7 @@ mod tests {
         assert!(err.contains(&format!("opening event store {}", path.display())), "{err}");
         assert!(err.contains(&format!("store schema {}", DB_USER_VERSION + 1)), "{err}");
         assert!(err.contains(&format!("this binary is {}", env!("CARGO_PKG_VERSION"))), "{err}");
-        assert!(err.contains("cargo install witnessed --locked"), "{err}");
+        assert!(err.contains("update this binary with install.sh"), "{err}");
         let v: i64 = Connection::open(&path).unwrap().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(v, DB_USER_VERSION + 1);
     }
@@ -964,7 +1178,7 @@ mod tests {
         store
             .for_each_event("abc123", None, |e| {
                 seen += 1;
-                if e.seq % PAGE_ROWS == PAGE_ROWS - 1 {
+                if e.seq % 256 == 255 {
                     other.conn.execute("UPDATE sessions SET rows = rows WHERE id = 'abc123'", []).unwrap();
                     checkpoint_busy.push(other.checkpoint().unwrap());
                 }
@@ -1020,5 +1234,129 @@ mod tests {
         assert_eq!(store.session("abc123").unwrap().unwrap().status, Status::Exited);
         store.mark_started("abc123", 9, 9).unwrap();
         assert_eq!(store.session("abc123").unwrap().unwrap().child_pid, None);
+    }
+
+    #[test]
+    fn every_error_variant_displays_its_message() {
+        let path = PathBuf::from("/tmp/state.db");
+        let cases: Vec<(Error, String)> = vec![
+            (Error::Busy, "database is locked".into()),
+            (
+                Error::Corrupt { path: path.clone() },
+                "event store /tmp/state.db is corrupt; move it aside to start a new one \
+                 (existing recordings stay in the moved file)"
+                    .into(),
+            ),
+            (
+                Error::NewerSchema { found: 9, supported: 6, binary: "0.4.0" },
+                "written by a newer witnessed (store schema 9; this binary is 0.4.0 and reads up to schema 6); \
+                 update this binary with install.sh, then run the command again; the store was not changed"
+                    .into(),
+            ),
+            (Error::InvalidId("a%".into()), "invalid session id \"a%\"".into()),
+            (
+                Error::NotFound("zz".into()),
+                "no session matches \"zz\"; run `witnessed sessions` to list sessions".into(),
+            ),
+            (
+                Error::Ambiguous { prefix: "ab".into(), ids: vec!["abc123".into(), "abd456".into()] },
+                "\"ab\" is ambiguous: abc123, abd456".into(),
+            ),
+            (Error::NoSessions, "no sessions yet; record one with: witnessed run -- claude".into()),
+            (Error::Sqlite(rusqlite::Error::QueryReturnedNoRows), rusqlite::Error::QueryReturnedNoRows.to_string()),
+            (
+                Error::Json(serde_json::from_str::<Value>("{").unwrap_err()),
+                serde_json::from_str::<Value>("{").unwrap_err().to_string(),
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(e.to_string(), want);
+            assert_eq!(e.is_transient(), matches!(e, Error::Busy), "{e}");
+        }
+    }
+
+    #[test]
+    fn resolve_failures_downcast_to_the_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("s.db")).unwrap();
+        let e = store.resolve("last").unwrap_err();
+        assert!(matches!(e.downcast_ref::<Error>(), Some(Error::NoSessions)), "{e:#}");
+        new_session(&store, "abc123");
+        new_session(&store, "abd456");
+        let e = store.resolve("ab").unwrap_err();
+        match e.downcast_ref::<Error>() {
+            Some(Error::Ambiguous { prefix, ids }) => assert_eq!((prefix.as_str(), ids.len()), ("ab", 2)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(e.to_string(), "\"ab\" is ambiguous: abc123, abd456");
+        let e = store.resolve("zz").unwrap_err();
+        assert!(matches!(e.downcast_ref::<Error>(), Some(Error::NotFound(id)) if id == "zz"), "{e:#}");
+        let e = store.resolve("a%").unwrap_err();
+        assert!(matches!(e.downcast_ref::<Error>(), Some(Error::InvalidId(id)) if id == "a%"), "{e:#}");
+        assert!(!is_transient(&e));
+    }
+
+    #[test]
+    fn open_failures_downcast_to_corrupt_and_newer_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        std::fs::write(&path, vec![0x5a; 8192]).unwrap();
+        let e = Store::open(&path).err().expect("corrupt store must not open");
+        assert!(matches!(e.downcast_ref::<Error>(), Some(Error::Corrupt { path: p }) if *p == path), "{e:#}");
+        let path = dir.path().join("n.db");
+        drop(Store::open(&path).unwrap());
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", DB_USER_VERSION + 1).unwrap();
+        let e = Store::open(&path).err().expect("a newer store must not open");
+        assert!(
+            matches!(
+                e.downcast_ref::<Error>(),
+                Some(Error::NewerSchema { found, supported, .. }) if *found == DB_USER_VERSION + 1 && *supported == DB_USER_VERSION
+            ),
+            "{e:#}"
+        );
+    }
+
+    #[test]
+    fn a_write_against_an_exclusive_lock_is_a_transient_busy_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let mut store = Store::open(&path).unwrap();
+        new_session(&store, "abc123");
+        store.conn.busy_timeout(Duration::from_millis(20)).unwrap();
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let e = store.append_events("abc123", 0, &[ev(1, b"x")]).unwrap_err();
+        assert!(matches!(e.downcast_ref::<Error>(), Some(Error::Busy)), "{e:#}");
+        assert!(is_transient(&e));
+        let e = store.set_attached("abc123", true).unwrap_err();
+        assert!(is_transient(&e), "{e:#}");
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(store.append_events("abc123", 0, &[ev(1, b"x")]).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_reader_paging_under_a_writer_sees_a_contiguous_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let mut store = Store::open(&path).unwrap();
+        new_session(&store, "abc123");
+        let first: Vec<NewEvent> = (0..300).map(|i| ev(i, b"x")).collect();
+        let mut next = store.append_events("abc123", 0, &first).unwrap();
+        let mut writer = Store::open(&path).unwrap();
+        let mut seqs = Vec::new();
+        for e in store.events("abc123", -1, None) {
+            let e = e.unwrap();
+            seqs.push(e.seq);
+            if e.seq % 256 == 255 && next < 1500 {
+                let more: Vec<NewEvent> = (0..256).map(|i| ev(next + i, b"y")).collect();
+                next = writer.append_events("abc123", next, &more).unwrap();
+            }
+        }
+        assert_eq!(seqs, (0..next).collect::<Vec<_>>());
+        assert!(next > 300, "{next}");
+        let filtered: Vec<i64> =
+            store.events("abc123", 1000, Some(&[kind::TERMINAL_OUTPUT])).map(|e| e.unwrap().seq).collect();
+        assert_eq!(filtered, (1001..next).collect::<Vec<_>>());
+        assert_eq!(store.events("abc123", 0, Some(&[kind::USER_MARK])).count(), 0);
     }
 }

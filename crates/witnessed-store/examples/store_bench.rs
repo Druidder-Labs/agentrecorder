@@ -1,3 +1,5 @@
+#![allow(clippy::cast_precision_loss, reason = "rates printed for a human")]
+
 use std::time::Instant;
 
 use witnessed_store::{Body, NewEvent, NewSession, Store};
@@ -25,13 +27,8 @@ fn main() -> anyhow::Result<()> {
         anchor_token_digest: None,
     })?;
     let payload = vec![b'x'; size];
-    let events: Vec<NewEvent> = (0..batch)
-        .map(|i| NewEvent {
-            ts_ns: i as i64,
-            mono_ns: i as i64,
-            body: Body::TerminalOutput,
-            data: Some(payload.clone()),
-        })
+    let events: Vec<NewEvent> = (0..i64::try_from(batch)?)
+        .map(|i| NewEvent { ts_ns: i, mono_ns: i, body: Body::TerminalOutput, data: Some(payload.clone()) })
         .collect();
     let start = Instant::now();
     let mut seq = 0;
@@ -49,12 +46,12 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     })?;
     let read = start.elapsed().as_secs_f64();
-    let mb = (n * size) as f64 / (1 << 20) as f64;
+    let mb = (n * size) as f64 / f64::from(1 << 20);
     println!(
         "{{\"events\": {n}, \"event_bytes\": {size}, \"batch\": {batch}, \"write_s\": {write:.3}, \"write_events_per_s\": {:.0}, \"write_mib_per_s\": {:.1}, \"read_s\": {read:.3}, \"read_mib_per_s\": {:.1}}}",
         n as f64 / write,
         mb / write,
-        (read_bytes as f64 / (1 << 20) as f64) / read
+        (read_bytes as f64 / f64::from(1 << 20)) / read
     );
     Ok(())
 }

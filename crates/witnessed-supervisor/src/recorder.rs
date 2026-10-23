@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -41,6 +42,7 @@ pub struct Counters {
     pending_dropped_events: AtomicU64,
     pending_dropped_bytes: AtomicU64,
     queued_bytes: AtomicU64,
+    shutdown: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -68,7 +70,7 @@ impl Recorder {
         session_id: String,
         start: Instant,
         opts: Options,
-    ) -> (Recorder, RecorderThread) {
+    ) -> io::Result<(Self, RecorderThread)> {
         let (tx, rx) = bounded(QUEUE_CAPACITY);
         let counters = Arc::new(Counters::default());
         let worker = Worker {
@@ -80,14 +82,12 @@ impl Recorder {
             start,
             max_record_bytes: opts.max_record_bytes,
             recorded_bytes: 0,
+            batch_bytes: 0,
             terminated: false,
         };
-        let handle = std::thread::Builder::new()
-            .name("recorder".into())
-            .spawn(move || worker.run())
-            .expect("spawning recorder thread");
-        let rec = Recorder { tx, start, counters, record_output: opts.record_output, record_input: opts.record_input };
-        (rec, RecorderThread { handle })
+        let handle = std::thread::Builder::new().name("recorder".into()).spawn(move || worker.run())?;
+        let rec = Self { tx, start, counters, record_output: opts.record_output, record_input: opts.record_input };
+        Ok((rec, RecorderThread { handle }))
     }
 
     pub fn mono_ns(&self) -> i64 {
@@ -114,11 +114,14 @@ impl Recorder {
         self.send_bulk(ev, data.len());
     }
 
+    fn has_bulk_room(&self, bytes: usize) -> bool {
+        self.tx.len() < QUEUE_CAPACITY - LIFECYCLE_HEADROOM
+            && self.counters.queued_bytes.load(Ordering::Relaxed) + bytes as u64 <= QUEUE_BYTES
+    }
+
     fn send_bulk(&self, ev: NewEvent, bytes: usize) -> bool {
         let queued = &self.counters.queued_bytes;
-        if self.tx.len() >= QUEUE_CAPACITY - LIFECYCLE_HEADROOM
-            || queued.load(Ordering::Relaxed) + bytes as u64 > QUEUE_BYTES
-        {
+        if !self.has_bulk_room(bytes) {
             self.count_drop(bytes);
             return false;
         }
@@ -154,7 +157,12 @@ impl Recorder {
         self.record_output && !self.counters.output_disabled.load(Ordering::Relaxed)
     }
 
+    /// Lifecycle metadata takes any free slot; `Meta::Size` is client-driven and stays out of the lifecycle headroom.
     pub fn meta(&self, m: Meta) {
+        if matches!(m, Meta::Size(..)) && !self.has_bulk_room(0) {
+            self.count_drop(0);
+            return;
+        }
         if self.tx.try_send(Msg::Meta(m)).is_err() {
             self.count_drop(0);
         }
@@ -175,7 +183,10 @@ impl Recorder {
 }
 
 impl RecorderThread {
+    /// Returns once the worker has written what the store accepts: the shutdown flag ends the worker after its
+    /// current batch even when the queue is full and `Msg::Shutdown` cannot be enqueued.
     pub fn finish(self, recorder: Recorder) {
+        recorder.counters.shutdown.store(true, Ordering::Relaxed);
         let _ = recorder.tx.send_timeout(Msg::Shutdown, Duration::from_secs(5));
         drop(recorder);
         let _ = self.handle.join();
@@ -191,42 +202,24 @@ struct Worker {
     start: Instant,
     max_record_bytes: u64,
     recorded_bytes: u64,
+    batch_bytes: usize,
     terminated: bool,
 }
 
 impl Worker {
     fn run(mut self) {
         let mut batch: Vec<NewEvent> = Vec::with_capacity(BATCH_MAX);
+        let mut healthy = true;
         while let Ok(first) = self.rx.recv() {
             let deadline = Instant::now() + BATCH_WINDOW;
             let mut next = Some(first);
             let mut disconnected = false;
             while let Some(msg) = next.take() {
-                match msg {
-                    Msg::Event(ev) => {
-                        if matches!(ev.body, Body::TerminalOutput | Body::TerminalInput) {
-                            let len = ev.data.as_ref().map_or(0, Vec::len) as u64;
-                            self.counters.queued_bytes.fetch_sub(len, Ordering::Relaxed);
-                        }
-                        self.push(&mut batch, *ev);
-                    }
-                    Msg::Meta(m) => {
-                        self.flush(&mut batch);
-                        self.apply_meta(m);
-                    }
-                    Msg::Flush(ack) => {
-                        self.report_drops(&mut batch);
-                        self.flush(&mut batch);
-                        let _ = ack.send(());
-                    }
-                    Msg::Shutdown => {
-                        disconnected = true;
-                        break;
-                    }
+                if self.handle(&mut batch, msg) {
+                    disconnected = true;
+                    break;
                 }
-                if batch.len() >= BATCH_MAX
-                    || batch.iter().map(|e| e.data.as_ref().map_or(0, Vec::len)).sum::<usize>() >= BATCH_BYTES
-                {
+                if self.batch_full(&batch) {
                     break;
                 }
                 match self.rx.recv_deadline(deadline) {
@@ -236,13 +229,61 @@ impl Worker {
                 }
             }
             self.report_drops(&mut batch);
-            self.flush(&mut batch);
+            healthy = self.flush(&mut batch);
             if disconnected {
                 break;
             }
+            if self.counters.shutdown.load(Ordering::Relaxed) {
+                if healthy {
+                    self.drain(&mut batch);
+                }
+                break;
+            }
         }
-        self.report_drops(&mut batch);
-        self.flush(&mut batch);
+        if healthy {
+            self.report_drops(&mut batch);
+            self.flush(&mut batch);
+        }
+    }
+
+    /// Applies one message to the batch; true when the worker must stop.
+    fn handle(&mut self, batch: &mut Vec<NewEvent>, msg: Msg) -> bool {
+        match msg {
+            Msg::Event(ev) => {
+                if matches!(ev.body, Body::TerminalOutput | Body::TerminalInput) {
+                    let len = ev.data.as_ref().map_or(0, Vec::len) as u64;
+                    self.counters.queued_bytes.fetch_sub(len, Ordering::Relaxed);
+                }
+                self.push(batch, *ev);
+            }
+            Msg::Meta(m) => {
+                self.flush(batch);
+                self.apply_meta(m);
+            }
+            Msg::Flush(ack) => {
+                self.report_drops(batch);
+                self.flush(batch);
+                let _ = ack.send(());
+            }
+            Msg::Shutdown => return true,
+        }
+        false
+    }
+
+    fn batch_full(&self, batch: &[NewEvent]) -> bool {
+        batch.len() >= BATCH_MAX || self.batch_bytes >= BATCH_BYTES
+    }
+
+    /// After `finish` with a healthy store: takes what is already queued without waiting for more.
+    fn drain(&mut self, batch: &mut Vec<NewEvent>) {
+        while let Ok(msg) = self.rx.try_recv() {
+            if self.handle(batch, msg) {
+                return;
+            }
+            if self.batch_full(batch) {
+                self.flush(batch);
+            }
+        }
     }
 
     fn push(&mut self, batch: &mut Vec<NewEvent>, ev: NewEvent) {
@@ -278,10 +319,12 @@ impl Worker {
                 let new_data = ev.data.as_ref().expect("output events carry data");
                 if last_data.len() + new_data.len() <= COALESCE_MAX_BYTES {
                     last_data.extend_from_slice(new_data);
+                    self.batch_bytes += new_data.len();
                     return;
                 }
             }
         }
+        self.batch_bytes += ev.data.as_ref().map_or(0, Vec::len);
         batch.push(ev);
     }
 
@@ -314,12 +357,15 @@ impl Worker {
         }
     }
 
-    fn flush(&mut self, batch: &mut Vec<NewEvent>) {
+    /// Writes the batch; false when the store rejected it after the retry window.
+    fn flush(&mut self, batch: &mut Vec<NewEvent>) -> bool {
+        self.batch_bytes = 0;
         if batch.is_empty() {
-            return;
+            return true;
         }
         let n = batch.len() as u64;
         let (id, seq) = (self.session_id.clone(), self.next_seq);
+        let mut persisted = true;
         if let Some(store) = self.store.as_mut() {
             match with_retry(STORE_RETRY_FOR, || store.append_events(&id, seq, batch)) {
                 Ok(next) => {
@@ -329,10 +375,12 @@ impl Worker {
                 Err(e) => {
                     eprintln!("witnessed supervisor: failed to persist {n} events: {e:#}");
                     self.counters.dropped_events.fetch_add(n, Ordering::Relaxed);
+                    persisted = false;
                 }
             }
         }
         batch.clear();
+        persisted
     }
 
     fn apply_meta(&mut self, m: Meta) {
@@ -391,6 +439,22 @@ mod tests {
         store
     }
 
+    fn spawn(store: Store, max_record_bytes: u64) -> (Recorder, RecorderThread) {
+        Recorder::spawn(
+            Some(store),
+            "abc123".into(),
+            Instant::now(),
+            Options { record_output: true, record_input: false, max_record_bytes },
+        )
+        .unwrap()
+    }
+
+    fn lock(dir: &std::path::Path) -> rusqlite::Connection {
+        let blocker = rusqlite::Connection::open(dir.join("s.db")).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        blocker
+    }
+
     fn collect(dir: &std::path::Path) -> Vec<witnessed_store::Event> {
         let store = Store::open(&dir.join("s.db")).unwrap();
         let mut out = vec![];
@@ -403,15 +467,19 @@ mod tests {
         out
     }
 
+    fn terminated() -> Body {
+        Body::SessionTerminated {
+            reason: witnessed_store::TerminationReason::ProcessExited,
+            exit_code: Some(0),
+            signal: None,
+            dropped_events: 0,
+        }
+    }
+
     #[test]
     fn coalesces_output_and_preserves_order() {
         let dir = tempfile::tempdir().unwrap();
-        let (rec, th) = Recorder::spawn(
-            Some(open(dir.path())),
-            "abc123".into(),
-            Instant::now(),
-            Options { record_output: true, record_input: false, max_record_bytes: u64::MAX },
-        );
+        let (rec, th) = spawn(open(dir.path()), u64::MAX);
         rec.event(Body::ProcessStarted { pid: 1, command: vec![] });
         for i in 0..100u8 {
             rec.output(&[i]);
@@ -430,12 +498,7 @@ mod tests {
     #[test]
     fn stops_recording_at_byte_limit_with_warning() {
         let dir = tempfile::tempdir().unwrap();
-        let (rec, th) = Recorder::spawn(
-            Some(open(dir.path())),
-            "abc123".into(),
-            Instant::now(),
-            Options { record_output: true, record_input: false, max_record_bytes: 10 },
-        );
+        let (rec, th) = spawn(open(dir.path()), 10);
         rec.output(b"12345");
         rec.output(b"67890");
         rec.output(b"overflow");
@@ -448,27 +511,15 @@ mod tests {
 
     #[test]
     fn lifecycle_events_survive_a_stalled_store_and_terminated_stays_last() {
-        use witnessed_store::TerminationReason;
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
-        let blocker = rusqlite::Connection::open(dir.path().join("s.db")).unwrap();
-        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        let (rec, th) = Recorder::spawn(
-            Some(store),
-            "abc123".into(),
-            Instant::now(),
-            Options { record_output: true, record_input: false, max_record_bytes: u64::MAX },
-        );
+        let blocker = lock(dir.path());
+        let (rec, th) = spawn(store, u64::MAX);
         for _ in 0..600 {
             rec.output(&[b'x'; 64 << 10]);
         }
         rec.event(Body::ProcessExited { pid: 1, exit_code: Some(0), signal: None, duration_ms: 1 });
-        rec.event(Body::SessionTerminated {
-            reason: TerminationReason::ProcessExited,
-            exit_code: Some(0),
-            signal: None,
-            dropped_events: 0,
-        });
+        rec.event(terminated());
         let dropped = rec.counters.dropped_events.load(Ordering::Relaxed);
         assert!(dropped > 0);
         std::thread::sleep(Duration::from_millis(300));
@@ -491,12 +542,7 @@ mod tests {
     fn events_with_data_that_are_not_output_do_not_disturb_the_byte_budget() {
         use witnessed_store::SnapshotReason;
         let dir = tempfile::tempdir().unwrap();
-        let (rec, th) = Recorder::spawn(
-            Some(open(dir.path())),
-            "abc123".into(),
-            Instant::now(),
-            Options { record_output: true, record_input: false, max_record_bytes: u64::MAX },
-        );
+        let (rec, th) = spawn(open(dir.path()), u64::MAX);
         rec.event_with_data(
             Body::TerminalSnapshot { rows: 24, cols: 80, reason: SnapshotReason::Interval },
             vec![b's'; 4096],
@@ -513,13 +559,7 @@ mod tests {
     #[test]
     fn full_queue_drops_output_without_blocking_and_reports_it() {
         let dir = tempfile::tempdir().unwrap();
-        let store = open(dir.path());
-        let (rec, th) = Recorder::spawn(
-            Some(store),
-            "abc123".into(),
-            Instant::now(),
-            Options { record_output: true, record_input: false, max_record_bytes: u64::MAX },
-        );
+        let (rec, th) = spawn(open(dir.path()), u64::MAX);
         let t = Instant::now();
         for _ in 0..(QUEUE_CAPACITY * 20) {
             rec.output(&[b'x'; 1024]);
@@ -536,5 +576,47 @@ mod tests {
                 .sum();
             assert_eq!(reported, dropped);
         }
+    }
+
+    #[test]
+    fn a_resize_flood_leaves_the_lifecycle_headroom_for_termination() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let blocker = lock(dir.path());
+        let (rec, th) = spawn(store, u64::MAX);
+        for i in 0..QUEUE_CAPACITY as u16 {
+            rec.best_effort(Body::TerminalResized { rows: 24, cols: 80 + (i % 2) });
+            rec.meta(Meta::Size(24, 80 + (i % 2)));
+        }
+        assert!(rec.tx.len() <= QUEUE_CAPACITY - LIFECYCLE_HEADROOM);
+        assert!(rec.counters.dropped_events.load(Ordering::Relaxed) > 0);
+        rec.event(terminated());
+        blocker.execute_batch("COMMIT").unwrap();
+        drop(blocker);
+        th.finish(rec);
+        let events = collect(dir.path());
+        assert_eq!(events.last().unwrap().kind, kind::SESSION_TERMINATED);
+    }
+
+    #[test]
+    fn finish_returns_while_the_store_stays_locked_and_the_queue_is_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let blocker = lock(dir.path());
+        let (rec, th) = spawn(store, u64::MAX);
+        let holder = rec.clone();
+        while rec.tx.try_send(Msg::Event(Box::new(rec.new_event(Body::UserMark { label: "m".into() }, None)))).is_ok() {
+        }
+        assert!(rec.tx.is_full());
+        let joined = std::thread::spawn(move || th.finish(rec));
+        let budget = STORE_RETRY_FOR + Duration::from_secs(30);
+        let t = Instant::now();
+        while !joined.is_finished() && t.elapsed() < budget {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(joined.is_finished(), "finish did not return within {budget:?}");
+        joined.join().unwrap();
+        drop(holder);
+        blocker.execute_batch("COMMIT").unwrap();
     }
 }
