@@ -1,0 +1,78 @@
+diff --git a/README b/README
+index 980a0d5..868fa73 100644
+--- a/README
++++ b/README
+@@ -1 +1,12 @@
+ Hello World!
++
++Run:
++
++    python3 hello.py              # Hello, World!
++    python3 hello.py Ana          # Hello, Ana!
++    python3 hello.py --name Ada   # Hello, Ada!
++    ./hello.py                    # same, without typing python3
++
++Test:
++
++    python3 -m unittest -v hello
+diff --git a/hello.py b/hello.py
+new file mode 100755
+index 0000000..5fcef6c
+--- /dev/null
++++ b/hello.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++import argparse
++import contextlib
++import io
++import sys
++import unittest
++
++
++def greet(name="World"):
++    return f"Hello, {name}!"
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description="Print a greeting.")
++    group = parser.add_mutually_exclusive_group()
++    group.add_argument("name", nargs="?", help="who to greet (default: World)")
++    group.add_argument("--name", dest="name_opt", metavar="NAME", help="same as the positional name")
++    args = parser.parse_args(argv)
++    print(greet(args.name or args.name_opt or "World"))
++    return 0
++
++
++class GreetTest(unittest.TestCase):
++    def test_default(self):
++        self.assertEqual(greet(), "Hello, World!")
++
++    def test_name(self):
++        self.assertEqual(greet("Ana"), "Hello, Ana!")
++
++
++class MainTest(unittest.TestCase):
++    def run_main(self, argv):
++        out = io.StringIO()
++        with contextlib.redirect_stdout(out):
++            code = main(argv)
++        return code, out.getvalue()
++
++    def test_no_args(self):
++        self.assertEqual(self.run_main([]), (0, "Hello, World!\n"))
++
++    def test_with_name(self):
++        self.assertEqual(self.run_main(["Ana"]), (0, "Hello, Ana!\n"))
++
++    def test_with_name_flag(self):
++        self.assertEqual(self.run_main(["--name", "Ada"]), (0, "Hello, Ada!\n"))
++
++    def test_both_forms_rejected(self):
++        with contextlib.redirect_stderr(io.StringIO()):
++            with self.assertRaises(SystemExit) as ctx:
++                main(["Ana", "--name", "Ada"])
++        self.assertEqual(ctx.exception.code, 2)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
