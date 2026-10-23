@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/Druidder-Labs/witnessed/compare/v0.4.0...v0.5.0) (2026-10-23)
+
+
+### Features
+
+* rename agentrecorder to witnessed and add decision review ([c5a430d](https://github.com/Druidder-Labs/witnessed/commit/c5a430de2b1603e1a3e0f7534d92c161cf5d98ca))
+
+
+### Bug Fixes
+
+* **cli:** drop libc conversions that are no-ops on Linux ([e143229](https://github.com/Druidder-Labs/witnessed/commit/e14322932d169e97ef6c6853035bc2112a282daf))
+* **supervisor:** cast TIOCSCTTY instead of into() for Linux clippy ([b078f9c](https://github.com/Druidder-Labs/witnessed/commit/b078f9ced41ac2b2bf97ec199d7a48ee9af843be))
+
 ## [0.4.0](https://github.com/Druidder-Labs/agentrecorder/compare/v0.3.0...v0.4.0) (2026-10-22)
 
 
