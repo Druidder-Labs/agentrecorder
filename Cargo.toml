@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/witnessed-store", "crates/witnessed-supervisor", "crates/witnessed-assurance", "crates/witnessed-cli"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -13,9 +13,9 @@ keywords = ["terminal", "pty", "agents", "session", "replay"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
-witnessed-store = { path = "crates/witnessed-store", version = "0.5.0" }
-witnessed-supervisor = { path = "crates/witnessed-supervisor", version = "0.5.0" }
-witnessed-assurance = { path = "crates/witnessed-assurance", version = "0.5.0" }
+witnessed-store = { path = "crates/witnessed-store", version = "0.6.0" }
+witnessed-supervisor = { path = "crates/witnessed-supervisor", version = "0.6.0" }
+witnessed-assurance = { path = "crates/witnessed-assurance", version = "0.6.0" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive", "env"] }

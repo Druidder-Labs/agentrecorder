@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/Druidder-Labs/witnessed/compare/v0.5.0...v0.6.0) (2026-10-23)
+
+
+### Features
+
+* **assurance:** verify agent changes against signed evidence and policy ([8cc5a7b](https://github.com/Druidder-Labs/witnessed/commit/8cc5a7b429a96dd96c52884de1d47726ca5356f1))
+* **assurance:** verify agent changes against signed evidence and policy ([10d0cd5](https://github.com/Druidder-Labs/witnessed/commit/10d0cd54819d8f5c6bdaec765dea4c68bb4e5f15))
+
+
+### Bug Fixes
+
+* **review:** end approval waits when the permission dialog closes ([2468725](https://github.com/Druidder-Labs/witnessed/commit/24687259ab45c4c9dfcb85d44ed89e253f456e72))
+* **review:** measure approval waits from the tool run and the transcript ([35e1be6](https://github.com/Druidder-Labs/witnessed/commit/35e1be6f7adcdb09c23f9e3eca85a94cb9aa732a))
+
 ## [0.5.0](https://github.com/Druidder-Labs/witnessed/compare/v0.4.0...v0.5.0) (2026-10-23)
 
 
