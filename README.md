@@ -36,6 +36,8 @@ witnessed verify ~/witnessed-a91f2c.zip
 
 `witnessed view` opens any session in your browser.
 
+See a recorded session: https://druidder-labs.github.io/witnessed/. Its `hello-world.zip` and `anchors.jsonl` are next to it, so `witnessed verify hello-world.zip --anchors anchors.jsonl` checks it.
+
 ## How it works
 
 - **Record.** A supervised terminal records every byte with timing in one local SQLite file. No daemon, no account, nothing leaves your machine. Claude Code gets the deepest integration: tool calls, approvals, refusals, tokens. Codex CLI, Gemini CLI, OpenCode and any other program are recorded as terminals.
