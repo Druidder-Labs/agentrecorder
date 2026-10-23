@@ -22,7 +22,7 @@ use witnessed_supervisor::Layout;
 pub const SESSION_HELP: &str = "Session id, a unique prefix of it, or `last` for the most recent session";
 pub const DEFAULT_DETACH_KEY: &str = "ctrl-\\";
 pub const DEFAULT_MAX_RECORD_MB: u64 = 256;
-pub static USER_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+pub static USER_UMASK: std::sync::OnceLock<nix::libc::mode_t> = std::sync::OnceLock::new();
 
 #[derive(Parser)]
 #[command(
@@ -119,7 +119,7 @@ struct SuperviseArgs {
 
 fn main() -> ExitCode {
     let previous = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
-    let _ = USER_UMASK.set(u32::from(previous.bits()));
+    let _ = USER_UMASK.set(previous.bits());
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),

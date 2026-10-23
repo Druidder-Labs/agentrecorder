@@ -229,7 +229,7 @@ fn spawn_in_pty(argv: &[String], rows: u16, cols: u16, env: &[(&str, &str)]) -> 
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
-            libc::ioctl(0, libc::TIOCSCTTY.into(), 0);
+            libc::ioctl(0, libc::TIOCSCTTY as _, 0);
             Ok(())
         });
     }
