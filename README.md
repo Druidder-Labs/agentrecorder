@@ -46,6 +46,10 @@ See a recorded session: https://druidder-labs.github.io/witnessed/. Its `hello-w
 
 It records the terminal it runs in. It does not see other windows, devices or people.
 
+## Verify a change before it merges
+
+`witnessed verify-change` decides whether a commit's evidence satisfies a policy: signed CI results (in-toto attestations in DSSE envelopes) for that exact commit, independent human approvals from the pull request, and a Rego policy read from the base branch. It answers `VERIFIED`, `REJECTED` or `INCONCLUSIVE`, with a report that names every requirement and piece of evidence, and runs as a required check in GitHub Actions. Missing evidence is never an approval. See [docs/assurance/](docs/assurance/product-vision.md) and `examples/assurance/demo.sh`.
+
 ## Privacy
 
 Terminal output is recorded by default, keyboard input only with `--record-input`, and the code diff at session end so outcomes can be measured. `--no-record` turns all of it off. Environment variables are never stored. Recordings are private to your user and deleted after 30 days. Threat model: [docs/security.md](docs/security.md).
@@ -56,6 +60,7 @@ Terminal output is recorded by default, keyboard input only with `--record-input
 - [Architecture](docs/architecture.md)
 - [Event model and bundle format](docs/event-model.md)
 - [Security](docs/security.md)
+- Change assurance: [vision](docs/assurance/product-vision.md), [architecture](docs/assurance/architecture.md), [evidence model](docs/assurance/evidence-model.md), [threat model](docs/assurance/threat-model.md), [guarantees](docs/assurance/security-guarantees.md), [standards](docs/assurance/standards.md), [GitHub](docs/assurance/github.md), [roadmap](docs/assurance/roadmap.md)
 - [Performance](docs/performance.md)
 - [Releases](docs/release.md)
 

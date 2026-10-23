@@ -25,6 +25,11 @@
         },
         {
           "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies['witnessed-assurance'].version"
+        },
+        {
+          "type": "toml",
           "path": "Cargo.lock",
           "jsonpath": "$.package[?(@.name.value=='witnessed-cli')].version"
         },
@@ -37,6 +42,11 @@
           "type": "toml",
           "path": "Cargo.lock",
           "jsonpath": "$.package[?(@.name.value=='witnessed-supervisor')].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value=='witnessed-assurance')].version"
         }
       ]
     }

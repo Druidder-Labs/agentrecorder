@@ -12,6 +12,10 @@ Session ids accept unique prefixes; `last` (or `latest`) is the newest session a
 | `view DIR\|FILE.zip\|ID [--no-open]` | Open a bundle's dashboard as it was written, or write one for a finished session to `views/ID` (private to this user) with everything a bundle can hold: prompt text and code changes included, nothing redacted |
 | `bundle ID [-o DIR\|FILE] [--zip] [--force] [--redact REGEX]... [--redact-literal TEXT]... [--redact-secrets] [--cut FROM-TO]... [--prompts] [--diff] [--annotations] [--dry-run] [--json]` | Write `~/witnessed-ID/` (or `~/witnessed-ID.zip`): `index.html`, `session.cast`, `events.jsonl`, `chain.jsonl`, `manifest.json`, and `diff.patch` with `--diff`. `--prompts` adds each prompt's text; `--diff` adds the code changes and their outcome; `--annotations` adds your verdicts from `review`. `--dry-run` lists what would change and writes nothing |
 | `verify DIR\|FILE.zip [--anchors FILE] [--token T] [--json]` | Check file digests, the hash chain, every anchor, and that the genesis is the token's SHA-256. Exit 0 when all pass |
+| `verify-change --commit SHA --base REF --policy DIR [--policy-ref REF] [--repository OWNER/NAME] [--attestation FILE\|DIR]... [--pull-request FILE] [--session BUNDLE [--session-anchors FILE]] [--format text\|json\|markdown\|intoto] [-o FILE] [--summary FILE] [--repo DIR]` | Decide whether a commit's evidence satisfies a Rego policy: `VERIFIED` (exit 0), `REJECTED` (1), `INCONCLUSIVE` (3), `ERROR` (4). See [Verifying a change](#verifying-a-change) |
+| `attest test-result --commit SHA --result passed\|warned\|failed [--passed\|--warned\|--failed CHECK]... [--url URL] [--configuration PATH]... --key FILE\|--key-env VAR [--keyid ID] [-o FILE]` | Write an in-toto test-result attestation for a full commit id, signed as a DSSE envelope with a P-256 PKCS#8 key |
+| `attest sign STATEMENT --key FILE\|--key-env VAR [-o FILE]`, `attest verify ENVELOPE --public-key FILE... [--commit SHA]` | Sign any in-toto Statement v1; check an envelope against public keys and, with `--commit`, its subject. `verify` exits 1 on any failure |
+| `collect github-pr --repository OWNER/NAME --number N [-o FILE]` | Snapshot a pull request's head, commits and reviews through `gh api`, without bodies or review text. Exit 4 and no file when `gh` fails; `WITNESSED_GH` names another `gh` binary |
 | `sessions [--json]` (alias `ls`) | List sessions: id, start, status, duration, exit, directory, command |
 | `attach ID [--detach-key K]` | Attach this terminal. Detach with `Ctrl-\` (`--detach-key ctrl-a`, `none`, or `WITNESSED_DETACH_KEY`) |
 | `detach ID` | Detach whichever client is attached |
@@ -85,6 +89,18 @@ What `verify` proves:
 `--json` carries `proves` and `gaps`. No bundle shows what happened outside the recorded terminal.
 
 `bundle` refuses a running session and an existing output unless `--force`. `anchor` and `bundle` must run the same `witnessed` version.
+
+## Verifying a change
+
+`verify-change` judges one commit before it merges. It lists the paths changed since the merge base with `--base`, reads the policy from the git tree at `--policy-ref` (or a directory without it), checks each attestation's DSSE signature against the policy's `keys/*.pub.pem` and its in-toto subject against the commit, reads reviewer facts from a `collect github-pr` snapshot, and evaluates the Rego package `witnessed.change`. Evidence that fails a check is never passed to the policy. Missing evidence makes the result `INCONCLUSIVE`, never `VERIFIED`; an edit to the policy directory needs an independent approval at the commit.
+
+```
+witnessed attest test-result --commit "$HEAD" --result passed --passed terraform-validate --key ci.key.pem --keyid ci -o att/checks.dsse.json
+witnessed collect github-pr --repository owner/infra --number 42 -o pr.json
+witnessed verify-change --commit "$HEAD" --base main --repository owner/infra --policy .witnessed/policy --policy-ref main --attestation att --pull-request pr.json
+```
+
+The report lists every requirement with its status and reason, every piece of evidence with its digest and trust source, the policy digest and the verifier version. The same inputs give the same report. Formats, the policy contract, the GitHub workflow and the threat model: [docs/assurance/](assurance/).
 
 ## Agent integration
 

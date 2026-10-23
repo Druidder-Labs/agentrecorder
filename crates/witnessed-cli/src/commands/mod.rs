@@ -1,5 +1,7 @@
 pub mod anchor;
+pub mod attest;
 pub mod bundle;
+pub mod collect;
 pub mod export;
 pub mod hook;
 pub mod inspect;
@@ -9,6 +11,7 @@ pub mod review;
 pub mod run;
 pub mod sessions;
 pub mod verify;
+pub mod verify_change;
 pub mod view;
 
 use std::sync::atomic::{AtomicBool, Ordering};

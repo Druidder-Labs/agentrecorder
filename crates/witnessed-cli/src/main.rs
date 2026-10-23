@@ -49,6 +49,15 @@ enum Command {
     Bundle(commands::bundle::BundleArgs),
     #[command(about = "Check that a bundle was not edited")]
     Verify(commands::verify::VerifyArgs),
+    #[command(
+        name = "verify-change",
+        about = "Decide whether a commit's evidence satisfies a policy: VERIFIED (0), REJECTED (1), INCONCLUSIVE (3), ERROR (4)"
+    )]
+    VerifyChange(commands::verify_change::VerifyChangeArgs),
+    #[command(about = "Write or check signed in-toto attestations (DSSE, P-256 keys)")]
+    Attest(commands::attest::AttestArgs),
+    #[command(about = "Collect evidence from a provider for verify-change")]
+    Collect(commands::collect::CollectArgs),
     #[command(about = "List sessions", visible_alias = "ls")]
     Sessions(commands::sessions::SessionsArgs),
     #[command(about = "Reconnect this terminal to a running session")]
@@ -134,6 +143,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         Command::Hook(args) => return Ok(commands::hook::hook(args)),
         Command::Verify(args) => return commands::verify::verify(&args),
+        Command::VerifyChange(args) => return commands::verify_change::verify_change(&args),
+        Command::Attest(args) => return commands::attest::attest(&args),
+        Command::Collect(args) => return commands::collect::collect(&args),
         Command::Completions { shell } => {
             use clap::CommandFactory;
             clap_complete::generate(shell, &mut Cli::command(), "witnessed", &mut std::io::stdout());
@@ -162,7 +174,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Command::View(args) => commands::view::view(&layout, &args),
         Command::Rm(args) => commands::sessions::remove(&layout, &args),
         Command::Prune(args) => commands::sessions::prune(&layout, &args),
-        Command::Hook(_) | Command::Verify(_) | Command::Completions { .. } => {
+        Command::Hook(_)
+        | Command::Verify(_)
+        | Command::VerifyChange(_)
+        | Command::Attest(_)
+        | Command::Collect(_)
+        | Command::Completions { .. } => {
             unreachable!("handled before the state directory is resolved")
         }
         Command::Supervise(a) => {

@@ -60,6 +60,10 @@ Each row has an end-to-end or unit test; `grep` the control's name in `crates/*/
 - `secure_delete` does not reach filesystem snapshots, backups or SSD wear leveling; full-disk encryption covers those.
 - `agent.hook` events and `client_pid` are self-reported; any same-user process can send them.
 
+## Change assurance
+
+`verify-change`, `attest` and `collect` have their own model: [assurance/threat-model.md](assurance/threat-model.md) and [assurance/security-guarantees.md](assurance/security-guarantees.md). They read git objects and evidence files, run `gh api` only in `collect`, and never execute code from the repository they judge.
+
 ## Reporting
 
 Report vulnerabilities through GitHub security advisories on the repository, not in public issues.

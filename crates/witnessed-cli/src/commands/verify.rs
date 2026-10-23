@@ -70,7 +70,7 @@ impl Source {
         }
     }
 
-    fn text(&mut self, name: &str) -> Result<String> {
+    pub(crate) fn text(&mut self, name: &str) -> Result<String> {
         let bytes = self.read(name).with_context(|| format!("reading {name}"))?;
         String::from_utf8(bytes).with_context(|| format!("{name} is not UTF-8"))
     }

@@ -9,7 +9,8 @@ witnessed (CLI)                 crates/witnessed-cli
   |-- recover / replay / export / bundle / view / anchor --> store (read)
   |-- review ---------------> store (read, annotations), transcript, git
   |-- rm / prune -----------> store (delete, checkpoint)
-  `-- verify ---------------> bundle only
+  |-- verify ---------------> bundle only
+  `-- verify-change / attest / collect --> witnessed-assurance, git, gh (docs/assurance/architecture.md)
 
   src/commands/   one module per subcommand: run, sessions (attach, detach, mark, stop, rm, prune),
   |               inspect, recover, replay, export, review, bundle, view, verify, anchor, hook
@@ -43,6 +44,13 @@ supervisor                          crates/witnessed-supervisor
   |-- protocol.rs   length-prefixed frames
   `-- peer.rs       peer uid check
 
+assurance                           crates/witnessed-assurance
+  |-- dsse.rs, intoto.rs   DSSE envelopes (P-256), in-toto Statement v1, test-result predicate
+  |-- git.rs, terraform.rs changed paths, policy files at a commit, Terraform block types
+  |-- github.rs            pull request snapshot, reviewer independence
+  |-- policy.rs            Rego policies (regorus), digest, requirements
+  `-- engine.rs, report.rs evidence checks, decision, reports
+
 store                               crates/witnessed-store
   |-- events.rs     `Body`: the event schema
   `-- lib.rs        schema, migrations, `Status`, guarded transitions, deletion
@@ -57,6 +65,7 @@ store                               crates/witnessed-store
 | Inspect, recover, replay | `commands/{inspect,recover,replay,export}.rs`, `procinfo.rs`, `agent_state.rs`, `transcript.rs`, `render.rs`, `sanitize.rs`, `screen.rs` |
 | Review | `commands/review.rs`, `decisions.rs` (decision moments from hooks and transcript, `Kind`), `outcome.rs` (session lines in `HEAD` and the work tree, later commits), `transcript.rs` (`locate`, `usage`) |
 | Sharing | `commands/{bundle,view,verify,anchor}.rs`, `bundle/{assemble,cut,diff,redact}.rs`, `chain.rs`, `dashboard.html`, `vendor/asciinema-player/` |
+| Change assurance | `commands/{verify_change,attest,collect}.rs`, `crates/witnessed-assurance/` |
 
 Seams: `client` exposes `SessionStatus`, `ConnectError` and `Attachment` with typed `DetachReason`s; frames stay private. `Body` is the schema; `export` passes stored JSON through unchanged, so events from a newer writer survive an older reader. `Status` transitions are guarded in SQL. `state.rs` folds a session row plus a liveness probe into one `State` (`Starting`, `Running`, `Exited`, `Lost`, `Unreachable`) that every command branches on; `Need` (`Any`, `Finished`, `Live`) names what a command requires of it. `transcript::locate` is the one place that finds the agent transcript from the hooks; `inspect::SessionFacts` reads the event log once for `inspect`. `bundle::assemble` loads, cuts and redacts a session into typed `Story`, `DiffInfo`, `Manifest` and `Summary` values; redaction masks typed strings directly and the review material once it is serialized.
 

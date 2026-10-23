@@ -1,0 +1,130 @@
+name: agent-change-assurance
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: agent-change-assurance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  WITNESSED_REV: ${{ vars.WITNESSED_REV }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    outputs:
+      fmt: ${{ steps.fmt.outcome }}
+      validate: ${{ steps.validate.outcome }}
+      scan: ${{ steps.scan.outcome }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+      - id: fmt
+        continue-on-error: true
+        run: terraform fmt -check -recursive
+      - id: validate
+        continue-on-error: true
+        run: terraform -chdir=infra init -backend=false -input=false && terraform -chdir=infra validate
+      - id: scan
+        continue-on-error: true
+        run: |
+          python3 -m pip install --user checkov==3.3.30
+          python3 -m checkov.main --directory infra --framework terraform --compact --quiet
+
+  attest:
+    needs: checks
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: assurance-signing
+    permissions: {}
+    steps:
+      - name: Install witnessed
+        run: cargo install --locked --git https://github.com/Druidder-Labs/witnessed --rev "${WITNESSED_REV}" witnessed-cli
+      - name: Sign the check outcomes for the head commit
+        env:
+          WITNESSED_ATTESTATION_KEY: ${{ secrets.WITNESSED_ATTESTATION_KEY }}
+          FMT: ${{ needs.checks.outputs.fmt }}
+          VALIDATE: ${{ needs.checks.outputs.validate }}
+          SCAN: ${{ needs.checks.outputs.scan }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          args=()
+          result=passed
+          for pair in "terraform-fmt:${FMT}" "terraform-validate:${VALIDATE}" "terraform-security-scan:${SCAN}"; do
+            name="${pair%%:*}"
+            outcome="${pair#*:}"
+            if [ "${outcome}" = "success" ]; then args+=(--passed "${name}"); else args+=(--failed "${name}"); result=failed; fi
+          done
+          mkdir -p attestations
+          witnessed attest test-result \
+            --commit "${HEAD_SHA}" \
+            --subject-name "git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --result "${result}" "${args[@]}" \
+            --url "${RUN_URL}" \
+            --configuration ".github/workflows/agent-change-assurance.yml" \
+            --key-env WITNESSED_ATTESTATION_KEY --keyid ci \
+            -o attestations/checks.dsse.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: attestations
+          path: attestations/
+          retention-days: 30
+
+  verify:
+    needs: attest
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install witnessed
+        run: cargo install --locked --git https://github.com/Druidder-Labs/witnessed --rev "${WITNESSED_REV}" witnessed-cli
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ needs.attest.result == 'success' }}
+        with:
+          name: attestations
+          path: ${{ runner.temp }}/attestations
+      - name: Collect the pull request reviews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: witnessed collect github-pr --number "${NUMBER}" -o "${RUNNER_TEMP}/pull-request.json"
+      - name: Verify the change
+        run: |
+          mkdir -p "${RUNNER_TEMP}/attestations"
+          witnessed verify-change \
+            --commit "${HEAD_SHA}" \
+            --base "${BASE_SHA}" \
+            --policy .witnessed/policy \
+            --policy-ref "${BASE_SHA}" \
+            --attestation "${RUNNER_TEMP}/attestations" \
+            --pull-request "${RUNNER_TEMP}/pull-request.json" \
+            --summary "${GITHUB_STEP_SUMMARY}" \
+            --format json -o "${RUNNER_TEMP}/report.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: change-verification
+          path: ${{ runner.temp }}/report.json
+          retention-days: 90
