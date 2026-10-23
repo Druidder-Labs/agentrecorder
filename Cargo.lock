@@ -9,61 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agentrecorder"
-version = "0.4.0"
-dependencies = [
- "agentrecorder-store",
- "agentrecorder-supervisor",
- "anyhow",
- "clap",
- "clap_complete",
- "flate2",
- "libc",
- "nix",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "sysinfo",
- "tempfile",
- "vt100",
- "zip",
-]
-
-[[package]]
-name = "agentrecorder-store"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "base64",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "agentrecorder-supervisor"
-version = "0.4.0"
-dependencies = [
- "agentrecorder-store",
- "anyhow",
- "crossbeam-channel",
- "libc",
- "nix",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "sysinfo",
- "tempfile",
- "vt100",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1068,6 +1013,61 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "witnessed-cli"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "flate2",
+ "libc",
+ "nix",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "sysinfo",
+ "tempfile",
+ "vt100",
+ "witnessed-store",
+ "witnessed-supervisor",
+ "zip",
+]
+
+[[package]]
+name = "witnessed-store"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "witnessed-supervisor"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "libc",
+ "nix",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "sysinfo",
+ "tempfile",
+ "vt100",
+ "witnessed-store",
 ]
 
 [[package]]

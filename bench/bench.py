@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible agentrecorder benchmarks. Usage: python3 bench/bench.py [--quick] [--json out.json]"""
+"""Reproducible witnessed benchmarks. Usage: python3 bench/bench.py [--quick] [--json out.json]"""
 
 import argparse
 import json
@@ -15,18 +15,18 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "target", "release", "agentrecorder")
+BIN = os.path.join(ROOT, "target", "release", "witnessed")
 
 
 def env_for(home):
     e = dict(os.environ)
-    e["AGENTRECORDER_HOME"] = home
-    e["AGENTRECORDER_RETENTION_DAYS"] = "0"
-    e.pop("AGENTRECORDER_SESSION", None)
+    e["WITNESSED_HOME"] = home
+    e["WITNESSED_RETENTION_DAYS"] = "0"
+    e.pop("WITNESSED_SESSION", None)
     return e
 
 
-def agentrecorder(home, *args, check=True):
+def witnessed(home, *args, check=True):
     return subprocess.run([BIN, *args], env=env_for(home), capture_output=True, check=check)
 
 
@@ -52,12 +52,12 @@ def bench_startup(home, n):
         subprocess.run(["true"], check=True)
         direct.append(time.perf_counter() - t)
         t = time.perf_counter()
-        agentrecorder(home, "run", "-d", "--", "sleep", "60")
+        witnessed(home, "run", "-d", "--", "sleep", "60")
         managed.append(time.perf_counter() - t)
-    for s in json.loads(agentrecorder(home, "sessions", "--json").stdout):
+    for s in json.loads(witnessed(home, "sessions", "--json").stdout):
         if s["status"] in ("running", "detached"):
-            agentrecorder(home, "stop", s["session"], "--signal", "KILL", "--timeout", "1", check=False)
-    return {"direct_spawn": summary(direct), "agentrecorder_run_detached_until_ready": summary(managed)}
+            witnessed(home, "stop", s["session"], "--signal", "KILL", "--timeout", "1", check=False)
+    return {"direct_spawn": summary(direct), "witnessed_run_detached_until_ready": summary(managed)}
 
 
 def drain_pty(argv, env):
@@ -83,12 +83,12 @@ def bench_throughput(home, mib):
     out = {}
     secs, n = drain_pty(["sh", "-c", producer], dict(os.environ))
     out["direct_pty"] = {"seconds": round(secs, 3), "bytes": n, "mib_per_s": round(n / secs / 1048576, 1)}
-    for label, extra in (("agentrecorder_recording", []), ("agentrecorder_no_record", ["--no-record"])):
+    for label, extra in (("witnessed_recording", []), ("witnessed_no_record", ["--no-record"])):
         secs, n = drain_pty([BIN, "run", *extra, "--", "sh", "-c", producer], env_for(home))
         row = {"seconds": round(secs, 3), "bytes_seen_by_client": n, "mib_per_s": round(n / secs / 1048576, 1)}
-        last = json.loads(agentrecorder(home, "sessions", "--json").stdout)[-1]
+        last = json.loads(witnessed(home, "sessions", "--json").stdout)[-1]
         if not extra:
-            counts = json.loads(agentrecorder(home, "inspect", last["session"], "--json").stdout)["event_counts"]
+            counts = json.loads(witnessed(home, "inspect", last["session"], "--json").stdout)["event_counts"]
             row["recorded_output_bytes"] = sum(c["bytes"] for c in counts if c["kind"] == "terminal.output")
             row["dropped_warnings"] = sum(c["count"] for c in counts if c["kind"] == "runtime.warning")
             out["replay_session"] = last["session"]
@@ -99,7 +99,7 @@ def bench_throughput(home, mib):
 
 
 def recording_counts(home, session):
-    info = json.loads(agentrecorder(home, "inspect", session, "--json").stdout)
+    info = json.loads(witnessed(home, "inspect", session, "--json").stdout)
     counts = info["event_counts"]
     warnings = [n["payload"] for n in info["notices"] if n["type"] == "runtime.warning"]
     return {
@@ -135,14 +135,14 @@ def bench_ceiling(home, mib):
     secs, n = drain_pty(["cat", path], dict(os.environ))
     out["direct_pty"] = {"seconds": round(secs, 3), "bytes": n, "mib_per_s": round(n / secs / 1048576, 1)}
     cases = (
-        ("agentrecorder_interactive_client", drain_pty, []),
-        ("agentrecorder_pipe_client", drain_pipe, []),
-        ("agentrecorder_interactive_no_record", drain_pty, ["--no-record"]),
+        ("witnessed_interactive_client", drain_pty, []),
+        ("witnessed_pipe_client", drain_pipe, []),
+        ("witnessed_interactive_no_record", drain_pty, ["--no-record"]),
     )
     for label, drain, extra in cases:
         secs, n = drain([BIN, "run", *extra, "--", "cat", path], env_for(home))
         row = {"seconds": round(secs, 3), "bytes_seen_by_client": n, "mib_per_s": round(n / secs / 1048576, 1)}
-        last = json.loads(agentrecorder(home, "sessions", "--json").stdout)[-1]
+        last = json.loads(witnessed(home, "sessions", "--json").stdout)[-1]
         row.update(recording_counts(home, last["session"]))
         out[label] = row
     os.unlink(path)
@@ -191,15 +191,15 @@ def bench_latency(home, n):
     inner = "stty raw -echo; echo READY; exec cat"
     direct = echo_latency(["sh", "-c", inner], dict(os.environ), n)
     managed = echo_latency([BIN, "run", "--detach-key", "none", "--", "sh", "-c", inner], env_for(home), n)
-    for s in json.loads(agentrecorder(home, "sessions", "--json").stdout):
+    for s in json.loads(witnessed(home, "sessions", "--json").stdout):
         if s["status"] in ("running", "detached"):
-            agentrecorder(home, "stop", s["session"], "--signal", "KILL", "--timeout", "1", check=False)
-    return {"direct_pty_round_trip": summary(direct), "agentrecorder_round_trip": summary(managed)}
+            witnessed(home, "stop", s["session"], "--signal", "KILL", "--timeout", "1", check=False)
+    return {"direct_pty_round_trip": summary(direct), "witnessed_round_trip": summary(managed)}
 
 
 def bench_memory(home):
-    sid = agentrecorder(home, "run", "-d", "--", "sh", "-c", "sleep 1; seq 1 2000000; sleep 60").stdout.decode().strip()
-    info = json.loads(agentrecorder(home, "inspect", sid, "--json").stdout)
+    sid = witnessed(home, "run", "-d", "--", "sh", "-c", "sleep 1; seq 1 2000000; sleep 60").stdout.decode().strip()
+    info = json.loads(witnessed(home, "inspect", sid, "--json").stdout)
     sup = info["session"]["supervisor_pid"]
     rss = lambda: int(subprocess.run(["ps", "-o", "rss=", "-p", str(sup)], capture_output=True).stdout.decode().strip() or 0)
     idle = rss()
@@ -209,13 +209,13 @@ def bench_memory(home):
         peak = max(peak, rss())
         time.sleep(0.05)
     after = rss()
-    agentrecorder(home, "stop", sid, "--signal", "KILL", "--timeout", "1", check=False)
+    witnessed(home, "stop", sid, "--signal", "KILL", "--timeout", "1", check=False)
     return {"supervisor_rss_idle_kib": idle, "supervisor_rss_peak_kib": peak, "supervisor_rss_after_kib": after}
 
 
 def bench_store():
     r = subprocess.run(
-        ["cargo", "run", "-q", "--release", "-p", "agentrecorder-store", "--example", "store_bench"],
+        ["cargo", "run", "-q", "--release", "-p", "witnessed-store", "--example", "store_bench"],
         cwd=ROOT,
         capture_output=True,
         check=True,
@@ -228,7 +228,7 @@ def main():
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--json")
     a = ap.parse_args()
-    subprocess.run(["cargo", "build", "--release", "-q", "-p", "agentrecorder"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "--release", "-q", "-p", "witnessed-cli"], cwd=ROOT, check=True)
     home = tempfile.mkdtemp(prefix="agtb", dir="/tmp")
     results = {
         "machine": {

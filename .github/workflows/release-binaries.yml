@@ -50,18 +50,18 @@ jobs:
         run: |
           version=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "v${version}" = "${TAG}" || { echo "tag ${TAG} does not match Cargo.toml version ${version}"; exit 1; }
-      - run: cargo build --release --locked -p agentrecorder --target ${{ matrix.target }}
+      - run: cargo build --release --locked -p witnessed-cli --target ${{ matrix.target }}
       - name: Package
         env:
           TAG: ${{ github.event.release.tag_name }}
           TARGET: ${{ matrix.target }}
         run: |
-          name="agentrecorder-${TAG}-${TARGET}"
+          name="witnessed-${TAG}-${TARGET}"
           mkdir -p "dist/${name}"
-          cp "target/${TARGET}/release/agentrecorder" LICENSE README.md "dist/${name}/"
+          cp "target/${TARGET}/release/witnessed" LICENSE README.md "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
-          "./${name}/agentrecorder" --version
+          "./${name}/witnessed" --version
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}

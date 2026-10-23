@@ -1,0 +1,1287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; font-src data:; img-src data:; worker-src blob:">
+<title>Witnessed session</title>
+<style>__WITNESSED_PLAYER_CSS__</style>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --text: #16191d; --muted: #5a626c; --faint: #5f666f; --on-accent: #ffffff; --line: #e3e6ea;
+  --accent: #2b62d9; --accent-soft: #e8effc; --ok: #146b38; --ok-soft: #e4f4ea; --bad: #c0392b; --bad-soft: #fbe9e7;
+  --warn: #9a5b00; --warn-soft: #fff1d6; --chip: #eef0f3; --human: #5b3fbf; --human-soft: #efeafc;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --panel: #171b21; --text: #e8ebef; --muted: #a3abb6; --faint: #8f98a3; --on-accent: #0f1216; --line: #272d36;
+    --accent: #7aa2ff; --accent-soft: #1b2a4a; --ok: #4fc47f; --ok-soft: #14301f; --bad: #ff7b6e; --bad-soft: #3a1c19;
+    --warn: #e5aa4a; --warn-soft: #3a2a10; --chip: #222831; --human: #b9a4ff; --human-soft: #2a2342;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1216; --panel: #171b21; --text: #e8ebef; --muted: #a3abb6; --faint: #8f98a3; --on-accent: #0f1216; --line: #272d36;
+  --accent: #7aa2ff; --accent-soft: #1b2a4a; --ok: #4fc47f; --ok-soft: #14301f; --bad: #ff7b6e; --bad-soft: #3a1c19;
+  --warn: #e5aa4a; --warn-soft: #3a2a10; --chip: #222831; --human: #b9a4ff; --human-soft: #2a2342;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+a { color: var(--accent); }
+button { font: inherit; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 0 16px; }
+
+header.top { padding: 20px 0 12px; }
+header.top .brand { font-size: 12px; color: var(--faint); letter-spacing: .06em; text-transform: uppercase; }
+header.top h1 { margin: 2px 0 6px; font-size: 24px; font-weight: 650; letter-spacing: -.01em; }
+header.top h1 .id { font-family: var(--mono); font-weight: 500; color: var(--muted); font-size: 18px; margin-left: 8px; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); align-items: center; }
+.meta .bad { color: var(--bad); font-weight: 600; }
+.meta .cmd { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; margin-top: 4px; }
+.meta details { display: inline; }
+.meta summary { cursor: pointer; color: var(--accent); list-style: none; display: inline; }
+.meta summary::-webkit-details-marker { display: none; }
+
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 500; background: var(--chip); color: var(--text); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.bad { background: var(--bad-soft); color: var(--bad); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.badges summary { cursor: pointer; color: var(--accent); list-style: none; font-size: 12.5px; }
+.badges summary::-webkit-details-marker { display: none; }
+.howto { margin: 10px 0 0; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; max-width: 760px; }
+.howto p { margin: 0 0 8px; }
+.howto p:last-child { margin: 0; }
+pre.cmdline { margin: 6px 0; padding: 8px 10px; background: var(--chip); border-radius: 6px; font-family: var(--mono); font-size: 12px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0 8px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.stat .l { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.stat .v { font-size: 20px; font-weight: 650; margin-top: 2px; letter-spacing: -.01em; }
+.stat .s { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.stat.human .v { color: var(--human); }
+.stat.agent .v { color: var(--accent); }
+.stat.bad .v { color: var(--bad); }
+.unmeasured { font-size: 12px; color: var(--faint); margin: 0 0 18px; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 46%); gap: 20px; align-items: start; }
+.side { position: sticky; top: 12px; }
+@media (max-width: 1000px) { .layout { grid-template-columns: minmax(0, 1fr); } .side { position: static; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.panel > h2 { margin: 0; padding: 12px 16px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.panel > h2 .now { text-transform: none; letter-spacing: 0; font-weight: 500; font-family: var(--mono); font-size: 12px; color: var(--text); }
+.player-wrap { background: #000; min-height: 200px; }
+.player-note { padding: 10px 16px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); }
+
+.story { display: grid; gap: 12px; min-width: 0; }
+.story h2.sec { margin: 4px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.turn { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 10px; transition: border-color .15s, box-shadow .15s; }
+.turn.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.turn.system { background: transparent; border-style: dashed; color: var(--muted); padding: 10px 16px; }
+.turn .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.turn .n { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+.at { font-family: var(--mono); font-size: 12px; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+.at:hover { text-decoration: underline; }
+.turn .gap { font-size: 12.5px; color: var(--human); }
+.turn .right { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+.k { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 12px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+.k.agent { background: var(--accent-soft); color: var(--accent); }
+.k.human { background: var(--human-soft); color: var(--human); }
+.k.bad { background: var(--bad-soft); color: var(--bad); }
+.k.warn { background: var(--warn-soft); color: var(--warn); }
+.prompt { font-size: 15px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding-left: 12px; border-left: 3px solid var(--human); }
+.prompt.hidden { color: var(--muted); font-size: 13.5px; font-style: italic; }
+.prompt .origin { display: inline-block; font-style: normal; font-size: 11.5px; padding: 1px 7px; border-radius: 999px; background: var(--human-soft); color: var(--human); margin-right: 6px; vertical-align: 2px; }
+.steps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.steps .lbl { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.step { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 6px; font-size: 12.5px; background: var(--chip); border: 1px solid transparent; cursor: pointer; color: var(--text); }
+.step:hover { border-color: var(--line); }
+.step .t { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.step.bad { background: var(--bad-soft); color: var(--bad); }
+.step.wait { background: var(--warn-soft); color: var(--warn); }
+.step.end { background: var(--ok-soft); color: var(--ok); }
+.step.note { background: transparent; border-color: var(--line); color: var(--muted); cursor: default; }
+.step.test { background: var(--ok-soft); color: var(--ok); }
+.step.test.bad { background: var(--bad-soft); color: var(--bad); }
+.step.test.unsure { background: var(--chip); color: var(--text); }
+.step.you { background: var(--human-soft); color: var(--human); }
+.step .d { font-family: var(--mono); font-size: 11.5px; opacity: .85; max-width: 340px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn > *, .turn .head > *, .steps > * { min-width: 0; max-width: 100%; }
+.step { max-width: 100%; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.tag.human { border-color: transparent; background: var(--human-soft); color: var(--human); }
+.signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0 0 20px; }
+.sig { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.sig h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.sig ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; font-size: 13px; }
+.sig li { display: flex; gap: 8px; align-items: baseline; }
+.sig li .v { font-weight: 650; min-width: 2.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.sig li .x { color: var(--muted); font-size: 12px; }
+.sig-note { font-size: 12px; color: var(--faint); margin: -10px 0 18px; }
+ul.files .by { font-size: 12px; color: var(--muted); }
+ul.files .by.out { color: var(--warn); }
+.commits { margin: 10px 0 0; padding: 0; list-style: none; font-size: 13px; display: grid; gap: 3px; }
+.commits .h { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-right: 8px; }
+.empty { color: var(--muted); padding: 14px 16px; background: var(--panel); border: 1px dashed var(--line); border-radius: 12px; }
+ul.files { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 13px; }
+ul.files li { display: flex; gap: 10px; align-items: baseline; word-break: break-all; }
+ul.files .st { font-family: var(--mono); font-size: 12px; width: 14px; color: var(--muted); }
+ul.files .st.M { color: var(--warn); } ul.files .st.A, ul.files .st.q { color: var(--ok); } ul.files .st.D { color: var(--bad); }
+
+.lower { margin: 24px 0 32px; display: grid; gap: 12px; }
+details.sec { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+details.sec > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 10px; }
+details.sec > summary::-webkit-details-marker { display: none; }
+details.sec > summary::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform .15s; }
+details.sec[open] > summary::before { transform: rotate(45deg); }
+details.sec > summary .cnt { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+details.sec > .body { padding: 12px 16px 14px; border-top: 1px solid var(--line); }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 12px; }
+.filters button { border: 1px solid var(--line); background: var(--chip); color: var(--text); border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.filters button[aria-pressed="false"] { opacity: .45; }
+.rows { max-height: 480px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.row { display: grid; grid-template-columns: 76px 88px minmax(0, 1fr); gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); cursor: pointer; align-items: baseline; font-size: 13px; }
+.row:last-child { border-bottom: 0; }
+.row:hover { background: var(--chip); }
+.row.current { box-shadow: inset 3px 0 0 var(--accent); }
+.row .t { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+.row .d { word-break: break-word; }
+.row.redacted .d, .row.cut .d { color: var(--warn); }
+dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; font-size: 13px; }
+dt { color: var(--muted); }
+dd { margin: 0; word-break: break-all; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.caveat { color: var(--muted); font-size: 12px; margin-top: 10px; }
+code { font-family: var(--mono); font-size: 12px; background: var(--chip); padding: 1px 4px; border-radius: 4px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 18px; overflow-x: auto; }
+.tabs button { border: 0; background: none; padding: 10px 14px; font-size: 14px; font-weight: 550; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.tab[hidden] { display: none; }
+#tab-overview { display: grid; gap: 14px; max-width: 920px; margin-bottom: 32px; }
+#tab-overview[hidden] { display: none; }
+.ocard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.ocard > h2 { margin: 0 0 10px; font-size: 16px; font-weight: 650; }
+ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14.5px; }
+ul.yns { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; font-size: 14px; }
+.yn { display: inline-block; min-width: 96px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; text-align: center; }
+.yn.y { background: var(--accent-soft); color: var(--accent); }
+.yn.n { background: var(--chip); color: var(--muted); }
+.who { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
+.inp { font: inherit; font-size: 13.5px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; }
+.who .inp { margin-left: 6px; }
+.comp { border-top: 1px solid var(--line); padding: 14px 0 4px; display: grid; gap: 8px; }
+.comp-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.comp h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.who-tag { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+.who-tag.hr { background: var(--human-soft); color: var(--human); }
+.who-tag.technical { background: var(--accent-soft); color: var(--accent); }
+.comp .ask { margin: 0; color: var(--muted); }
+ul.evidence { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13.5px; }
+.levels { display: flex; flex-wrap: wrap; gap: 6px; }
+.lvl { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 999px; padding: 4px 12px; font-size: 13px; cursor: pointer; }
+.lvl[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.note { width: 100%; resize: vertical; }
+.print-only { display: none; white-space: pre-wrap; font-size: 13.5px; }
+ol.qs { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 14px; }
+dl.gloss { grid-template-columns: max-content minmax(0, 1fr); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn { font: inherit; font-weight: 600; border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--accent); }
+details.dfile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+details.dfile > summary { cursor: pointer; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; list-style: none; }
+details.dfile > summary::-webkit-details-marker { display: none; }
+details.dfile .path { font-family: var(--mono); font-size: 13px; font-weight: 600; word-break: break-all; }
+details.dfile .plus { color: var(--ok); font-family: var(--mono); font-size: 12px; }
+details.dfile .minus { color: var(--bad); font-family: var(--mono); font-size: 12px; }
+pre.diff { margin: 0; padding: 10px 0; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 12px; line-height: 1.45; overflow-x: auto; }
+pre.diff span { display: block; padding: 0 14px; white-space: pre; min-height: 1.45em; }
+pre.diff .a { background: var(--ok-soft); color: var(--ok); }
+pre.diff .r { background: var(--bad-soft); color: var(--bad); }
+pre.diff .h { color: var(--accent); background: var(--accent-soft); }
+pre.diff .m { color: var(--faint); }
+#tab-review { display: grid; gap: 14px; max-width: 920px; margin-bottom: 32px; }
+#tab-review[hidden] { display: none; }
+.moments { display: grid; gap: 10px; }
+.mrow { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; gap: 8px; font-size: 13.5px; }
+.mrow .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.mrow .head > * { min-width: 0; max-width: 100%; }
+.mrow .subj { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.mrow .right { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.mrow ul.evidence { color: var(--muted); }
+.mrow .then { color: var(--muted); }
+.mrow .author { padding: 6px 10px; border-left: 3px solid var(--line); background: var(--chip); border-radius: 0 6px 6px 0; word-break: break-word; }
+.mrow .yours { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mrow .yours .lbl { font-size: 12px; color: var(--muted); }
+.mrow .yours .lvl { padding: 2px 10px; font-size: 12px; }
+ul.ofiles li { flex-wrap: wrap; gap: 0 10px; }
+ul.ofiles .by { word-break: normal; }
+.mrow .yours .inp { flex: 1 1 220px; min-width: 0; font-size: 13px; padding: 4px 8px; }
+@media print {
+  body { background: #fff; }
+  .tabs, .actions, #tab-timeline, #tab-review, #tab-code, #tab-details, .badges details { display: none !important; }
+  #tab-overview { display: grid !important; max-width: none; }
+  .ocard { break-inside: avoid; border-color: #ccc; }
+  .lvl, textarea.note, .who .inp::placeholder { display: none; }
+  .print-only { display: block !important; }
+  .at { color: inherit; }
+}
+@media (max-width: 640px) {
+  .row { grid-template-columns: 64px minmax(0, 1fr); }
+  .row .c { display: none; }
+  .prompt { font-size: 14px; }
+  dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  dt { margin-top: 6px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="brand">Witnessed</div>
+  <h1 id="title"></h1>
+  <div class="meta" id="meta"></div>
+  <div class="badges" id="badges"></div>
+</header>
+<nav class="tabs" id="tabs" role="tablist" aria-label="Views"></nav>
+<section class="tab" id="tab-overview"></section>
+<section class="tab" id="tab-review" hidden></section>
+<section class="tab" id="tab-timeline" hidden>
+<section class="stats" id="stats"></section>
+<div class="unmeasured" id="unmeasured"></div>
+<section class="signals" id="signals"></section>
+<div class="sig-note" id="sig-note"></div>
+<div class="layout">
+  <main class="story" id="story"></main>
+  <aside class="side">
+    <section class="panel">
+      <h2>Terminal <span class="now" id="now"></span></h2>
+      <div class="player-wrap" id="player"></div>
+      <div class="player-note" id="player-note"></div>
+    </section>
+  </aside>
+</div>
+</section>
+<section class="tab" id="tab-code" hidden><div id="code"></div></section>
+<section class="tab lower" id="tab-details" hidden>
+  <details class="sec" id="files-sec" open><summary>Files changed <span class="cnt" id="files-cnt"></span></summary><div class="body" id="files"></div></details>
+  <details class="sec"><summary>All events <span class="cnt" id="events-cnt"></span></summary><div class="body"><div class="filters" id="filters"></div><div class="rows" id="rows"></div></div></details>
+  <details class="sec"><summary>Session details</summary><div class="body" id="session"></div></details>
+  <details class="sec" open><summary>Verification and integrity</summary><div class="body" id="integrity"></div></details>
+</section>
+<footer class="caveat" style="margin: 0 0 32px">Recorded with Witnessed, the verifiable record of AI-assisted work. Install: <code>curl -fsSL https://raw.githubusercontent.com/Druidder-Labs/witnessed/main/install.sh | sh</code></footer>
+</div>
+<script id="data" type="application/json">__WITNESSED_DATA__</script>
+<script>__WITNESSED_PLAYER_JS__</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const M = D.manifest, S = M.session;
+const $ = id => document.getElementById(id);
+function el(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v; else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v);
+  }
+  for (const c of kids.flat(Infinity)) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c));
+  return n;
+}
+function dur(ms) {
+  if (ms == null) return "-";
+  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? `${h}h ${String(m).padStart(2, "0")}m` : m ? `${m}m ${String(r).padStart(2, "0")}s` : `${r}s`;
+}
+function secs(ms) {
+  if (ms == null) return "-";
+  if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+  return ms < 60000 ? `${Math.round(ms / 1000)}s` : dur(ms);
+}
+function off(ms) {
+  const s = Math.floor(ms / 1000);
+  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60].map(x => String(x).padStart(2, "0")).join(":");
+}
+const num = n => Number(n || 0).toLocaleString("en-US");
+const kilo = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : num(n);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const sum = xs => xs.reduce((a, b) => a + (b || 0), 0);
+const short = h => (h ? String(h).slice(0, 10) : "-");
+const when = ns => new Date(ns / 1e6).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+const base = p => (p ? String(p).split("/").filter(Boolean).slice(-1)[0] : "");
+
+const rows = D.timeline.slice();
+for (const c of M.cuts || []) rows.push({ type: "cut", t_ms: c.from_ms, fate: "cut", text: `cut ${off(c.from_ms)}-${off(c.to_ms)} (${c.events} events removed)` });
+rows.sort((a, b) => a.t_ms - b.t_ms || (a.seq ?? 0) - (b.seq ?? 0));
+const hooks = rows.filter(r => r.type === "agent.hook");
+const hookName = h => h.payload.hook_event_name;
+const shell = rows.filter(r => r.type === "shell.command_finished");
+const shellFailed = shell.filter(r => r.payload && r.payload.exit_code != null && r.payload.exit_code !== 0).length;
+const marks = rows.filter(r => r.type === "user.mark");
+const toolCalls = hooks.filter(h => hookName(h) === "PostToolUse" || hookName(h) === "PostToolUseFailure");
+const toolFailed = toolCalls.filter(h => hookName(h) === "PostToolUseFailure").length;
+const stops = hooks.filter(h => hookName(h) === "Stop" || hookName(h) === "StopFailure");
+const git = rows.filter(r => r.type === "git.snapshot");
+const gitPhase = ph => git.find(g => g.payload.phase === ph);
+const changed = gitPhase("exit")?.payload.changed || [];
+const changedCount = gitPhase("exit")?.payload.changed_paths;
+const edited = (M.fates.redacted || 0) + (M.fates.cut || 0);
+const usageHook = hooks.slice().reverse().find(h => h.payload.usage);
+const usage = usageHook ? usageHook.payload.usage : null;
+const bundleName = D.bundle_name || `witnessed-${S.id}`;
+const P = M.prompts || { available: false, reason: "the bundle was written by an witnessed version without prompt data" };
+const exitOk = S.exit_code === 0;
+const exitText = S.exit_code != null ? `exit ${S.exit_code}` : S.exit_signal != null ? `killed by signal ${S.exit_signal}` : S.status;
+const verifyCmd = `witnessed verify ${bundleName} --anchors ANCHORS_FILE${M.chain.token_bound ? " --token TOKEN" : ""}\n# ANCHORS_FILE: the anchor file you received while the session ran; leave --anchors out if you received none`;
+
+// Turns: one per prompt, from the transcript when the bundle has it, else from UserPromptSubmit hooks.
+const submits = hooks.filter(h => hookName(h) === "UserPromptSubmit");
+// Output times from the cast, used to see when the screen came back to life after a permission prompt.
+const outputsMs = (() => {
+  const out = [];
+  let t = 0, first = true;
+  for (const line of String(D.cast || "").split("\n")) {
+    if (!line) continue;
+    if (first) { first = false; continue; }
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (!Array.isArray(e) || typeof e[0] !== "number") continue;
+    t += e[0];
+    if (e[1] === "o") out.push(Math.round(t * 1000));
+  }
+  return out;
+})();
+const realTurns = P.available
+  ? (P.interactions || []).filter(t => t.origin !== "none" && t.t_ms != null).map(t => ({ ...t, source: "transcript" }))
+  : submits.map((h, i) => ({ index: i + 1, t_ms: h.t_ms, origin: "human", source: "hooks" }));
+const before = P.available ? (P.interactions || []).filter(t => t.origin === "none") : [];
+// Agent work whose prompt is not in the bundle (removed by --cut, or before the first prompt shown) gets its own segment,
+// so it is never credited to another prompt.
+const isWork = h => !["SessionStart", "SessionEnd", "UserPromptSubmit"].includes(hookName(h));
+const orphans = [];
+const firstStart = realTurns.length ? realTurns[0].t_ms : Infinity;
+if (hooks.some(h => h.t_ms < firstStart && isWork(h))) orphans.push({ orphan: "before", t_ms: Math.min(...hooks.filter(isWork).map(h => h.t_ms)) });
+for (const c of M.cuts || []) {
+  const nextTurn = realTurns.find(t => t.t_ms >= c.to_ms);
+  const until = nextTurn ? nextTurn.t_ms : Infinity;
+  const work = hooks.filter(h => h.t_ms >= c.to_ms && h.t_ms < until && isWork(h));
+  if (work.length && !orphans.some(o => o.t_ms === work[0].t_ms)) orphans.push({ orphan: "after-cut", t_ms: work[0].t_ms });
+}
+let turns = [...realTurns, ...orphans].sort((a, b) => a.t_ms - b.t_ms);
+// Index of the first element at or after ms; the arrays are sorted by time.
+const lowerBound = (xs, ms, key = x => x.t_ms) => { let lo = 0, hi = xs.length; while (lo < hi) { const m = (lo + hi) >> 1; if (key(xs[m]) < ms) lo = m + 1; else hi = m; } return lo; };
+const within = (xs, a, b) => xs.slice(lowerBound(xs, a), lowerBound(xs, b));
+const cutStartAfter = ms => Math.min(Infinity, ...(M.cuts || []).filter(c => c.from_ms > ms).map(c => c.from_ms));
+turns.forEach((t, i) => {
+  const next = Math.min(i + 1 < turns.length ? turns[i + 1].t_ms : Infinity, cutStartAfter(t.t_ms));
+  t.next = next;
+  const stop = within(stops, t.t_ms, next)[0];
+  t.end = stop ? stop.t_ms : null;
+  t.events = within(hooks, t.t_ms, next).filter(h => hookName(h) !== "UserPromptSubmit");
+  t.calls = t.events.filter(h => hookName(h) === "PostToolUse" || hookName(h) === "PostToolUseFailure");
+  t.approvals = 0; t.approvalMs = 0;
+  t.events.forEach((h, k) => {
+    if (hookName(h) !== "PermissionRequest") return;
+    const resumed = t.events.slice(k + 1).find(x => hookName(x) !== "Notification" && hookName(x) !== "PermissionRequest");
+    const sessionEnd = M.duration_ms || h.t_ms;
+    let limit = resumed ? resumed.t_ms : stop ? stop.t_ms : Math.min(next, sessionEnd);
+    const refused = (P.refusals || []).find(ms => ms > h.t_ms && ms < next);
+    if (refused != null && refused <= limit) { limit = refused; h.refused = true; }
+    const esc = (P.interrupts || []).find(ms => ms > h.t_ms && ms < next);
+    if (!h.refused && esc != null && esc <= limit) { limit = esc; h.escaped = true; }
+    const cutAt = cutStartAfter(h.t_ms);
+    if (!resumed && !stop && !h.escaped && Number.isFinite(cutAt) && cutAt <= limit) h.cutAway = true;
+    if (!Number.isFinite(limit)) limit = sessionEnd;
+    // The screen goes quiet while the permission prompt waits; it repaints once when the agent sends its idle
+    // notification. The first other output after the prompt appeared is taken as the moment of the answer.
+    const notes = t.events.filter(x => hookName(x) === "Notification" && x.t_ms >= h.t_ms && x.t_ms < limit).map(x => x.t_ms);
+    let resume;
+    for (let i = lowerBound(outputsMs, h.t_ms + 501, x => x); i < outputsMs.length && outputsMs[i] < limit; i++) {
+      const o = outputsMs[i];
+      if (!notes.some(n => o >= n - 1000 && o <= n + 1000)) { resume = o; break; }
+    }
+    h.waitMs = h.cutAway ? null : Math.max(0, (resume ?? limit) - h.t_ms);
+    h.waitMeasured = resume != null;
+    // A refusal fires no hook; the screen changes when the person answers. No change at all means no answer.
+    if (!resumed && !stop && !h.escaped && !h.refused && !h.cutAway && resume == null) h.unanswered = true;
+    t.approvals += 1;
+    t.approvalMs += h.waitMs || 0;
+  });
+  t.agent = stop ? Math.max(0, stop.t_ms - t.t_ms - t.approvalMs) : null;
+  const prev = turns[i - 1];
+  t.waited = t.orphan || !prev ? null : prev.end != null ? Math.max(0, t.t_ms - prev.end) : null;
+});
+const typedTurns = turns.filter(t => !t.orphan && (t.origin === "human" || t.origin === "user"));
+let agentMs = sum(turns.map(t => t.agent));
+const isTyped = t => !t.orphan && (t.origin === "human" || t.origin === "user");
+let betweenMs = sum(turns.filter(isTyped).map(t => t.waited));
+const approvals = sum(turns.map(t => t.approvals));
+const approvalsMs = sum(turns.map(t => t.approvalMs));
+const tokensTotal = usage ? usage.input + usage.output + usage.cache_read + usage.cache_creation : P.available ? sum((P.interactions || []).map(t => t.total)) : null;
+const tokensOut = usage ? usage.output : P.available ? sum((P.interactions || []).map(t => t.output)) : null;
+
+// What each tool call did, from the hook's tool summary (command, path, lines changed; never file contents).
+const TEST_RE = /^(?:[A-Z_][A-Z0-9_]*=\S*\s+|timeout\s+\S+\s+|time\s+|nice\s+(?:-n\s*-?\d+\s+)?|env\s+(?:\S+=\S*\s+)*|command\s+)*(?:node\s+--test|(?:\S*\/)?python3?(?:\.\d+)?\s+\S*test\S*\.py|bun test|swift test|npx playwright test|(?:pnpm|yarn) exec (?:jest|vitest)|(?:\S*\/)?python3?(?:\.\d+)?\s+(?:-\S+\s+)*-m\s+(?:pytest|unittest)|(?:\S*\/)?pytest|uv run (?:pytest|python3? -m (?:pytest|unittest))|poetry run pytest|cargo (?:test|nextest)|go test|(?:npm|yarn|pnpm|bun)(?: run)? test|npx (?:jest|vitest|mocha)|jest|vitest|mocha|(?:bundle exec )?rspec|(?:\S*\/)?phpunit|just (?:check|test)|make (?:test|check)|tox|(?:\.\/)?gradlew? test|mvn test|ctest|dotnet test|deno test|mix test)(?:\s|$)/;
+const segments = cmd => String(cmd || "").split(/\s*(?:&&|\|\||;|\|)\s*/).map(x => x.replace(/^[({\s]+/, "").trim());
+const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+const SUB_TOOLS = new Set(["Task", "Agent"]);
+const rel = p => { if (!p) return ""; const cwd = (S.cwd || "").replace(/\/$/, ""); return cwd && p.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : p; };
+const tsum = h => h.payload.tool || {};
+const isTest = h => h.payload.tool_name === "Bash" && segments(tsum(h).command).some(x => TEST_RE.test(x));
+const chained = cmd => { const parts = segments(cmd); const i = parts.findIndex(x => TEST_RE.test(x)); return i >= 0 && i < parts.length - 1; };
+const testResult = h => hookName(h) === "PostToolUseFailure" ? "non-zero exit" : "exit 0";
+const testNote = h => chained(tsum(h).command) ? "The command runs more after the tests, so this exit status may not be the tests' own; play the moment to see the output." : "Exit status of the test command.";
+function toolLabel(h) {
+  const n = h.payload.tool_name || "tool", t = tsum(h);
+  if (n === "Bash") return [isTest(h) ? "tests" : "Bash", t.command || t.description || ""];
+  if (EDIT_TOOLS.has(n)) return [n, `${rel(t.path)}${t.lines_added != null ? ` +${t.lines_added}` : ""}${t.lines_removed != null ? ` -${t.lines_removed}` : ""}`];
+  if (SUB_TOOLS.has(n)) return ["subagent", t.subagent || t.description || ""];
+  if (n === "Grep" || n === "Glob") return [n, `${t.pattern || ""}${t.path ? ` in ${rel(t.path)}` : ""}`];
+  if (n === "WebFetch" || n === "WebSearch") return [n, t.url || t.pattern || ""];
+  return [n, rel(t.path) || t.description || ""];
+}
+const interrupts = (P.interrupts || []).slice();
+const compactions = (P.compactions || []).slice();
+const permissions = [];
+turns.forEach(t => {
+  t.events.forEach((h, k) => {
+    if (hookName(h) !== "PermissionRequest") return;
+    const later = t.events.slice(k + 1);
+    const nextAsk = later.findIndex(x => hookName(x) === "PermissionRequest" || hookName(x) === "Stop" || hookName(x) === "StopFailure");
+    const window = nextAsk < 0 ? later : later.slice(0, nextAsk);
+    const sameCmd = x => !tsum(h).command || !tsum(x).command || tsum(h).command === tsum(x).command;
+    const ran = window.find(x => (hookName(x) === "PostToolUse" || hookName(x) === "PostToolUseFailure") && x.payload.tool_name === h.payload.tool_name && sameCmd(x));
+    h.outcome = h.refused ? "declined" : h.escaped ? "stopped" : ran ? "approved" : h.cutAway ? "unknown" : h.unanswered ? "unanswered" : "not approved";
+    permissions.push(h);
+  });
+  t.interrupts = interrupts.filter(ms => ms >= t.t_ms && ms < t.next);
+  t.compactions = compactions.filter(ms => ms >= t.t_ms && ms < t.next);
+  t.shell = within(shell, t.t_ms, t.next);
+  t.tests = t.calls.filter(isTest);
+  t.edits = t.calls.filter(c => EDIT_TOOLS.has(c.payload.tool_name) && hookName(c) === "PostToolUse");
+  t.refusals = (P.refusals || []).filter(ms => ms >= t.t_ms && ms < t.next);
+  const ends = [...t.interrupts, ...t.refusals].sort((a, b) => a - b);
+  if (t.end == null && ends.length) {
+    t.interruptedAt = ends[ends.length - 1];
+    t.endedByRefusal = t.refusals.includes(t.interruptedAt);
+    t.agent = Math.max(0, t.interruptedAt - t.t_ms - t.approvalMs);
+  }
+});
+const cutBetween = (a, b) => (M.cuts || []).some(c => c.to_ms > a && c.from_ms < b);
+turns.forEach((t, i) => {
+  const prev = turns[i - 1];
+  if (t.waited == null && prev && prev.interruptedAt != null) t.waited = Math.max(0, t.t_ms - prev.interruptedAt);
+  if (t.waited != null && prev && cutBetween(prev.end ?? prev.interruptedAt ?? prev.t_ms, t.t_ms)) { t.waited = null; t.cutBefore = true; }
+});
+betweenMs = sum(turns.filter(isTyped).map(t => t.waited));
+agentMs = sum(turns.map(t => t.agent));
+// Prompt heuristics: only when the text is in the bundle. They describe the prompt, they do not score it.
+const words = s => new Set(String(s || "").toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) || []);
+const changedNames = new Set(changed.map(c => c.path.split("/").pop()));
+let prevTyped = null;
+for (const t of typedTurns) {
+  t.tags = [];
+  if (!(P.text && t.text)) continue;
+  const text = t.text, w = words(text);
+  if (/(?:^|[\s`'"(])(?![ei]\.g\.|i\.e\.)[A-Za-z_][\w\/-]*\.[A-Za-z][A-Za-z0-9]{0,5}\b/.test(text) || [...changedNames].some(n => text.includes(n))) t.tags.push("names a file");
+  if (/\b(do not|don't|dont|never|without|only|must|avoid|keep|não|nao|sem|apenas|nunca|somente)\b/i.test(text)) t.tags.push("sets a constraint");
+  if (/\btest|\bteste/i.test(text)) t.tags.push("mentions tests");
+  if (/^\s*(no\b|nope|actually|wait\b|that'?s (wrong|not)|não[, ]|nao[, ]|na verdade|errado)|\bi meant\b|\beu quis dizer\b/i.test(text)) t.tags.push("corrects the agent");
+  const pw = prevTyped ? words(prevTyped.text) : new Set();
+  const overlap = [...pw].filter(x => w.has(x)).length;
+  if (prevTyped && pw.size >= 3 && overlap / Math.min(pw.size, w.size) >= 0.6) t.tags.push(`rephrases #${prevTyped.index}`);
+  prevTyped = t;
+}
+const agentEdited = new Map();
+for (const t of turns) for (const e of t.edits) {
+  const path = tsum(e).path;
+  if (!path) continue;
+  const cur = agentEdited.get(path) || { turns: new Set(), added: 0, removed: 0 };
+  cur.turns.add(t.index); cur.added += tsum(e).lines_added || 0; cur.removed += tsum(e).lines_removed || 0;
+  agentEdited.set(path, cur);
+}
+const exitGit = gitPhase("exit");
+const commits = exitGit?.payload.commits || [];
+const newCommits = exitGit?.payload.new_commits;
+const toolDetail = toolCalls.some(h => h.payload.tool);
+const recordedRoot = (gitPhase("exit") || gitPhase("start"))?.payload.root;
+const repoRoot = recordedRoot || S.cwd || "";
+const nfc = x => String(x || "").normalize("NFC").replace(/\/+$/, "");
+const absPath = p => nfc(p.startsWith("/") ? p : `${S.cwd || ""}/${p}`);
+const editedFor = p => {
+  const want = nfc(`${repoRoot}/${p}`);
+  for (const [k, v] of agentEdited) if (absPath(k) === want) return v;
+  if (recordedRoot) return null;
+  // Older recordings have no repository root: accept a unique path suffix match.
+  const hits = [...agentEdited].filter(([k]) => absPath(k).endsWith("/" + nfc(p)));
+  return hits.length === 1 ? hits[0][1] : null;
+};
+const changedByAgent = changed.filter(c => editedFor(c.path));
+
+// Header
+document.title = `${M.program} session ${S.id} - Witnessed`;
+$("title").append(`${M.program} session`, el("span", { class: "id" }, S.id));
+$("meta").append(
+  el("span", {}, when(S.created_at_ns)),
+  el("span", {}, dur(M.duration_ms)),
+  el("span", { class: exitOk ? null : "bad" }, exitText),
+  S.cwd ? el("span", { class: "mono", title: S.cwd }, base(S.cwd)) : null,
+  el("details", {}, el("summary", {}, "command"), el("div", { class: "cmd" }, M.command_display)));
+$("badges").append(
+  el("span", { class: `badge ${M.chain.token_bound ? "ok" : "warn"}` }, el("span", { class: "dot" }), M.chain.token_bound ? "Started with an invitation token" : "No invitation token"),
+  el("span", { class: `badge ${edited ? "warn" : "ok"}` }, el("span", { class: "dot" }), edited ? `${M.fates.redacted || 0} events redacted, ${M.fates.cut || 0} cut` : "Nothing redacted or cut"),
+  el("span", { class: "badge" }, `${num(M.chain.events)} events in the hash chain`),
+  el("details", {}, el("summary", {}, "How to verify"),
+    el("div", { class: "howto" },
+      el("p", {}, "Verification happens outside this page. On a machine with witnessed, run:"),
+      el("pre", { class: "cmdline" }, verifyCmd),
+      el("p", {}, el("b", {}, "consistent"), ": the files were not edited after bundling. ", el("b", {}, "anchored"), ": the events up to the last anchor existed while the session ran, as the anchors you received show. ", el("b", {}, "token matched"), ": the session was started with the token you issued."),
+      el("p", {}, "None of this shows what happened outside the recorded terminal. The prompts, times and tokens per prompt come from the agent's transcript and are not covered by the chain."))));
+
+// Stats
+const stats = [];
+if (turns.length) {
+  const others = realTurns.length - typedTurns.length;
+  stats.push(["Prompts", typedTurns.length, others ? `plus ${others} ${others === 1 ? "command or notification" : "commands or notifications"}` : "typed by the user", ""]);
+  stats.push(["Agent working", secs(agentMs), `${plural(toolCalls.length, "tool call")}${toolFailed ? `, ${toolFailed} failed` : ""}`, "agent"]);
+  stats.push(["User thinking", secs(betweenMs + approvalsMs), approvals ? `${secs(betweenMs)} between prompts, ${secs(approvalsMs)} at ${plural(approvals, "permission prompt")}` : "between prompts", "human"]);
+} else if (hooks.length) {
+  stats.push(["Tool calls", toolCalls.length, toolFailed ? `${toolFailed} failed` : "from agent hooks", "agent"]);
+}
+if (tokensTotal != null) stats.push(["Tokens", kilo(tokensTotal), `${num(tokensOut)} output${usage ? `, ${usage.api_calls} API calls` : ""}${usage && edited ? "; whole session, removed parts included" : ""}`, ""]);
+if (shell.length) stats.push(["Shell commands", shell.length, `${shellFailed} failed`, shellFailed ? "bad" : ""]);
+if (changedCount != null) stats.push(["Files changed", changedCount, `since ${short(gitPhase("start")?.payload.head)}`, ""]);
+if (marks.length) stats.push(["Markers", marks.length, "set during the session", ""]);
+$("stats").append(...stats.map(([l, v, s, c]) => el("div", { class: `stat ${c}` }, el("div", { class: "l" }, l), el("div", { class: "v" }, v), el("div", { class: "s" }, s))));
+const notMeasured = [];
+if (!hooks.length) notMeasured.push("prompts, tool calls and tokens (no agent hooks; Claude Code reports them when started as witnessed run -- claude)");
+else if (!P.available) notMeasured.push(`prompt text and tokens per prompt (${P.reason})`);
+if (!shell.length) notMeasured.push("shell commands (no OSC 133 marks)");
+if (changedCount == null) notMeasured.push(git.length ? "files changed (no exit snapshot)" : "files changed (not a git work tree)");
+notMeasured.push("cost (no price table)");
+$("unmeasured").textContent = `Not measured: ${notMeasured.join("; ")}.`;
+
+// Player. Idle gaps longer than IDLE seconds are shortened, so player time differs from recorded time;
+// the cast's own intervals give the mapping between the two.
+const IDLE = 3;
+const clock = (() => {
+  const rec = [0], play = [0];
+  let t = 0, c = 0, first = true;
+  for (const line of String(D.cast || "").split("\n")) {
+    if (!line) continue;
+    if (first) { first = false; continue; }
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (!Array.isArray(e) || typeof e[0] !== "number") continue;
+    t += e[0]; c += Math.min(e[0], IDLE);
+    rec.push(t); play.push(c);
+  }
+  const at = (xs, x) => { let lo = 0, hi = xs.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (xs[mid] <= x) lo = mid; else hi = mid - 1; } return lo; };
+  return {
+    total: c,
+    toPlayer: ms => { const s = ms / 1000, i = at(rec, s); return play[i] + Math.min(s - rec[i], IDLE); },
+    toRecorded: ps => { const i = at(play, ps); return (rec[i] + (ps - play[i])) * 1000; },
+  };
+})();
+let player = null;
+const host = $("player");
+function ensurePlayer() {
+  if (player || !window.AsciinemaPlayer) return player;
+  player = AsciinemaPlayer.create({ data: D.cast }, host, { fit: "width", idleTimeLimit: IDLE, poster: `npt:${clock.total}` });
+  followPlayback();
+  return player;
+}
+if (window.AsciinemaPlayer) {
+  $("player-note").textContent = `Click a time on the left to play from there. Idle gaps are shortened to ${IDLE} s, so the player runs ${dur(clock.total * 1000)} for ${dur(M.duration_ms)} recorded; times shown are the recorded ones.`;
+} else {
+  $("player-note").append("The terminal player did not start in this browser. ", el("code", {}, `witnessed replay ${S.id}`), " plays the recording on the machine that made it; ", el("code", {}, "session.cast"), " plays in any asciinema player.");
+}
+const seek = ms => {
+  showTab("timeline");
+  const p = ensurePlayer();
+  if (p) Promise.resolve(p.seek(clock.toPlayer(ms))).then(() => p.play());
+};
+const atBtn = ms => el("button", { type: "button", class: "at", title: "Play from here", onclick: () => seek(ms) }, off(ms));
+
+// Story
+const story = $("story");
+const storyRows = [];
+story.append(el("h2", { class: "sec" }, "What happened"));
+const start = gitPhase("start");
+story.append(el("div", { class: "turn system" },
+  el("div", { class: "head" }, el("span", { class: "n" }, "start"), atBtn(0),
+    el("span", {}, `${M.program} started${S.cwd ? ` in ${base(S.cwd)}` : ""}${start ? ` at ${short(start.payload.head)}${start.payload.dirty_paths ? `, ${plural(start.payload.dirty_paths, "path")} already modified` : ", clean tree"}` : ""}`),
+    before.length && sum(before.map(t => t.total)) ? el("span", { class: "right" }, el("span", { class: "k" }, `${kilo(sum(before.map(t => t.total)))} tokens before the first prompt`)) : null)));
+function stepsFor(t) {
+  const items = [];
+  const extra = [
+    ...t.interrupts.map(ms => ({ t_ms: ms, kind: "interrupt" })),
+    ...t.compactions.map(ms => ({ t_ms: ms, kind: "compaction" })),
+    ...t.shell.map(r => ({ t_ms: r.t_ms, kind: "shell", r })),
+  ];
+  const all = [...t.events.map(h => ({ t_ms: h.t_ms, kind: "hook", h })), ...extra].sort((a, b) => a.t_ms - b.t_ms);
+  let run = null;
+  const stamp = ms => el("span", { class: "t" }, off(ms));
+  for (const item of all) {
+    if (item.kind === "interrupt") { run = null; items.push(el("button", { type: "button", class: "step you", title: "Esc pressed while the agent was working or waiting for an answer", onclick: () => seek(item.t_ms) }, stamp(item.t_ms), "you interrupted")); continue; }
+    if (item.kind === "compaction") { run = null; items.push(el("span", { class: "step note" }, stamp(item.t_ms), "context compacted")); continue; }
+    if (item.kind === "shell") { run = null; const code = item.r.payload.exit_code; items.push(el("button", { type: "button", class: `step ${code ? "bad" : "you"}`, title: "A command finished in the recorded shell (OSC 133)", onclick: () => seek(item.t_ms) }, stamp(item.t_ms), `shell command, exit ${code ?? "?"}`)); continue; }
+    const h = item.h, name = hookName(h), p = h.payload;
+    if (name === "PostToolUse" || name === "PostToolUseFailure") {
+      const bad = name === "PostToolUseFailure" || tsum(h).interrupted;
+      const [label, detail] = toolLabel(h);
+      const groupable = ["Read", "Grep", "Glob", "LS"].includes(p.tool_name) && !bad;
+      const title = [detail, tsum(h).description, tsum(h).error ? `error: ${tsum(h).error}` : null, tsum(h).interrupted ? "interrupted" : null].filter(Boolean).join("\n") || (bad ? "The tool reported a failure" : "Tool call");
+      if (groupable && run && run.tool === p.tool_name) {
+        run.n += 1; run.details.push(detail);
+        run.node.title = run.details.join("\n");
+        run.node.replaceChildren(stamp(run.at), `${label} x${run.n}`);
+        continue;
+      }
+      const cls = isTest(h) ? `step test ${bad ? "bad" : chained(tsum(h).command) ? "unsure" : ""}` : `step ${bad ? "bad" : ""}`;
+      const text = isTest(h) ? `tests, ${testResult(h)}${chained(tsum(h).command) ? "*" : ""}` : `${label}${bad ? " failed" : ""}`;
+      const node = el("button", { type: "button", class: cls, title: isTest(h) ? `${title}\n${testNote(h)}` : title, onclick: () => seek(h.t_ms) }, stamp(h.t_ms), text, detail && !groupable ? el("span", { class: "d" }, detail) : null, groupable && detail ? el("span", { class: "d" }, detail) : null);
+      run = groupable ? { tool: p.tool_name, n: 1, node, at: h.t_ms, details: [detail] } : null;
+      items.push(node);
+    } else if (name === "PermissionRequest") {
+      run = null;
+      const [label, detail] = p.tool_name ? toolLabel(h) : ["", ""];
+      items.push(el("button", { type: "button", class: "step wait", title: `${detail ? detail + "\n" : ""}${h.waitMeasured ? "Measured from the request until the terminal showed activity again." : "The terminal showed no activity before the next agent event, so this is the time until that event."}`, onclick: () => seek(h.t_ms) }, stamp(h.t_ms),
+        `asked permission${label ? ` for ${label}` : ""}: ${({ approved: "you approved", declined: "you declined (No or Esc); it did not run", stopped: "you pressed Esc", unanswered: "never answered", unknown: "answer removed for sharing" })[h.outcome] || "not approved; the command did not run"}${h.waitMs != null ? ` after ${secs(h.waitMs)}` : ""}`, detail ? el("span", { class: "d" }, detail) : null));
+    } else if (name === "Notification" && p.notification_type && p.notification_type !== "permission_prompt") {
+      run = null;
+      items.push(el("span", { class: "step note" }, stamp(h.t_ms), p.message || p.notification_type));
+    } else if (name === "Stop" || name === "StopFailure") {
+      items.push(el("button", { type: "button", class: `step ${name === "StopFailure" ? "bad" : "end"}`, onclick: () => seek(h.t_ms) }, stamp(h.t_ms), name === "StopFailure" ? "failed" : `answered${t.reply_chars ? `, ${num(t.reply_chars)} chars` : ""}`));
+      break;
+    } else if (name === "SessionEnd") {
+      items.push(el("span", { class: "step note" }, stamp(h.t_ms), "session ended"));
+    }
+  }
+  return items;
+}
+if (!turns.length) {
+  story.append(el("div", { class: "empty" }, hooks.length
+    ? "No prompt was recorded in this session."
+    : "No agent events were recorded, so there is no prompt-by-prompt story. The terminal replay and the event list below cover the whole session."));
+}
+for (const t of turns) {
+  if (t.orphan) {
+    const card = el("div", { class: "turn system" },
+      el("div", { class: "head" }, el("span", { class: "n" }, "?"), atBtn(t.t_ms),
+        el("span", {}, t.orphan === "before" ? "Agent work before the first prompt in this file" : "Agent work after a part removed for sharing; the prompt that started it is not in this file")));
+    const steps = stepsFor(t);
+    if (steps.length) card.append(el("div", { class: "steps" }, el("span", { class: "lbl" }, "Agent:"), steps));
+    storyRows.push([t.t_ms, card]);
+    story.append(card);
+    continue;
+  }
+  const typed = t.origin === "human" || t.origin === "user";
+  if (!typed && !t.calls.length && !t.total && t.agent == null) {
+    const card = el("div", { class: "turn system" },
+      el("div", { class: "head" }, el("span", { class: "n" }, `#${t.index}`), atBtn(t.t_ms),
+        el("span", {}, `${t.origin === "command" ? "command" : t.origin}: `, t.source === "transcript" && P.text ? el("span", { class: "mono" }, t.text || "") : `${num(t.chars || 0)} characters`),
+        t.events.some(h => hookName(h) === "SessionEnd") ? el("span", { class: "k" }, "session ended") : null));
+    storyRows.push([t.t_ms, card]);
+    story.append(card);
+    continue;
+  }
+  let prompt;
+  if (t.source !== "transcript") prompt = el("div", { class: "prompt hidden" }, "Prompt reported by the agent's hook; its text and tokens are not in this bundle");
+  else if (P.text) prompt = el("div", { class: "prompt" }, typed ? null : el("span", { class: "origin" }, t.origin), t.text || "(empty prompt)");
+  else prompt = el("div", { class: "prompt hidden" }, typed ? null : el("span", { class: "origin" }, t.origin), `${num(t.chars)} characters${t.images ? `, ${plural(t.images, "image")}` : ""}; the text was not included in this bundle`);
+  const card = el("div", { class: "turn" },
+    el("div", { class: "head" },
+      el("span", { class: "n" }, `#${t.index}`), atBtn(t.t_ms),
+      t.cutBefore ? el("span", { class: "gap" }, "after a part removed for sharing") : t.waited != null ? el("span", { class: "gap", title: "From the end of the previous answer to this prompt" }, `after ${secs(t.waited)} of thinking${turns[turns.indexOf(t) - 1]?.reply_chars ? ` on a ${num(turns[turns.indexOf(t) - 1].reply_chars)}-char answer` : ""}`) : null,
+      el("span", { class: "right" },
+        t.agent != null ? el("span", { class: "k agent", title: "From the prompt to the agent's answer (Stop hook), minus the time a permission prompt waited for you" }, `agent ${secs(t.agent)}`)
+          : t.interruptedAt != null ? el("span", { class: "k human" }, `${t.endedByRefusal ? "ended when you declined a command" : "you interrupted"} after ${secs(t.interruptedAt - t.t_ms)}`)
+          : el("span", { class: "k warn", title: "No Stop hook before the next prompt: interrupted, or still running at exit" }, "no answer recorded"),
+        t.approvals ? el("span", { class: "k warn", title: "From each permission request until the terminal showed activity again" }, `${secs(t.approvalMs)} waiting for you`) : null,
+        t.calls.length ? el("span", { class: `k ${t.calls.some(c => hookName(c) === "PostToolUseFailure") ? "bad" : ""}` }, plural(t.calls.length, "tool call")) : null,
+        t.total != null ? el("span", { class: "k", title: `${num(t.input)} input, ${num(t.output)} output, ${num(t.cache_read)} cache read, ${num(t.cache_creation)} cache write, ${plural(t.api_calls, "API call")}` }, `${kilo(t.total)} tokens`) : null)),
+    prompt);
+  if (t.tags && t.tags.length) card.append(el("div", { class: "tags", title: "Heuristics on the prompt text; they describe the prompt, they do not grade it" }, t.tags.map(x => el("span", { class: "tag human" }, x))));
+  const steps = stepsFor(t);
+  if (steps.length) card.append(el("div", { class: "steps" }, el("span", { class: "lbl" }, "Agent:"), steps));
+  else if (t.agent == null) card.append(el("div", { class: "steps" }, el("span", { class: "lbl" }, "Agent: no hook events after this prompt")));
+  storyRows.push([t.t_ms, card]);
+  story.append(card);
+}
+story.append(el("div", { class: "turn system" },
+  el("div", { class: "head" }, el("span", { class: "n" }, "end"), atBtn(Math.max(0, (M.duration_ms || 0) - 1)),
+    el("span", { class: exitOk ? null : "bad" }, `${M.program} ${exitText} after ${dur(M.duration_ms)}${newCommits ? `, ${plural(newCommits, "commit")} made` : ""}`),
+    changedCount != null ? el("span", { class: "right" }, el("a", { href: "#code", onclick: e => { e.preventDefault(); showTab("code"); } }, `${plural(changedCount, "file")} changed`)) : null)));
+if (turns.length) story.append(el("div", { class: "caveat" },
+  `Thinking: from the previous answer (Stop hook) to this prompt. Agent: from the prompt to its Stop hook, minus the time permission prompts waited for you (measured until the terminal showed activity again). Steps: the agent's tool calls from its hooks${toolDetail ? ", with the command, path and lines changed (never file contents); hover for the full command or error" : "; this recording has only tool names"}. Tokens: the replies until the next prompt.`
+  + (P.available ? ` Prompts come from the ${P.source}${P.text ? ", text included with --prompts after redaction." : "; the text is included only when the bundle is written with --prompts."}` : "")));
+
+// Files
+if (changed.length) {
+  const dirtyAtStart = new Set(start?.payload.dirty || []);
+  $("files-cnt").textContent = `${changed.length}${changedCount > changed.length ? ` of ${changedCount}` : ""}`;
+  const by = path => {
+    const a = editedFor(path);
+    if (a) return el("span", { class: "by" }, `agent edit in ${[...a.turns].map(n => `#${n}`).join(", ")} (edit calls touched +${a.added} -${a.removed} lines; the net change is in Code changes)`);
+    return toolDetail ? el("span", { class: "by out", title: "No Edit, Write, MultiEdit or NotebookEdit call named this file: changed by you, by a shell command (the agent's or yours), or generated" }, "not by an agent edit tool") : null;
+  };
+  $("files").append(el("ul", { class: "files" }, changed.map(c => el("li", {}, el("span", { class: `st ${c.status === "?" ? "q" : c.status}` }, c.status), el("span", {}, c.path), by(c.path), dirtyAtStart.has(c.path) ? el("span", { class: "k" }, "already modified at start") : null))),
+    el("div", { class: "caveat" }, `Against the HEAD at start (${short(start?.payload.head)}), from git diff --name-status plus untracked files (?).`));
+} else {
+  $("files-cnt").textContent = changedCount === 0 ? "none" : "unavailable";
+  $("files").append(el("div", { class: "caveat", style: "margin:0" }, changedCount === 0 ? "No file differs from the HEAD recorded at start." : git.length ? "No exit snapshot: the session was lost or the repository had no commit at start." : "The working directory is not a git work tree."));
+}
+
+if (commits.length) {
+  $("files").append(el("div", { class: "caveat" }, `${plural(newCommits, "commit")} made during the session:`),
+    el("ul", { class: "commits" }, commits.map(c => el("li", {}, el("span", { class: "h" }, c.hash.slice(0, 10)), c.subject))));
+}
+
+// Signals for the reviewer
+const median = xs => { const v = xs.filter(x => x != null).sort((a, b) => a - b); if (!v.length) return null; const m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+const sig = (title, rows) => {
+  const items = rows.filter(r => r && r[0] != null);
+  if (!items.length) return null;
+  return el("div", { class: "sig" }, el("h3", {}, title), el("ul", {}, items.map(([v, label, x]) => el("li", {}, el("span", { class: "v" }, v), el("span", {}, label, x ? el("span", { class: "x" }, ` ${x}`) : null)))));
+};
+if (turns.length) {
+  const approved = permissions.filter(h => h.outcome === "approved").length;
+  const modes = [...new Set(hooks.map(h => h.payload.permission_mode).filter(Boolean))];
+  const cmds = turns.filter(t => t.origin === "command");
+  const tagCount = tag => typedTurns.filter(t => (t.tags || []).some(x => x.startsWith(tag))).length;
+  const allTests = turns.flatMap(t => t.tests);
+  const lastTest = allTests[allTests.length - 1];
+  const subagents = toolCalls.filter(h => SUB_TOOLS.has(h.payload.tool_name));
+  const notByAgent = changed.length - changedByAgent.length;
+  const textual = P.text && typedTurns.some(t => t.text);
+  $("signals").append(...[
+    sig("Directing the agent", [
+      [typedTurns.length, typedTurns.length === 1 ? "prompt typed" : "prompts typed", P.available ? `median ${num(median(typedTurns.map(t => t.chars)) || 0)} chars` : null],
+      textual ? [tagCount("sets a constraint"), "set a constraint"] : null,
+      textual ? [tagCount("names a file"), "named a file"] : null,
+      textual ? [tagCount("corrects"), "corrected the agent"] : null,
+      textual ? [tagCount("rephrases"), "rephrased the previous prompt"] : null,
+      P.available ? [interrupts.length, interrupts.length === 1 ? "interruption" : "interruptions", `Esc while the agent worked${(M.cuts || []).length ? ", in the shared part" : ""}`] : null,
+    ]),
+    sig("Trust and control", [
+      hooks.length ? (permissions.length ? [`${approved}/${permissions.length}`, "permission requests approved", `${secs(approvalsMs)} waiting for you`] : [0, "permission requests"]) : null,
+      modes.length ? [modes.length, `permission mode${modes.length > 1 ? "s" : ""}`, modes.join(", ")] : null,
+      [subagents.length, subagents.length === 1 ? "subagent launched" : "subagents launched", subagents.length ? [...new Set(subagents.map(h => tsum(h).subagent).filter(Boolean))].join(", ") : null],
+      !P.available ? null : [cmds.length, cmds.length === 1 ? "slash command" : "slash commands", cmds.length && P.text ? cmds.map(c => (c.text || "").split(" ")[0]).join(", ") : null],
+      P.available ? [compactions.length, compactions.length === 1 ? "context compaction" : "context compactions"] : null,
+    ]),
+    sig("Verifying the work", [
+      toolDetail ? [allTests.length, allTests.length === 1 ? "test run by the agent" : "test runs by the agent", allTests.length ? (allTests.every(h => chained(tsum(h).command)) ? "exit status not observable: other commands ran after the tests" : `${allTests.filter(h => hookName(h) === "PostToolUseFailure").length} with a non-zero exit`) : null] : null,
+      lastTest ? [testResult(lastTest) === "exit 0" ? "0" : "!=0", el("span", {}, "exit of the last test run at ", atBtn(lastTest.t_ms)), chained(tsum(lastTest).command) ? "may include later commands" : null] : null,
+      changedCount != null && toolDetail ? [changedByAgent.length, changedByAgent.length === 1 ? "changed file edited by the agent" : "changed files edited by the agent", notByAgent ? `${notByAgent} changed otherwise` : null] : null,
+      newCommits != null ? [newCommits, "commits made"] : null,
+      shell.length ? [shell.length, "shell commands", `${shellFailed} failed`] : null,
+    ]),
+    sig("Pace", [
+      [secs(median(turns.filter(isTyped).slice(1).map(t => t.waited))), "median thinking between prompts"],
+      [secs(median(turns.map(t => t.agent))), "median agent time per prompt"],
+      P.available ? [kilo(median(turns.map(t => t.reply_chars).filter(Boolean)) || 0), "median answer length", "characters"] : null,
+      typedTurns.length ? [(toolCalls.length / typedTurns.length).toFixed(1), "tool calls per prompt"] : null,
+    ]),
+  ].filter(Boolean));
+  $("sig-note").textContent = `Evidence for a person to weigh, not a score.${textual ? " Prompt tags are text heuristics." : P.available ? " Prompt tags need the text (bundle --prompts)." : ""}${toolDetail || !toolCalls.length ? "" : !S.record_output ? " Tool details (commands, paths, test results) are not kept when terminal output is not recorded." : limitHit ? " Tool details stop when the recording limit is reached." : " This recording has tool names only; commands, paths and test results need a recording made by an witnessed version that records tool details."} Nothing here covers what happened outside the recorded terminal.`;
+}
+
+// Events
+const CATS = {
+  agent: t => t === "agent.hook", shell: t => t === "shell.command_finished", marks: t => t === "user.mark", git: t => t === "git.snapshot",
+  notices: t => t.startsWith("runtime.") || t === "terminal.notification",
+  session: t => t.startsWith("session.") || t.startsWith("process.") || t === "terminal.resized", redacted: () => false,
+};
+function category(r) {
+  if (r.fate === "redacted" && (r.type === "terminal.output" || r.type === "terminal.input" || r.type === "terminal.snapshot")) return "redacted";
+  if (r.type === "cut") return "redacted";
+  for (const [k, f] of Object.entries(CATS)) if (f(r.type)) return k;
+  return "session";
+}
+function describe(r) {
+  const p = r.payload || {};
+  switch (r.type) {
+    case "agent.hook": return [p.hook_event_name, p.tool_name, p.notification_type].filter(Boolean).join(" ") + (p.message ? `: ${p.message}` : "");
+    case "shell.command_finished": return `command finished, exit ${p.exit_code ?? "unknown"}`;
+    case "user.mark": return p.label ? `mark: ${p.label}` : "mark";
+    case "git.snapshot": return `git ${p.phase}: HEAD ${short(p.head)}${p.dirty_paths != null ? `, ${p.dirty_paths} paths modified or untracked` : ""}${p.changed_paths != null ? `, ${p.changed_paths} changed since start` : ""}`;
+    case "session.created": return `created: ${(p.command || []).join(" ")}`;
+    case "process.started": return `process started, pid ${p.pid}`;
+    case "process.exited": return p.exit_code != null ? `process exited with code ${p.exit_code}` : `process killed by signal ${p.signal}`;
+    case "session.attached": return `attached (${p.client || "client"})`;
+    case "session.detached": return `detached (${p.reason})`;
+    case "session.stop_requested": return `stop requested, signal ${p.signal}`;
+    case "session.terminated": return `terminated: ${p.reason}`;
+    case "terminal.resized": return `resized to ${p.cols}x${p.rows}`;
+    case "terminal.notification": return `notification (${p.source}): ${p.text}`;
+    case "runtime.warning": case "runtime.error": return `${p.code}: ${p.message || ""}`;
+    case "terminal.output": return "terminal output redacted";
+    case "terminal.input": return "terminal input redacted";
+    case "terminal.snapshot": return "screen snapshot redacted";
+    case "cut": return r.text;
+    default: return r.type;
+  }
+}
+$("events-cnt").textContent = `${rows.length} listed of ${num(M.chain.events)} recorded; terminal bytes are in the player`;
+const active = new Set(Object.keys(CATS));
+const counts = {};
+for (const r of rows) { const c = category(r); counts[c] = (counts[c] || 0) + 1; }
+for (const k of Object.keys(CATS)) {
+  if (!counts[k]) continue;
+  const b = el("button", { type: "button", "aria-pressed": "true", onclick: () => { active.has(k) ? active.delete(k) : active.add(k); b.setAttribute("aria-pressed", String(active.has(k))); renderRows(); } }, `${k} ${counts[k]}`);
+  $("filters").append(b);
+}
+let rendered = [];
+function renderRows() {
+  const list = $("rows");
+  list.replaceChildren();
+  rendered = [];
+  for (const r of rows) {
+    const c = category(r);
+    if (!active.has(c)) continue;
+    const n = el("div", { class: `row ${r.fate}`, title: r.timestamp || "", tabindex: "0", role: "button", onclick: () => seek(r.t_ms), onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); seek(r.t_ms); } } },
+      el("span", { class: "t" }, off(r.t_ms)), el("span", { class: "c" }, el("span", { class: "k" }, c)), el("span", { class: "d" }, describe(r)));
+    rendered.push([r.t_ms, n]);
+    list.append(n);
+  }
+  if (!rendered.length) list.append(el("div", { class: "caveat", style: "padding:10px" }, "No events in the selected categories."));
+}
+renderRows();
+
+// Session and integrity
+const kv = pairs => el("dl", {}, pairs.filter(p => p[1] != null).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+$("session").append(kv([
+  ["Program", M.program], ["Command", el("span", { class: "mono" }, M.command_display)], ["Working dir", S.cwd],
+  ["Started", when(S.created_at_ns)], ["Duration", dur(M.duration_ms)], ["Exit", exitText],
+  ["Git HEAD", git.length ? `${short(start?.payload.head)} -> ${short(gitPhase("exit")?.payload.head)}` : "not a git work tree"],
+  ["Agent session", S.agent_session_id], ["Input recorded", S.record_input ? "yes" : "no"], ["Output recorded", S.record_output ? "yes" : "no"],
+  ["Models", usage && usage.models && usage.models.length ? usage.models.join(", ") : null],
+  ["Token detail", usage ? `${num(usage.input)} input, ${num(usage.output)} output, ${num(usage.cache_read)} cache read, ${num(usage.cache_creation)} cache write, ${usage.api_calls} API calls` : null],
+  ["Recorder", `${M.generator.name} ${M.generator.version}`], ["Bundled", M.created_at],
+]));
+const files = Object.entries(M.files).map(([name, f]) => [name, el("span", { class: "mono" }, `${f.sha256.slice(0, 16)}... ${num(f.bytes)} B`)]);
+$("integrity").append(
+  el("p", { style: "margin:0 0 4px" }, "Verification happens outside this page:"),
+  el("pre", { class: "cmdline" }, verifyCmd),
+  kv([
+    ["Chain", el("span", { class: "mono" }, `${M.chain.algorithm}, ${num(M.chain.events)} events`)],
+    ["Head", el("span", { class: "mono" }, M.chain.head)],
+    ["Token", M.chain.token_bound ? "bound; verify --token checks it" : "not bound"],
+    ["Kept", `${num(M.fates.kept || 0)} events, hash-checked`],
+    ["Redacted", `${num(M.fates.redacted || 0)} events, ${num(M.redaction.matches)} matches replaced with *, not hash-checked`],
+    ["Cut", `${num(M.fates.cut || 0)} events removed; their hashes stay in the chain`],
+    ...files,
+  ]),
+  el("div", { class: "caveat" }, "Without anchors received while the session ran, the bundle is consistent with itself but self-reported: it shows how the session went in the recorded terminal, not that nothing happened outside it."));
+
+// Tabs
+const DEC = D.decisions && typeof D.decisions === "object" ? D.decisions : null;
+const TABS = [["overview", "Overview"], ...(DEC ? [["review", "Review"]] : []), ["timeline", "Timeline"], ["code", "Code changes"], ["details", "Details"]];
+function showTab(id) {
+  for (const [t] of TABS) {
+    $(`tab-${t}`).hidden = t !== id;
+    const b = $(`tabbtn-${t}`);
+    if (b) b.setAttribute("aria-selected", String(t === id));
+  }
+  if (id === "timeline") ensurePlayer();
+  try { history.replaceState(null, "", `#${id}`); } catch {}
+}
+$("tabs").append(...TABS.map(([id, label]) => el("button", { type: "button", role: "tab", id: `tabbtn-${id}`, "aria-controls": `tab-${id}`, "aria-selected": "false", onclick: () => showTab(id) }, label)));
+
+// Shared facts for the overview
+const AGENTS = { claude: "Claude Code", codex: "Codex CLI", gemini: "Gemini CLI", opencode: "OpenCode" };
+const isAgent = !!AGENTS[M.program] || hooks.length > 0;
+const agentName = AGENTS[M.program] || M.program;
+const allTestsRun = turns.flatMap(t => t.tests || []);
+const lastTestRun = allTestsRun[allTestsRun.length - 1];
+const allEdits = turns.flatMap(t => t.edits || []);
+const firstEdit = allEdits[0], lastEdit = allEdits[allEdits.length - 1];
+const testBeforeEdit = firstEdit ? allTestsRun.find(h => h.t_ms < firstEdit.t_ms) : null;
+const testAfterLastEdit = lastEdit ? allTestsRun.find(h => h.t_ms > lastEdit.t_ms) : null;
+const tagged = tag => typedTurns.filter(t => (t.tags || []).some(x => x.startsWith(tag)));
+const approvedList = permissions.filter(h => h.outcome === "approved");
+const otherChanged = toolDetail ? changed.filter(c => !editedFor(c.path)) : [];
+const hasDiff = !!(M.diff && M.diff.files != null);
+const diffShown = typeof D.diff === "string";
+const diffStatus = M.diff ? M.diff.status : null;
+const promptLink = t => el("button", { type: "button", class: "at", title: "Open in the timeline", onclick: () => { seek(t.t_ms); } }, `#${t.index} at ${off(t.t_ms)}`);
+const momentLink = (ms, label) => el("button", { type: "button", class: "at", title: "Play from here", onclick: () => seek(ms) }, label || off(ms));
+const goCode = label => el("button", { type: "button", class: "at", onclick: () => showTab("code") }, label);
+const rate = n => (n === 1 ? "once" : `${n} times`);
+
+// Overview
+const ov = $("tab-overview");
+const card = (title, ...kids) => el("section", { class: "ocard" }, el("h2", {}, title), ...kids);
+const short1 = s => { const f = String(s || "").replace(/\s+/g, " ").trim(); return f.length > 70 ? f.slice(0, 70) + "..." : f; };
+
+const summary = [];
+summary.push(isAgent
+  ? `The person worked for ${dur(M.duration_ms)} with ${agentName}, an AI coding assistant, in the folder ${base(S.cwd) || "of the exercise"}.`
+  : `The recording shows ${dur(M.duration_ms)} of the program ${agentName} in the folder ${base(S.cwd) || "of the exercise"}; no AI coding assistant was recorded.`);
+if (turns.length) {
+  let s1 = `They gave the AI ${plural(typedTurns.length, "instruction")}`;
+  const extras = [];
+  if (interrupts.length) extras.push(`stopped it ${rate(interrupts.length)}`);
+  if (tagged("corrects").length) extras.push(`corrected it ${rate(tagged("corrects").length)}`);
+  summary.push(s1 + (extras.length ? `, ${extras.join(" and ")}` : "") + ".");
+  if (permissions.length) {
+    const unknown = permissions.filter(h => h.outcome === "unknown").length;
+    const declined = permissions.filter(h => h.outcome === "declined").length;
+    summary.push(`The AI asked for permission before ${plural(permissions.length, "action")}; the person approved ${approvedList.length}${declined ? ` and declined ${declined}` : ""}${unknown ? ` (the answer to ${unknown} was removed for sharing)` : ""}.`);
+  }
+  if (toolDetail) {
+    if (allTestsRun.length) summary.push(`The AI ran a recognized test command ${rate(allTestsRun.length)}. ${testAfterLastEdit ? "One ran after the AI's last edit." : lastEdit ? "None was recognized after the AI's last edit." : ""}`);
+    else if (allEdits.length) summary.push("The AI edited code; no recognized test command was seen. Check the replay, since tests can run in ways the page does not recognize.");
+  }
+} else if (!hooks.length) {
+  summary.push("No AI assistant events were recorded; the terminal replay shows what happened.");
+}
+if (P.cut) summary.push(`${P.cut} ${P.cut === 1 ? "instruction or command was" : "instructions or commands were"} removed by the author before sharing; agent work after a removed part is shown without its instruction.`);
+if (changedCount != null) summary.push(`${plural(changedCount, "file")} changed during the session${toolDetail && changed.length ? `: ${changedByAgent.length} by the AI's edit tools, ${otherChanged.length} by other means` : ""}${newCommits ? `, and ${plural(newCommits, "commit")} ${newCommits === 1 ? "was" : "were"} made` : ""}.`);
+if (hasDiff && M.diff.files === 0 && changedCount) summary.push(`The included code changes are empty while ${plural(changedCount, "file")} changed during the session: the folder no longer held the session's changes when this file was written.`);
+else if (hasDiff) summary.push(diffStatus === "matches the session end"
+  ? `The code changes are included (${plural(M.diff.files, "file")}) and match the end of the session.`
+  : `Code changes are included (${plural(M.diff.files, "file")}) as they were when the file was written; they were not confirmed as the end of the session (${diffStatus}).`);
+summary.push(M.chain.token_bound
+  ? `The session was started with an invitation token and ${edited ? `${edited} events were removed or masked before sharing` : "nothing was removed before sharing"}. Only the verification command with your token (Details tab) confirms it is the token you issued.`
+  : `The recording is not linked to an invitation token${edited ? ` and ${edited} events were removed or masked before sharing` : ""}; without the anchors received during the session, it is the author's own account.`);
+
+ov.append(card("In short", el("ul", { class: "plain" }, summary.map(x => el("li", {}, x)))));
+
+const limitHit = rows.find(r => r.type === "runtime.warning" && r.payload && r.payload.code === "recording_limit_reached");
+const left = what => el("li", {}, el("span", { class: "yn n" }, "left out"), " ", what, el("span", { class: "caveat", style: "margin:0" }, " (recorded, but the author did not include it in this file)"));
+const yes = (b, what) => el("li", {}, el("span", { class: `yn ${b ? "y" : "n"}` }, b ? "recorded" : "not recorded"), " ", what);
+ov.append(card("What was recorded",
+  el("ul", { class: "yns" },
+    yes(!!S.record_output, limitHit ? `everything shown in the recorded terminal until the recording limit was reached at ${off(limitHit.t_ms)}` : "everything shown in the recorded terminal"),
+    P.available && P.text ? yes(true, "the text of the instructions given to the AI") : P.available ? left("the text of the instructions given to the AI") : yes(false, "the text of the instructions given to the AI"),
+    hooks.length && !toolCalls.length ? null : yes(toolDetail, "the first line of each command the AI ran, the files it edited and line counts, error text; never file contents"),
+    hasDiff ? yes(true, diffStatus === "matches the session end" ? "the code changes at the end of the session" : "the code changes as of when this file was written, not confirmed as the end of the session")
+      : exitGit?.payload.diff_sha256 ? left("the code changes (only their fingerprint is in the recording)") : yes(false, "the code changes"),
+    S.record_input ? null : yes(false, "keystrokes"),
+    S.record_input ? yes(true, "keystrokes, including anything typed at hidden password prompts") : yes(false, "passwords typed at hidden prompts"),
+    yes(false, "environment variables"),
+    yes(false, "other windows, the browser, other devices, the camera or microphone")),
+  el("p", { class: "caveat" }, "The author chose what to include in this file. Keep it only as long as your review and your data retention policy allow, and delete it afterwards.")));
+
+ov.append(card("Before you rate",
+  el("ul", { class: "plain" },
+    el("li", {}, "Using the AI was part of the exercise. Using it a lot is not a negative signal; how it was used is what matters."),
+    el("li", {}, "Times include reading, thinking and pauses. Do not rank people by speed or by tokens; tokens measure cost, not quality."),
+    el("li", {}, "Rate everyone with the same guide below, and write down the moment that supports each rating."),
+    el("li", {}, "The tags on instructions are automatic text heuristics. Read the instruction before relying on one."),
+    el("li", {}, "Make the decision with a person in the loop, and give the author a chance to explain in a short debrief."))));
+
+// Evaluation guide
+const LEVELS = ["Not observed", "Needs development", "Meets", "Strong"];
+const COMPETENCIES = [
+  {
+    id: "understand", name: "Understanding the problem", who: "both",
+    ask: "Did the person make sure they understood the task before changing code?",
+    evidence: () => [
+      typedTurns[0] ? el("li", {}, "First instruction: ", promptLink(typedTurns[0]), typedTurns[0].text ? ` "${short1(typedTurns[0].text)}"` : "") : null,
+      toolDetail && firstEdit ? el("li", {}, testBeforeEdit ? ["A recognized test command ran before the AI's first edit: ", momentLink(testBeforeEdit.t_ms)] : ["No recognized test command before the AI's first edit at ", momentLink(firstEdit.t_ms), "; check the replay"]) : null,
+      P.text ? el("li", {}, `${plural(typedTurns.filter(t => /\?/.test(t.text || "")).length, "instruction")} asked the AI a question.`) : null,
+    ],
+  },
+  {
+    id: "direct", name: "Directing the AI", who: "both",
+    ask: "Were the instructions clear, specific and bounded?",
+    evidence: () => [
+      P.text ? el("li", {}, `${plural(tagged("sets a constraint").length, "instruction")} set a limit, ${tagged("names a file").length} named a file. `, ...tagged("sets a constraint").slice(0, 4).map(t => [promptLink(t), " "])) : el("li", {}, "The instruction text is not included; judge from the replay or ask in the debrief."),
+      typedTurns.length && P.available ? el("li", {}, `Typical instruction length: ${num(median(typedTurns.map(t => t.chars)) || 0)} characters.`) : null,
+    ],
+  },
+  {
+    id: "judge", name: "Judgment and control", who: "both",
+    ask: "Did the person stay in charge: reading what the AI did, approving with care, stopping it when it went the wrong way?",
+    evidence: () => [
+      !hooks.length ? el("li", {}, "No AI events were recorded; judge from the replay.")
+        : permissions.length ? el("li", {}, `${approvedList.length} of ${permissions.length} permission requests approved`, approvedList.length ? [", at ", ...approvedList.slice(0, 5).map(h => [momentLink(h.t_ms), " "])] : null,
+            permissions.length > approvedList.length ? ["; not approved: ", ...permissions.filter(h => h.outcome !== "approved").slice(0, 5).map(h => [momentLink(h.t_ms, `${off(h.t_ms)} (${({ declined: "declined", stopped: "Esc", unanswered: "never answered", unknown: "removed for sharing" })[h.outcome] || "not approved"})`), " "])] : null)
+        : el("li", {}, "The AI did not ask for permission."),
+      !P.available ? el("li", {}, "Interruptions are unknown: the agent's transcript is not in this file.")
+        : interrupts.length ? el("li", {}, "Stopped the AI at ", ...interrupts.map(ms => [momentLink(ms), " "]))
+        : el("li", {}, `Did not stop the AI mid-task${(M.cuts || []).length ? " in the shared part of the session" : ""}.`),
+      tagged("corrects").length || tagged("rephrases").length ? el("li", {}, "Corrected or rephrased: ", ...[...new Set([...tagged("corrects"), ...tagged("rephrases")])].map(t => [promptLink(t), " "])) : null,
+      DEC && DEC.available && (DEC.moments || []).length ? el("li", {}, "Each decision with its facts and outcome: ", el("button", { type: "button", class: "at", onclick: () => showTab("review") }, "Review tab"), ".") : null,
+    ],
+  },
+  {
+    id: "verify", name: "Verifying the result", who: "technical",
+    ask: "Did the person check that the result works, instead of trusting the AI's word?",
+    evidence: () => toolDetail ? [
+      lastEdit ? el("li", {}, testAfterLastEdit ? ["A recognized test command ran after the AI's last edit: ", momentLink(testAfterLastEdit.t_ms), ` (${testResult(testAfterLastEdit)}${chained(tsum(testAfterLastEdit).command) ? ", the command continued after the tests" : ""})`] : ["No recognized test command after the AI's last edit at ", momentLink(lastEdit.t_ms), "; check the replay"]) : el("li", {}, "The AI made no change with its edit tools."),
+      el("li", {}, `${plural(allTestsRun.length, "test run")} in total.`),
+      otherChanged.length ? el("li", {}, `${plural(otherChanged.length, "file")} changed outside the AI's edit tools: ${otherChanged.slice(0, 5).map(c => c.path).join(", ")}.`) : null,
+    ] : [el("li", {}, hooks.length && !toolCalls.length ? "The AI ran no tools in this session." : "This recording has no details of the AI's commands; use the replay.")],
+  },
+  {
+    id: "outcome", name: "Quality of the result", who: "technical",
+    ask: "Is the final code correct, readable and limited to what the task asked?",
+    evidence: () => [
+      hasDiff && M.diff.files === 0 && changedCount ? el("li", {}, "The included diff is empty although files changed; the code cannot be reviewed from this file.")
+        : hasDiff ? el("li", {}, goCode(`Read the code changes (${plural(M.diff.files, "file")})`), `; check against the end of the session: ${diffStatus}.`)
+        : el("li", {}, M.diff ? `The code changes were requested but are not in this file: ${M.diff.status}.` : "The code changes are not in this file. Ask the author to bundle with --diff, or review their repository."),
+      lastTestRun ? el("li", {}, "Last test run: ", momentLink(lastTestRun.t_ms), ` ${testResult(lastTestRun)}${chained(tsum(lastTestRun).command) ? "; the command continued after the tests, so this may be another command's status: watch the moment" : ""}.`) : null,
+      newCommits ? el("li", {}, `${plural(newCommits, "commit")}: ${commits.slice(0, 3).map(c => c.subject).join("; ")}.`) : null,
+    ],
+  },
+  {
+    id: "communicate", name: "Communication", who: "hr",
+    ask: "How clearly did the person express intent to the AI, and explain their choices in the debrief?",
+    evidence: () => [
+      P.text ? el("li", {}, "Read the instructions in order on the Timeline tab.") : el("li", {}, "Instruction text not included."),
+      el("li", {}, "Use the debrief questions below; this is where most of the evidence for this competency comes from."),
+    ],
+  },
+];
+const storeKey = `witnessed-eval-${S.id}-${String(M.chain.head).slice(0, 12)}`;
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem(storeKey) || "{}") || {}; } catch { saved = {}; }
+const persist = () => { try { localStorage.setItem(storeKey, JSON.stringify(saved)); } catch {} };
+saved.ratings = saved.ratings || {}; saved.notes = saved.notes || {};
+const reviewer = el("input", { type: "text", class: "inp", placeholder: "Your name", value: saved.reviewer || "", oninput: e => { saved.reviewer = e.target.value; persist(); } });
+const roleSel = el("select", { class: "inp", onchange: e => { saved.role = e.target.value; persist(); } }, ["HR or recruiter", "Technical reviewer", "Hiring manager"].map(r => el("option", saved.role === r ? { selected: "selected" } : {}, r)));
+const guide = card("Evaluation guide",
+  el("p", { class: "caveat", style: "margin:0 0 12px" }, "The page points to the moments worth looking at; you give the rating. Ratings and notes stay in this browser until you download them."),
+  el("div", { class: "who" }, el("label", {}, "Reviewer ", reviewer), el("label", {}, "Role ", roleSel)),
+  ...COMPETENCIES.map(c => {
+    const buttons = LEVELS.map(level => el("button", { type: "button", class: "lvl", "aria-pressed": String(saved.ratings[c.id] === level), onclick: e => {
+      saved.ratings[c.id] = saved.ratings[c.id] === level ? undefined : level; persist();
+      for (const b of e.target.parentNode.children) b.setAttribute("aria-pressed", String(b.textContent === saved.ratings[c.id]));
+      $(`print-rating-${c.id}`).textContent = `Rating: ${saved.ratings[c.id] || "not rated"}`;
+    } }, level));
+    return el("div", { class: "comp" },
+      el("div", { class: "comp-h" }, el("h3", {}, c.name), el("span", { class: `who-tag ${c.who}` }, { both: "HR and technical", technical: "technical reviewer", hr: "HR" }[c.who])),
+      el("p", { class: "ask" }, c.ask),
+      el("ul", { class: "evidence" }, c.evidence().filter(Boolean)),
+      el("div", { class: "levels" }, buttons),
+      el("div", { class: "print-only", id: `print-rating-${c.id}` }, `Rating: ${saved.ratings[c.id] || "not rated"}`),
+      el("textarea", { class: "inp note", rows: "3", "aria-label": `Note on ${c.name}`, placeholder: "Note and the moment that supports it", oninput: e => { saved.notes[c.id] = e.target.value; $(`print-note-${c.id}`).textContent = e.target.value; persist(); } }, saved.notes[c.id] || ""),
+      el("div", { class: "print-only", id: `print-note-${c.id}` }, saved.notes[c.id] || ""));
+  }));
+ov.append(guide);
+
+// Debrief questions
+const questions = [];
+questions.push(turns.length ? ["Walk me through how you decided what to ask the AI first.", null] : ["Walk me through what you did in this terminal, step by step.", null]);
+for (const ms of interrupts.slice(0, 2)) questions.push([`At ${off(ms)} you stopped the AI. What did you notice?`, ms]);
+for (const h of permissions.filter(h => h.outcome === "declined").slice(0, 2)) questions.push([`At ${off(h.t_ms)} you declined "${short1(tsum(h).command || h.payload.tool_name)}". What made you decide that?`, h.t_ms]);
+for (const t of [...new Set(tagged("corrects").concat(tagged("rephrases")))].slice(0, 2)) questions.push([`At ${off(t.t_ms)} you rephrased or corrected your request. What was missing before?`, t.t_ms]);
+for (const h of approvedList.filter(h => tsum(h).command).slice(0, 2)) questions.push([`At ${off(h.t_ms)} you approved "${short1(tsum(h).command)}". What did you check before approving?`, h.t_ms]);
+if (toolDetail && lastEdit && !testAfterLastEdit) questions.push([`After the AI's last edit at ${off(lastEdit.t_ms)}, the record shows no test run. How did you check that the result works?`, lastEdit.t_ms]);
+for (const c of changedByAgent.filter(c => /test/i.test(c.path)).slice(0, 1)) questions.push([`The AI edited ${c.path}. Did you review that change, and was it what you wanted?`, null]);
+for (const c of otherChanged.slice(0, 2)) questions.push([`${c.path} changed outside the AI's edits. What changed, and why?`, null]);
+if (P.available && !P.text) questions.push(["The instruction text is not included. Can you describe what you asked the AI at each step?", null]);
+questions.push(["If you had another 30 minutes, what would you improve or check?", null]);
+ov.append(card("Debrief questions",
+  el("p", { class: "caveat", style: "margin:0 0 8px" }, "Generated from this session. Ask the author to narrate the replay; compare what they say with the timeline."),
+  el("ol", { class: "qs" }, questions.map(([q, ms]) => el("li", {}, q, ms != null ? [" ", momentLink(ms, "watch")] : null)))));
+
+// Glossary and actions
+ov.append(card("Words used on this page",
+  el("dl", { class: "gloss" }, [
+    ["Instruction (prompt)", "What the person typed to the AI."],
+    ["Tool call", "An action the AI took: running a command, reading or editing a file."],
+    ["Permission request", "The AI asked before an action; the person approved or not."],
+    ["Stopped (interrupted)", "The person pressed Esc to stop the AI mid-task."],
+    ["Tokens", "Units of text the AI processed. A measure of cost, not of quality."],
+    ["Test run", "A command that runs the project's automated checks. Exit 0 means the whole command reported success; when the AI ran other commands after the tests in the same line, it may not be the tests' result."],
+    ["Verification", "A check, run on a computer with witnessed, that the recording was not edited after the session."],
+  ].flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))));
+
+function evaluationMarkdown() {
+  const lines = [`# Evaluation of session ${S.id}`, "", `- Bundle: ${bundleName}`, `- Recorded: ${when(S.created_at_ns)}, ${dur(M.duration_ms)}, ${agentName}`, `- Reviewer: ${saved.reviewer || "-"} (${saved.role || "HR or recruiter"})`, `- Written: ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`, "", "## Summary", "", ...summary.map(x => `- ${x.replace(" (Details tab)", "")}`), "", "## Ratings", ""];
+  const quote = t => t.trim() ? t.trim().split("\n").map(l => `> ${l}`).join("\n") : "No note.";
+  for (const c of COMPETENCIES) lines.push(`### ${c.name}`, "", `Rating: ${saved.ratings[c.id] || "not rated"}`, "", quote(saved.notes[c.id] || ""), "");
+  lines.push("## Debrief questions", "", ...questions.map(([q], i) => `${i + 1}. ${q}`), "");
+  lines.push(...reviewMarkdown());
+  if (COMPETENCIES.some(c => saved.ratings[c.id])) lines.push("Ratings were given by a person; the page only listed evidence.");
+  return lines.join("\n") + "\n";
+}
+ov.append(el("div", { class: "actions" },
+  el("button", { type: "button", class: "btn", onclick: () => {
+    const a = el("a", { href: URL.createObjectURL(new Blob([evaluationMarkdown()], { type: "text/markdown" })), download: `evaluation-${S.id}.md` });
+    document.body.append(a); a.click(); a.remove();
+  } }, "Download evaluation (.md)"),
+  el("button", { type: "button", class: "btn ghost", onclick: () => { showTab("overview"); window.print(); } }, "Print or save as PDF")));
+
+const KIND = {
+  approved: ["approved", "approval", "approvals"], declined: ["declined", "declined", "declined"], stopped: ["stopped with Esc", "stopped with Esc at a permission prompt", "stopped with Esc at a permission prompt"],
+  unanswered: ["never answered", "permission prompt never answered", "permission prompts never answered"], not_approved: ["not approved", "not approved for another reason", "not approved for another reason"],
+  interrupted: ["interrupted the agent", "interruption", "interruptions"], corrected: ["corrected", "correction", "corrections"],
+};
+const VERDICT = { again: ["Same again", "would decide the same again"], differently: ["Differently", "would decide differently"], unsure: ["Unsure", "unsure about this decision"] };
+const moments = DEC && Array.isArray(DEC.moments) ? DEC.moments.slice().sort((a, b) => a.t_ms - b.t_ms) : [];
+saved.moments = saved.moments || {};
+const kindLabel = k => (KIND[k] || [k])[0];
+const momentTitle = m => [kindLabel(m.kind), m.tool, m.subject].filter(Boolean).join(" ");
+function reviewMarkdown() {
+  const marked = moments.filter(m => saved.moments[m.id] && (saved.moments[m.id].verdict || (saved.moments[m.id].note || "").trim()));
+  if (!marked.length) return [];
+  return ["## Decision moments", "", ...marked.map(m => {
+    const r = saved.moments[m.id], note = (r.note || "").trim().replace(/\s+/g, " ");
+    return `- ${off(m.t_ms)} ${momentTitle(m)}: ${r.verdict ? VERDICT[r.verdict][1] : "no verdict"}${note ? `. Note: ${note}` : ""}`;
+  }), ""];
+}
+if (DEC) {
+  const rv = $("tab-review");
+  const authorOf = {};
+  for (const a of Array.isArray(D.annotations) ? D.annotations : []) if (a && a.moment && (!authorOf[a.moment] || (a.updated_at_ns || 0) >= (authorOf[a.moment].updated_at_ns || 0))) authorOf[a.moment] = a;
+  const facts = [];
+  const counts = DEC.counts && Object.keys(DEC.counts).length ? DEC.counts : moments.reduce((c, m) => ((c[m.kind] = (c[m.kind] || 0) + 1), c), {});
+  const countWords = Object.keys(KIND).concat(Object.keys(counts).filter(k => !KIND[k])).filter(k => counts[k]).map(k => `${counts[k]} ${KIND[k] ? KIND[k][counts[k] === 1 ? 1 : 2] : k}`);
+  if (DEC.available === false) {
+    facts.push([`No decision moments in this bundle: ${String(DEC.reason || "not an agent session").split(";")[0]}. Record the session with `, el("code", {}, "witnessed run -- claude"), " to get them."]);
+  } else {
+    facts.push(countWords.length ? countWords.join(", ") : "No decision moments were recorded.");
+    const appr = moments.filter(m => m.kind === "approved");
+    if (appr.some(m => m.checked_before != null)) facts.push(`${appr.filter(m => m.checked_before === true).length} of ${plural(appr.length, "approval")} came after a test or a read of the file.`);
+    const waits = appr.map(m => m.wait_ms).filter(w => typeof w === "number").sort((a, b) => a - b);
+    if (waits.length) facts.push(`Median wait before an approval: ${secs(waits.length % 2 ? waits[waits.length >> 1] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2)}.`);
+  }
+  const O = D.outcome;
+  if (O && O.available) {
+    const reverts = (O.commits || []).filter(c => c.reverts).length;
+    const lines = n => `${num(n)} ${n === 1 ? "line" : "lines"}`;
+    const kept = !O.added ? "The session added no lines" : O.in_head ? `${lines(O.added)} added, ${num(O.in_head)} committed in HEAD, ${num(O.in_worktree)} still in the work tree` : `${lines(O.added)} added, ${num(O.in_worktree)} still in the work tree, none committed yet`;
+    facts.push(`${kept}${reverts ? `; ${plural(reverts, "later commit")} reverted session work` : ""}.`);
+  } else if (O) facts.push(`What happened to the code later: not measured${O.reason ? ` (${O.reason})` : ""}.`);
+  const outcomeDetail = O && O.available && ((O.files || []).length || (O.commits || []).length) ? el("details", { class: "sec", style: "margin-top:10px" }, el("summary", {}, "Lines by file and later commits"), el("div", { class: "body" },
+    (O.files || []).length ? el("ul", { class: "files ofiles" }, O.files.map(f => el("li", {}, el("span", { class: "mono" }, f.path), el("span", { class: "by" }, `${num(f.added)} added, ${num(f.in_head)} in HEAD${f.in_worktree ? `, ${num(f.in_worktree)} in the working tree` : ""}${f.state ? `; ${f.state}` : ""}`)))) : null,
+    (O.commits || []).length ? el("ul", { class: "commits" }, O.commits.map(c => el("li", {}, el("span", { class: "h" }, short(c.sha)), c.subject || "", c.reverts ? el("span", { class: "by" }, " - reverts session work") : null))) : null)) : null;
+  rv.append(card("Decisions in this session",
+    el("p", { class: "caveat", style: "margin:0 0 10px" }, "Each moment where the person approved, declined, stopped or redirected the agent, with what the record shows around it. The page states facts; the verdicts are yours."),
+    el("ul", { class: "plain" }, facts.map(f => el("li", {}, f))), outcomeDetail));
+  if (DEC.available !== false && moments.length) {
+    const on = new Set(moments.map(m => m.kind));
+    let only = null;
+    const list = el("div", { class: "moments" });
+    const annotated = m => !!authorOf[m.id] || !!(saved.moments[m.id] && (saved.moments[m.id].verdict || (saved.moments[m.id].note || "").trim()));
+    const row = m => {
+      const mine = saved.moments[m.id] || {};
+      const t = m.prompt != null ? turns.find(x => !x.orphan && x.index === m.prompt) : null;
+      const a = authorOf[m.id];
+      const buttons = Object.keys(VERDICT).map(v => el("button", { type: "button", class: "lvl", "aria-pressed": String(mine.verdict === v), title: VERDICT[v][1], onclick: e => {
+        const r = saved.moments[m.id] = saved.moments[m.id] || {};
+        r.verdict = r.verdict === v ? undefined : v; persist();
+        for (const b of e.target.parentNode.querySelectorAll(".lvl")) b.setAttribute("aria-pressed", String(b.dataset.v === r.verdict));
+      } }, VERDICT[v][0]));
+      buttons.forEach((b, i) => { b.dataset.v = Object.keys(VERDICT)[i]; });
+      return el("div", { class: "mrow" },
+        el("div", { class: "head" }, momentLink(m.t_ms), el("span", { class: "k" }, kindLabel(m.kind)),
+          m.tool ? el("span", { class: "mono" }, m.tool) : null, m.subject ? el("span", { class: "subj" }, m.subject) : null,
+          el("span", { class: "right" },
+            t ? el("span", {}, "prompt ", promptLink(t)) : m.prompt != null ? el("span", {}, `prompt #${m.prompt}`) : null)),
+        (m.facts || []).length ? el("ul", { class: "evidence" }, m.facts.map(f => el("li", {}, f))) : null,
+        a ? el("div", { class: "author" }, `Author's own review: ${(VERDICT[a.verdict] || [null, a.verdict])[1]}${a.note ? ` - ${a.note}` : ""}`) : null,
+        el("div", { class: "yours" }, el("span", { class: "lbl" }, "Your view:"), buttons,
+          el("input", { type: "text", class: "inp", "aria-label": `Your note on the moment at ${off(m.t_ms)}`, placeholder: "Your note", value: mine.note || "", oninput: e => { (saved.moments[m.id] = saved.moments[m.id] || {}).note = e.target.value; persist(); } })));
+    };
+    const render = () => {
+      const shown = moments.filter(m => on.has(m.kind) && (only == null || annotated(m) === only));
+      list.replaceChildren(...(shown.length ? shown.map(row) : [el("div", { class: "empty" }, "No moments match the selected filters.")]));
+    };
+    const kinds = Object.keys(KIND).concat([...on].filter(k => !KIND[k])).filter(k => on.has(k));
+    const nOf = k => moments.filter(m => m.kind === k).length;
+    const kindBtns = kinds.map(k => { const b = el("button", { type: "button", "aria-pressed": "true", onclick: () => { on.has(k) ? on.delete(k) : on.add(k); b.setAttribute("aria-pressed", String(on.has(k))); render(); } }, `${kindLabel(k)} ${nOf(k)}`); return b; });
+    const annBtns = [[true, "only annotated"], [false, "only not annotated"]].map(([v, label]) => el("button", { type: "button", "aria-pressed": "false", title: "Annotated by the author or by you", onclick: () => {
+      only = only === v ? null : v;
+      for (const b of annBtns) b.setAttribute("aria-pressed", String(b.textContent === (only === true ? "only annotated" : only === false ? "only not annotated" : "")));
+      render();
+    } }, label));
+    rv.append(card("Decision moments",
+      el("p", { class: "caveat", style: "margin:0 0 10px" }, "Click a time to play the recording from there. Your verdicts and notes stay in this browser and go into the downloaded evaluation."),
+      el("div", { class: "filters" }, kindBtns), el("div", { class: "filters" }, annBtns), list));
+    render();
+  }
+}
+
+// Code changes
+const code = $("code");
+if (hasDiff && M.diff.files === 0 && changedCount) {
+  code.append(el("div", { class: "empty" }, `The included diff is empty, but ${plural(changedCount, "file")} changed during the session (Details tab). The folder no longer held the session's changes when this file was written, so the code cannot be reviewed from this file.`));
+} else if (hasDiff && !diffShown) {
+  code.append(el("div", { class: "empty" }, `The code changes (${plural(M.diff.files, "file")}, ${num(M.diff.bytes)} bytes; ${diffStatus}) are too large to show here. Open diff.patch in the bundle.`));
+} else if (!hasDiff) {
+  code.append(el("div", { class: "empty" }, M.diff && M.diff.status ? `Code changes: ${M.diff.status}.` : "The code changes are not in this bundle. The author can include them with ",
+    !M.diff ? el("code", {}, `witnessed bundle ${S.id} --diff`) : null, !M.diff ? "; the file list is in the Details tab." : null));
+} else {
+  const ok = diffStatus === "matches the session end";
+  code.append(el("div", { class: "badges", style: "margin:0 0 12px" },
+    el("span", { class: `badge ${ok ? "ok" : "warn"}` }, el("span", { class: "dot" }), ok ? "Matches the code at the end of the session" : diffStatus),
+    el("span", { class: "badge" }, `${plural(M.diff.files, "file")} against ${short(M.diff.base)}`),
+    M.diff.sha256_at_exit ? el("span", { class: "caveat", style: "margin:0" }, "verify checks this against the hash recorded when the session ended") : null));
+  const parts = D.diff.split(/^(?=diff --git )/m).filter(x => x.startsWith("diff --git "));
+  for (const part of parts) {
+    const lines = part.split("\n");
+    const unq = x => {
+      x = x.replace(/\t$/, "");
+      const m = /^"(.*)"$/.exec(x);
+      if (!m) return x;
+      const bytes = [];
+      const body = m[1];
+      for (let i = 0; i < body.length; i++) {
+        if (body[i] !== "\\") { bytes.push(...new TextEncoder().encode(body[i])); continue; }
+        const nx = body[++i];
+        if (/[0-7]/.test(nx)) { bytes.push(parseInt(body.substr(i, 3), 8)); i += 2; }
+        else bytes.push(({ t: 9, n: 10, r: 13, a: 7, b: 8, f: 12, v: 11 })[nx] ?? nx.charCodeAt(0));
+      }
+      return new TextDecoder().decode(new Uint8Array(bytes));
+    };
+    const plusLine = lines.find(l => l.startsWith("+++ b/")), minusLine = lines.find(l => l.startsWith("--- a/"));
+    const renameTo = lines.find(l => l.startsWith("rename to ") || l.startsWith("copy to "));
+    const header = lines[0].slice("diff --git ".length);
+    const halves = () => {
+      const q = /^"a\/((?:[^"\\]|\\.)*)" "b\/((?:[^"\\]|\\.)*)"$/.exec(header);
+      if (q) return `"${q[2]}"`;
+      const body = header.slice(2), n = (body.length - 3) / 2;
+      return Number.isInteger(n) && body.slice(n, n + 3) === " b/" ? body.slice(n + 3) : body.replace(/ b\/.*$/, "");
+    };
+    const path = renameTo ? unq(renameTo.replace(/^(rename|copy) to /, "")) : plusLine ? unq(plusLine.slice(6)) : minusLine ? unq(minusLine.slice(6)) : unq(halves());
+    const kinds = [];
+    let inHunk = false;
+    for (const l of lines) {
+      if (l.startsWith("diff --git ")) inHunk = false;
+      if (l.startsWith("@@")) { inHunk = true; kinds.push("h"); continue; }
+      kinds.push(!inHunk ? "m" : l.startsWith("+") ? "a" : l.startsWith("-") ? "r" : l.startsWith("\\") ? "m" : "");
+    }
+    const added = kinds.filter(k => k === "a").length;
+    const removed = kinds.filter(k => k === "r").length;
+    const a = editedFor(path);
+    const pre = el("pre", { class: "diff" });
+    const shown = lines.slice(0, 1500);
+    shown.forEach((l, i) => pre.append(el("span", { class: kinds[i] }, l + "\n")));
+    if (lines.length > shown.length) pre.append(el("span", { class: "m" }, `... ${lines.length - shown.length} more lines in diff.patch\n`));
+    code.append(el("details", { class: "dfile", open: parts.length <= 8 ? "open" : null },
+      el("summary", {}, el("span", { class: "path" }, path), el("span", { class: "plus" }, `+${added}`), el("span", { class: "minus" }, `-${removed}`),
+        a ? el("span", { class: "k agent" }, `AI edit in ${[...a.turns].map(n => `#${n}`).join(", ")}`) : toolDetail ? el("span", { class: "k warn" }, "not by the AI's edit tools") : null),
+      pre));
+  }
+}
+
+const initial = (location.hash || "").slice(1);
+showTab(TABS.some(([t]) => t === initial) ? initial : "overview");
+
+// Follow playback
+function followPlayback() {
+  let last = null, lastTurn = null;
+  setInterval(() => {
+    const t = clock.toRecorded(player.getCurrentTime());
+    $("now").textContent = off(t);
+    let cur = null;
+    for (const [ms, n] of rendered) { if (ms <= t) cur = n; else break; }
+    if (cur !== last) { last && last.classList.remove("current"); cur && cur.classList.add("current"); last = cur; }
+    let turn = null;
+    for (const [ms, n] of storyRows) { if (ms <= t) turn = n; else break; }
+    if (turn !== lastTurn) { lastTurn && lastTurn.classList.remove("current"); turn && turn.classList.add("current"); lastTurn = turn; }
+  }, 500);
+}
+</script>
+</body>
+</html>

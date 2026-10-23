@@ -1,10 +1,10 @@
 # Event model
 
-Schema version 1 (`EVENT_SCHEMA_VERSION` in `crates/agentrecorder-store/src/lib.rs`). Adding a type or a field keeps the version; removing, renaming or changing a meaning increments it.
+Schema version 1 (`EVENT_SCHEMA_VERSION` in `crates/witnessed-store/src/lib.rs`). Adding a type or a field keeps the version; removing, renaming or changing a meaning increments it.
 
 ## Envelope
 
-`agentrecorder export SESSION` writes one JSON object per line:
+`witnessed export SESSION` writes one JSON object per line:
 
 ```json
 {"schema_version": 1, "event_id": "a91f2c-1", "session_id": "a91f2c", "seq": 1,
@@ -48,7 +48,7 @@ A session without `session.terminated` was lost; `sessions` shows `lost` and `in
 
 ## Storage
 
-`state.db`, table `events` keyed by `(session_id, seq)`; `payload` as JSON text, `data` as a BLOB with `data_len` beside it. `PRAGMA user_version` is 5 (2: `data_len`; 3: kind index; 4: `agent_session_id`; 5: `anchor_token_digest`). Older stores migrate in place on first open. There is no downgrade: an older binary refuses a newer store, naming both versions and the update command, and leaves the file as it was. The payload shapes are the `Body` enum in `events.rs`; a unit test round-trips every variant.
+`state.db`, table `events` keyed by `(session_id, seq)`; `payload` as JSON text, `data` as a BLOB with `data_len` beside it. `PRAGMA user_version` is 6 (2: `data_len`; 3: kind index; 4: `agent_session_id`; 5: `anchor_token_digest`; 6: tables `annotations`, the verdicts from `review --mark`, and `session_diffs`, the diff at session end). Neither table is part of the hash chain. Older stores migrate in place on first open. There is no downgrade: an older binary refuses a newer store, naming both versions and the update command, and leaves the file as it was. The payload shapes are the `Body` enum in `events.rs`; a unit test round-trips every variant.
 
 ## Other formats
 

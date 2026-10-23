@@ -3,14 +3,15 @@
 ## Components
 
 ```
-agentrecorder (CLI)                 crates/agentrecorder
+witnessed (CLI)                 crates/witnessed
   |-- run / attach ---------> Unix socket (0600) --> supervisor, one process per session
   |-- sessions / inspect ---> store + socket status; may mark a session lost
   |-- recover / replay / export / bundle / view / anchor --> store (read)
+  |-- review ---------------> store (read, annotations), transcript, git
   |-- rm / prune -----------> store (delete, checkpoint)
   `-- verify ---------------> bundle only
 
-supervisor                          crates/agentrecorder-supervisor
+supervisor                          crates/witnessed-supervisor
   |-- client.rs     public: status, stop, detach, Attachment (the only way to talk to a session)
   |-- layout.rs     public: state directory, paths, permission checks
   |-- screen.rs     public: ScreenModel (vt100 screen for live, recover and replay)
@@ -21,18 +22,19 @@ supervisor                          crates/agentrecorder-supervisor
   |-- protocol.rs   length-prefixed frames
   `-- peer.rs       peer uid check
 
-store                               crates/agentrecorder-store
+store                               crates/witnessed-store
   |-- events.rs     `Body`: the event schema
   `-- lib.rs        schema, migrations, `Status`, guarded transitions, deletion
 ```
 
 | Layer | Code |
 | --- | --- |
-| CLI | `crates/agentrecorder/src/main.rs`, `commands/` |
+| CLI | `crates/witnessed-cli/src/main.rs`, `commands/` |
 | Execution control | `attach.rs`, `state.rs`, `commands/run.rs`, `supervisor/src/client.rs` |
 | Supervisor, PTY, recorder | `supervisor/src/{supervisor,pty,recorder}.rs` |
 | Store | `store/src/{lib,events}.rs` |
 | Inspect, recover, replay | `commands/{inspect,recover,replay,export}.rs`, `procinfo.rs`, `agent_state.rs`, `transcript.rs`, `render.rs`, `sanitize.rs`, `screen.rs` |
+| Review | `commands/review.rs`, `decisions.rs` (decision moments from hooks and transcript), `outcome.rs` (session lines in `HEAD` and the work tree, later commits) |
 | Sharing | `commands/bundle.rs`, `chain.rs`, `dashboard.html`, `vendor/asciinema-player/` |
 
 Seams: `client` exposes `SessionStatus`, `ConnectError` and `Attachment` with typed `DetachReason`s; frames stay private. `Body` is the schema; `export` passes stored JSON through unchanged, so events from a newer writer survive an older reader. `Status` transitions are guarded in SQL. `state.rs` folds a session row plus a liveness probe into one `State` (`Starting`, `Running`, `Exited`, `Lost`, `Unreachable`) that every command branches on.
@@ -59,8 +61,8 @@ client (run)              supervisor (__supervise)         CMD        store
 `run`:
 
 1. Opens the store, applies retention, allocates a 6-hex id from `/dev/urandom`, checks the socket path length. For Claude Code, inserts `--session-id` and `--settings` (`adapters::prepare`).
-2. Re-executes itself as `agentrecorder __supervise --id ID` with `setsid()`, stdin and stdout on `/dev/null`, stderr to `logs/ID.log`. No controlling terminal, so closing the client's terminal sends no SIGHUP.
-3. The supervisor opens a PTY (`IUTF8`), spawns CMD as session leader, binds the socket, then marks the row `running`. The child gets default signal dispositions, an empty mask, close-on-exec on inherited descriptors above 2, the caller's umask (agentrecorder itself runs with 077) and `xterm-256color` when `TERM` is empty.
+2. Re-executes itself as `witnessed __supervise --id ID` with `setsid()`, stdin and stdout on `/dev/null`, stderr to `logs/ID.log`. No controlling terminal, so closing the client's terminal sends no SIGHUP.
+3. The supervisor opens a PTY (`IUTF8`), spawns CMD as session leader, binds the socket, then marks the row `running`. The child gets default signal dispositions, an empty mask, close-on-exec on inherited descriptors above 2, the caller's umask (witnessed itself runs with 077) and `xterm-256color` when `TERM` is empty.
 4. The client polls status every 5 ms (10 s timeout) and attaches. Without `-d` the supervisor holds up to 4 MiB of output produced before the first attach and sends it instead of a snapshot; past that it drops the buffer and records `pre_attach_output_dropped`.
 
 Detach ends only the client. One supervisor per session (like dtach, abduco, shpool): a crash affects one session. Threads, not an async runtime: one PTY, one attached client, a few control connections.
@@ -75,7 +77,7 @@ Detach ends only the client. One supervisor per session (like dtach, abduco, shp
 - **Listener and connection threads**: peer uid check (`SO_PEERCRED`, `getpeereid`), `Hello` plus request within 5 s, then `attach` or a control request (`status`, `stop`, `detach`, `mark`, `agent_hook`). Marks and hook events go through the recorder's bounded path, so a flood cannot take the lifecycle slots.
 - **Signals**: SIGTERM, SIGINT and SIGHUP stop the session; SIGUSR1 rebinds the socket (the CLI sends it when the socket file is missing).
 - **Git**: `git rev-parse HEAD` and `git status --porcelain` at start and exit with `GIT_OPTIONAL_LOCKS=0`, as `git.snapshot` events.
-- **Main**: waits for the leader, finishes a pending stop, drains output for 500 ms, records `process.exited`, the exit snapshot and `session.terminated`, waits for the commit (up to 65 s), then sends `Exited` and removes the socket. A client never sees the exit before the recording is complete. Exits with the child's code, or 128 + signal.
+- **Main**: waits for the leader, finishes a pending stop, drains output for 500 ms, records `process.exited`, the exit snapshot (storing the session-end diff for `review`) and `session.terminated`, waits for the commit (up to 65 s), then sends `Exited` and removes the socket. A client never sees the exit before the recording is complete. Exits with the child's code, or 128 + signal.
 
 ### Attach and screen restore
 

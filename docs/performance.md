@@ -9,7 +9,7 @@ python3 bench/bench.py --quick   # what just check-ci runs
 
 ## Results
 
-| Measurement | Direct | agentrecorder |
+| Measurement | Direct | witnessed |
 | --- | --- | --- |
 | Startup, median / p95 | 2.2 / 3.3 ms (spawn `true`) | 12.1 / 20.2 ms (`run -d` until status answers) |
 | Keystroke round trip, median / p95 | 0.010 / 0.013 ms | 0.034 / 0.045 ms |
@@ -31,13 +31,13 @@ Five runs put the round trip between 0.033 and 0.042 ms and startup between 11.3
 | Path | MiB/s | Recorded bytes | Drops |
 | --- | --- | --- | --- |
 | Bare PTY | 191.9 | - | - |
-| agentrecorder, interactive client | 70.7 | 211,833,591 | 0 |
-| agentrecorder, pipe client | 71.6 | 211,833,636 | 0 |
-| agentrecorder, `--no-record` | 76.8 | 0 | 0 |
+| witnessed, interactive client | 70.7 | 211,833,591 | 0 |
+| witnessed, pipe client | 71.6 | 211,833,636 | 0 |
+| witnessed, `--no-record` | 76.8 | 0 | 0 |
 
 The ceiling is about 70 MiB/s with recording and 77 without: most of the cost is the second PTY hop and the socket, not the recorder. A tmux comparison is open (tmux not installed on the machine).
 
-`crates/agentrecorder/tests/conservation.rs` checks produced == recorded == delivered by content: pipe clients with up to 12 MiB produced before attach, late attach to a detached session, producers that exit at once, a 24 MiB burst to an interactive client, 60,000 single-line writes.
+`crates/witnessed-cli/tests/conservation.rs` checks produced == recorded == delivered by content: pipe clients with up to 12 MiB produced before attach, late attach to a detached session, producers that exit at once, a 24 MiB burst to an interactive client, 60,000 single-line writes.
 
 ## Events table layout
 

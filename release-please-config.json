@@ -16,27 +16,27 @@
         {
           "type": "toml",
           "path": "Cargo.toml",
-          "jsonpath": "$.workspace.dependencies['agentrecorder-store'].version"
+          "jsonpath": "$.workspace.dependencies['witnessed-store'].version"
         },
         {
           "type": "toml",
           "path": "Cargo.toml",
-          "jsonpath": "$.workspace.dependencies['agentrecorder-supervisor'].version"
+          "jsonpath": "$.workspace.dependencies['witnessed-supervisor'].version"
         },
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value=='agentrecorder')].version"
+          "jsonpath": "$.package[?(@.name.value=='witnessed-cli')].version"
         },
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value=='agentrecorder-store')].version"
+          "jsonpath": "$.package[?(@.name.value=='witnessed-store')].version"
         },
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value=='agentrecorder-supervisor')].version"
+          "jsonpath": "$.package[?(@.name.value=='witnessed-supervisor')].version"
         }
       ]
     }

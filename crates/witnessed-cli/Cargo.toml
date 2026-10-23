@@ -1,0 +1,41 @@
+[package]
+name = "witnessed-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Witnessed: the verifiable record of AI-assisted work. Records coding-agent terminal sessions and proves them to a reviewer"
+readme = "../../README.md"
+
+[[bin]]
+name = "witnessed"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+witnessed-store.workspace = true
+witnessed-supervisor.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+nix.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+signal-hook.workspace = true
+sysinfo.workspace = true
+vt100.workspace = true
+zip.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+tempfile.workspace = true
+rusqlite.workspace = true

@@ -1,18 +1,18 @@
 #!/bin/sh
-# Install the agentrecorder binary from a GitHub release.
+# Install the witnessed binary from a GitHub release.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Druidder-Labs/agentrecorder/main/install.sh | sh
-#   AGENTRECORDER_VERSION=v0.2.0 AGENTRECORDER_INSTALL_DIR=/usr/local/bin sh install.sh
+#   curl -fsSL https://raw.githubusercontent.com/Druidder-Labs/witnessed/main/install.sh | sh
+#   curl -fsSL ... | WITNESSED_VERSION=v0.4.0 WITNESSED_INSTALL_DIR=/usr/local/bin sh
 #
-# Picks the newest release (prereleases included) unless AGENTRECORDER_VERSION is set,
+# Picks the newest release (prereleases included) unless WITNESSED_VERSION is set,
 # downloads the tarball for this OS and CPU, checks it against the .sha256 file attached
-# to the same release, and copies the binary to AGENTRECORDER_INSTALL_DIR
+# to the same release, and copies the binary to WITNESSED_INSTALL_DIR
 # (default: ~/.local/bin). Needs curl or wget, tar, and shasum or sha256sum.
 set -eu
 
-repo="Druidder-Labs/agentrecorder"
-dir="${AGENTRECORDER_INSTALL_DIR:-$HOME/.local/bin}"
+repo="Druidder-Labs/witnessed"
+dir="${WITNESSED_INSTALL_DIR:-$HOME/.local/bin}"
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "install.sh: $*"; exit 1; }
@@ -41,19 +41,19 @@ case "$cpu" in
 esac
 target="${arch}-${libc}"
 
-version="${AGENTRECORDER_VERSION:-}"
+version="${WITNESSED_VERSION:-}"
 if [ -z "$version" ]; then
   version=$(fetch "https://api.github.com/repos/${repo}/releases" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"\(v[^"]*\)"/\1/')
   [ -n "$version" ] || die "could not find a release of ${repo}"
 fi
 
-name="agentrecorder-${version}-${target}"
+name="witnessed-${version}-${target}"
 base="https://github.com/${repo}/releases/download/${version}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 say "downloading ${name}.tar.gz"
-fetch "${base}/${name}.tar.gz" > "${tmp}/${name}.tar.gz" || die "no binary for ${target} in release ${version}; build with: cargo install agentrecorder --locked"
+fetch "${base}/${name}.tar.gz" > "${tmp}/${name}.tar.gz" || die "no binary for ${target} in release ${version}"
 fetch "${base}/${name}.tar.gz.sha256" > "${tmp}/expected.sha256"
 
 expected=$(awk '{print $1}' "${tmp}/expected.sha256")
@@ -66,9 +66,12 @@ fi
 
 tar -xzf "${tmp}/${name}.tar.gz" -C "$tmp"
 mkdir -p "$dir"
-install -m 0755 "${tmp}/${name}/agentrecorder" "${dir}/agentrecorder"
-say "installed $("${dir}/agentrecorder" --version) to ${dir}/agentrecorder"
+install -m 0755 "${tmp}/${name}/witnessed" "${dir}/witnessed"
+say "installed $("${dir}/witnessed" --version) to ${dir}/witnessed"
 case ":$PATH:" in
   *":${dir}:"*) ;;
-  *) say "add ${dir} to PATH, for example: export PATH=\"${dir}:\$PATH\"" ;;
+  *) say "" ; say "add it to your PATH:" ; say "  export PATH=\"${dir}:\$PATH\"" ;;
 esac
+say ""
+say "next, record an agent session:"
+say "  witnessed run -- claude"

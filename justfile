@@ -26,8 +26,8 @@ package:
 
 # `just package` can verify against a stale unpack of the workspace crates after an API change; this clears it.
 clean-package:
-    rm -rf ~/.cargo/registry/src/-*/agentrecorder-store-* ~/.cargo/registry/src/-*/agentrecorder-supervisor-*
-    cargo clean -p agentrecorder-store -p agentrecorder-supervisor
+    rm -rf ~/.cargo/registry/src/-*/witnessed-store-* ~/.cargo/registry/src/-*/witnessed-supervisor-*
+    cargo clean -p witnessed-store -p witnessed-supervisor
 
 deny:
     cargo deny check

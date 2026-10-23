@@ -1,79 +1,67 @@
-# agentrecorder
+# Witnessed
 
-A flight recorder for coding agents. It runs the agent in a supervised terminal, records every byte with timing, and answers afterwards: what happened, what did the agent do, and can someone else trust the recording.
+The verifiable record of AI-assisted work.
 
-- **Replay** a session with its original timing, or export it as asciicast. Nothing is re-executed.
-- **Inspect** tool calls, tokens per prompt, files changed, process tree, idle time, exit status. Measured or reported values only; the rest is marked `unavailable`.
-- **Share** a bundle that opens offline, with a hash chain over every event. Anchors streamed to a reviewer during the session prove nothing was edited afterwards.
-- **Recover** after a crash or reboot: what is left, and the agent's own resume command. Nothing restarts on its own.
-- **Run** detached: close the tab, lose SSH, reattach from any terminal with the screen restored.
-
-Works with Claude Code, Codex CLI, Gemini CLI, OpenCode and any other program. One binary, one SQLite file, no daemon, no account. Claude Code gets the deepest integration (exact resume, agent state, tool calls and tokens); the others are recorded the same way but resume their most recent session and report no hook events.
-
-If all you need is a session that survives a closed tab, tmux or the agent's background mode already do that.
+Witnessed records your coding-agent sessions, shows you every decision you made along the way, and gives a reviewer a record they can check without trusting you.
 
 ## Install
 
-Linux (x86_64, aarch64) or macOS (Apple silicon, Intel).
-
 ```
-curl -fsSLO https://raw.githubusercontent.com/Druidder-Labs/agentrecorder/main/install.sh
-sh install.sh          # to ~/.local/bin; AGENTRECORDER_VERSION and AGENTRECORDER_INSTALL_DIR override
+curl -fsSL https://raw.githubusercontent.com/Druidder-Labs/witnessed/main/install.sh | sh
 ```
 
-Or `cargo install agentrecorder --locked` (Rust 1.95 or newer). Completions: `agentrecorder completions zsh`.
+Linux and macOS. The script verifies the release checksum and installs one binary to `~/.local/bin`.
 
-## Use
+## Quickstart
+
+**1. Record.** Run your agent through `witnessed`. It works the same as before; `Ctrl-\` detaches and the agent keeps running.
 
 ```
-agentrecorder run -- claude              # Ctrl-\ detaches, the agent keeps running
-agentrecorder sessions
-agentrecorder attach last
-agentrecorder inspect last
-agentrecorder replay last --speed 2
-agentrecorder view last                  # the dashboard, on this machine only
-agentrecorder bundle last --prompts --diff --redact-secrets --zip -o ~/review.zip   # one file to send, outside the repository
+witnessed run -- claude
 ```
 
-| Command | What it does |
-| --- | --- |
-| `run -- CMD` | Start CMD supervised and attach; `-d` detached; `--anchor FILE`, `--anchor-token T` for reviewers |
-| `sessions` | List sessions |
-| `attach ID`, `detach ID` | Connect this terminal, or disconnect the attached one |
-| `mark ID [LABEL]` | Mark a moment; `replay --from-mark` starts there |
-| `inspect ID` | Process, terminal, git, tool calls, tokens; `--prompts`, `--json` |
-| `recover ID` | Reattach, or report what is left and offer `--restart` or `--resume` |
-| `replay ID` | Play back; `--speed`, `--from`, `--instant`, `--follow` |
-| `stop ID` | Stop every process, escalating to SIGKILL |
-| `export ID` | JSON Lines or asciicast v2/v3; `--follow` |
-| `bundle ID` | Shareable directory or `--zip` with an overview and evaluation guide for reviewers, the prompts in order and the code changes; `--prompts`, `--diff`, `--redact-secrets`, `--redact`, `--cut`, `--dry-run` |
-| `view DIR\|ID` | Open a dashboard in the browser |
-| `anchor ID`, `verify DIR` | Stream anchors during a session; check a bundle against them and `--token` |
-| `rm ID`, `prune` | Delete finished sessions |
-| `hook` | Record an agent hook event; `run` wires it into Claude Code |
+**2. Review your decisions.** Every approval, refusal, interruption and correction, with what happened next and a link into the replay. Mark each one: would you decide again?
 
-`ID` accepts a unique prefix or `last`. Every command has `--help`; the reference is `docs/cli.md`.
+```
+witnessed review
+witnessed review --mark p42 --verdict differently --note "should have run the tests first"
+```
+
+**3. Share.** One file a reviewer opens offline: an overview, the prompts in order, your decisions, the code changes, and a hash chain over every event.
+
+```
+witnessed bundle --prompts --diff --redact-secrets --zip
+witnessed verify ~/witnessed-a91f2c.zip
+```
+
+`witnessed view` opens any session in your browser.
+
+## How it works
+
+- **Record.** A supervised terminal records every byte with timing in one local SQLite file. No daemon, no account, nothing leaves your machine. Claude Code gets the deepest integration: tool calls, approvals, refusals, tokens. Codex CLI, Gemini CLI, OpenCode and any other program are recorded as terminals.
+- **Review.** Decision moments come from the agent's hooks and transcript. Outcomes come from git: how many lines the session added are still in `HEAD`, and which later commits reverted them.
+- **Prove.** Each event is chained with SHA-256. Anchors streamed to a reviewer while the session runs, and a token they issued, turn "these files agree" into "this is what happened". `verify` says exactly what it proved.
+
+It records the terminal it runs in. It does not see other windows, devices or people.
 
 ## Privacy
 
-Output is recorded by default (`--no-record` to disable); keyboard input only with `--record-input`. Environment variables are never stored. State files are 0600, recordings older than 30 days are deleted, and replay strips sequences that could write the clipboard or inject keystrokes. Threat model: `docs/security.md`.
+Terminal output is recorded by default, keyboard input only with `--record-input`, and the code diff at session end so outcomes can be measured. `--no-record` turns all of it off. Environment variables are never stored. Recordings are private to your user and deleted after 30 days. Threat model: [docs/security.md](docs/security.md).
 
-## Documentation
+## Docs
 
-- `docs/cli.md`: command reference, session states, recovery, agent integration, sharing
-- `docs/architecture.md`: components, process model, persistence
-- `docs/event-model.md`: event schema and bundle format
-- `docs/security.md`: threat model and controls
-- `docs/performance.md`: baseline numbers and bounded resources
-- `docs/release.md`: release flow
-- `CHANGELOG.md`
+- [Commands](docs/cli.md)
+- [Architecture](docs/architecture.md)
+- [Event model and bundle format](docs/event-model.md)
+- [Security](docs/security.md)
+- [Performance](docs/performance.md)
+- [Releases](docs/release.md)
 
-## Development
+## Contributing
 
 ```
-just check          # fmt-check, clippy -D warnings, tests
-just check-ci       # plus cargo deny, cargo package, quick bench
-just clean-package  # when `just package` fails on a type just added to a workspace crate
+just check      # format, lint, test
+just check-ci   # what CI runs
 ```
 
 MIT license.
