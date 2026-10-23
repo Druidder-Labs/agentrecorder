@@ -372,6 +372,7 @@ for (const c of M.cuts || []) {
 let turns = [...realTurns, ...orphans].sort((a, b) => a.t_ms - b.t_ms);
 // Index of the first element at or after ms; the arrays are sorted by time.
 const lowerBound = (xs, ms, key = x => x.t_ms) => { let lo = 0, hi = xs.length; while (lo < hi) { const m = (lo + hi) >> 1; if (key(xs[m]) < ms) lo = m + 1; else hi = m; } return lo; };
+const INSTANT_TOOLS = ["Edit", "MultiEdit", "NotebookEdit", "Write", "Read", "Glob", "Grep"];
 const within = (xs, a, b) => xs.slice(lowerBound(xs, a), lowerBound(xs, b));
 const cutStartAfter = ms => Math.min(Infinity, ...(M.cuts || []).filter(c => c.from_ms > ms).map(c => c.from_ms));
 turns.forEach((t, i) => {
@@ -398,7 +399,11 @@ turns.forEach((t, i) => {
     // notification. The first other output after the prompt appeared is taken as the moment of the answer.
     const notes = t.events.filter(x => hookName(x) === "Notification" && x.t_ms >= h.t_ms && x.t_ms < limit).map(x => x.t_ms);
     let resume;
-    for (let i = lowerBound(outputsMs, h.t_ms + 501, x => x); i < outputsMs.length && outputsMs[i] < limit; i++) {
+    const instant = resumed && !h.refused && !h.escaped && (hookName(resumed) === "PostToolUse" || hookName(resumed) === "PostToolUseFailure")
+      && resumed.payload.tool_name === h.payload.tool_name && INSTANT_TOOLS.includes(h.payload.tool_name);
+    if (instant) resume = resumed.t_ms;
+    else if (h.refused || h.escaped) resume = limit;
+    for (let i = lowerBound(outputsMs, h.t_ms + 501, x => x); resume == null && i < outputsMs.length && outputsMs[i] < limit; i++) {
       const o = outputsMs[i];
       if (!notes.some(n => o >= n - 1000 && o <= n + 1000)) { resume = o; break; }
     }
@@ -648,7 +653,7 @@ function stepsFor(t) {
     } else if (name === "PermissionRequest") {
       run = null;
       const [label, detail] = p.tool_name ? toolLabel(h) : ["", ""];
-      items.push(el("button", { type: "button", class: "step wait", title: `${detail ? detail + "\n" : ""}${h.waitMeasured ? "Measured from the request until the terminal showed activity again." : "The terminal showed no activity before the next agent event, so this is the time until that event."}`, onclick: () => seek(h.t_ms) }, stamp(h.t_ms),
+      items.push(el("button", { type: "button", class: "step wait", title: `${detail ? detail + "\n" : ""}${h.waitMeasured ? "Measured from the request until the answer: the tool ran, the refusal was recorded, or the terminal showed activity again." : "The terminal showed no activity before the next agent event, so this is the time until that event."}`, onclick: () => seek(h.t_ms) }, stamp(h.t_ms),
         `asked permission${label ? ` for ${label}` : ""}: ${({ approved: "you approved", declined: "you declined (No or Esc); it did not run", stopped: "you pressed Esc", unanswered: "never answered", unknown: "answer removed for sharing" })[h.outcome] || "not approved; the command did not run"}${h.waitMs != null ? ` after ${secs(h.waitMs)}` : ""}`, detail ? el("span", { class: "d" }, detail) : null));
     } else if (name === "Notification" && p.notification_type && p.notification_type !== "permission_prompt") {
       run = null;
@@ -700,7 +705,7 @@ for (const t of turns) {
         t.agent != null ? el("span", { class: "k agent", title: "From the prompt to the agent's answer (Stop hook), minus the time a permission prompt waited for you" }, `agent ${secs(t.agent)}`)
           : t.interruptedAt != null ? el("span", { class: "k human" }, `${t.endedByRefusal ? "ended when you declined a command" : "you interrupted"} after ${secs(t.interruptedAt - t.t_ms)}`)
           : el("span", { class: "k warn", title: "No Stop hook before the next prompt: interrupted, or still running at exit" }, "no answer recorded"),
-        t.approvals ? el("span", { class: "k warn", title: "From each permission request until the terminal showed activity again" }, `${secs(t.approvalMs)} waiting for you`) : null,
+        t.approvals ? el("span", { class: "k warn", title: "From each permission request until the answer: the tool ran, for edits and reads, or the terminal showed activity again" }, `${secs(t.approvalMs)} waiting for you`) : null,
         t.calls.length ? el("span", { class: `k ${t.calls.some(c => hookName(c) === "PostToolUseFailure") ? "bad" : ""}` }, plural(t.calls.length, "tool call")) : null,
         t.total != null ? el("span", { class: "k", title: `${num(t.input)} input, ${num(t.output)} output, ${num(t.cache_read)} cache read, ${num(t.cache_creation)} cache write, ${plural(t.api_calls, "API call")}` }, `${kilo(t.total)} tokens`) : null)),
     prompt);
@@ -716,7 +721,7 @@ story.append(el("div", { class: "turn system" },
     el("span", { class: exitOk ? null : "bad" }, `${M.program} ${exitText} after ${dur(M.duration_ms)}${newCommits ? `, ${plural(newCommits, "commit")} made` : ""}`),
     changedCount != null ? el("span", { class: "right" }, el("a", { href: "#code", onclick: e => { e.preventDefault(); showTab("code"); } }, `${plural(changedCount, "file")} changed`)) : null)));
 if (turns.length) story.append(el("div", { class: "caveat" },
-  `Thinking: from the previous answer (Stop hook) to this prompt. Agent: from the prompt to its Stop hook, minus the time permission prompts waited for you (measured until the terminal showed activity again). Steps: the agent's tool calls from its hooks${toolDetail ? ", with the command, path and lines changed (never file contents); hover for the full command or error" : "; this recording has only tool names"}. Tokens: the replies until the next prompt.`
+  `Thinking: from the previous answer (Stop hook) to this prompt. Agent: from the prompt to its Stop hook, minus the time permission prompts waited for you (measured until an edit or read ran, or for other tools until the terminal showed activity again). Steps: the agent's tool calls from its hooks${toolDetail ? ", with the command, path and lines changed (never file contents); hover for the full command or error" : "; this recording has only tool names"}. Tokens: the replies until the next prompt.`
   + (P.available ? ` Prompts come from the ${P.source}${P.text ? ", text included with --prompts after redaction." : "; the text is included only when the bundle is written with --prompts."}` : "")));
 
 // Files

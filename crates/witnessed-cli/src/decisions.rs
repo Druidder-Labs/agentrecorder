@@ -365,6 +365,8 @@ fn turns(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Turn> {
     turns
 }
 
+const INSTANT_TOOLS: [&str; 7] = ["Edit", "MultiEdit", "NotebookEdit", "Write", "Read", "Glob", "Grep"];
+
 fn asks(inp: &Inputs, turns: &[Turn], cuts: &[(i64, i64)], escaped: &mut BTreeSet<i64>) -> Vec<(usize, Ask)> {
     let hooks = &inp.hooks;
     let cut_after = |ms: i64| cuts.iter().map(|c| c.0).filter(|&f| f > ms).min().unwrap_or(INF);
@@ -401,12 +403,23 @@ fn asks(inp: &Inputs, turns: &[Turn], cuts: &[(i64, i64)], escaped: &mut BTreeSe
                 .filter(|x| name(x) == "Notification" && x.t_ms >= h.t_ms && x.t_ms < limit)
                 .map(|x| x.t_ms)
                 .collect();
+            let instant = resumed
+                .filter(|x| {
+                    refused.is_none()
+                        && esc.is_none()
+                        && matches!(name(x), "PostToolUse" | "PostToolUseFailure")
+                        && x.h.tool_name == h.h.tool_name
+                        && h.h.tool_name.as_deref().is_some_and(|t| INSTANT_TOOLS.contains(&t))
+                })
+                .map(|x| x.t_ms);
             let from = inp.outputs.partition_point(|&o| o < h.t_ms + 501);
-            let resume = inp.outputs[from..]
-                .iter()
-                .copied()
-                .take_while(|&o| o < limit)
-                .find(|&o| !notes.iter().any(|&n| o >= n - 1000 && o <= n + 1000));
+            let resume = instant.or(refused).or(esc).or_else(|| {
+                inp.outputs[from..]
+                    .iter()
+                    .copied()
+                    .take_while(|&o| o < limit)
+                    .find(|&o| !notes.iter().any(|&n| o >= n - 1000 && o <= n + 1000))
+            });
             let wait_ms = (!cut_away).then(|| (resume.unwrap_or(limit) - h.t_ms).max(0));
             let unanswered = resumed.is_none()
                 && t.end.is_none()
@@ -697,6 +710,19 @@ mod tests {
     }
 
     #[test]
+    fn a_file_edit_is_answered_when_it_runs_not_when_the_prompt_blinks() {
+        let hooks = vec![
+            hook(1, 2000, "PermissionRequest", file("Write", "/w/hello.py")),
+            hook(2, 15_600, "PostToolUse", file("Write", "/w/hello.py")),
+            hook(3, 16_000, "Stop", None),
+        ];
+        let blinks: Vec<i64> = (0..22).map(|i| 2520 + i * 600).collect();
+        let d = decide(inputs(hooks, blinks, vec![prompt(1, 0)]), &[]);
+        let m = only(&d, Kind::Approved);
+        assert_eq!(m.wait_ms, Some(13_600));
+    }
+
+    #[test]
     fn checked_before_counts_a_test_or_a_read_after_the_last_edit() {
         let hooks = vec![
             hook(1, 1000, "PostToolUse", file("Edit", "/w/src/a.rs")),
@@ -718,7 +744,7 @@ mod tests {
         let first = by_id("p3");
         assert_eq!((first.checked_before, first.subject.as_deref()), (Some(true), Some("src/a.rs")));
         assert_eq!(first.then.as_deref(), Some("tests failed next"));
-        assert_eq!(first.facts[0], "Approved in 0.6 s after a test run since the last edit.");
+        assert_eq!(first.facts[0], "Approved in 1.0 s after a test run since the last edit.");
         assert_eq!(by_id("p6").checked_before, Some(true));
         assert!(by_id("p6").facts[0].contains("after a read of the file"));
         assert_eq!(by_id("p9").checked_before, Some(true));
@@ -925,7 +951,7 @@ mod tests {
         assert!(d.available, "{:?}", d.reason);
         assert_eq!(d.moments.len(), 1);
         let m = &d.moments[0];
-        assert_eq!((m.id.as_str(), m.kind, m.prompt, m.wait_ms), ("p1", Kind::Declined, Some(1), Some(2800)));
+        assert_eq!((m.id.as_str(), m.kind, m.prompt, m.wait_ms), ("p1", Kind::Declined, Some(1), Some(3000)));
         assert_eq!(derive(&store, &s, &[(1000, 3000)]).unwrap().moments, vec![]);
     }
 }

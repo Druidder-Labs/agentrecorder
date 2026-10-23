@@ -140,7 +140,8 @@ pub fn locate(store: &Store, session_id: &str) -> Result<std::result::Result<Loc
     Ok(locate_in(&hooks))
 }
 
-const NOT_TYPED: [&str; 3] = ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"];
+const NOT_TYPED: [&str; 5] =
+    ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>", "<bash-stdout>", "<bash-stderr>"];
 const INTERRUPTED: &str = "[Request interrupted by user";
 const REFUSED: &str = "[Request interrupted by user for tool use";
 
@@ -206,6 +207,9 @@ fn prompt(v: &Value) -> Option<(String, String, u64)> {
         Some(args) if !args.is_empty() => format!("{name} {args}"),
         _ => name.to_string(),
     });
+    if let Some(shell) = tag_value(trimmed, "bash-input").filter(|_| trimmed.starts_with("<bash-input>")) {
+        return Some(("shell".into(), shell.to_string(), images));
+    }
     let origin = match (v["origin"]["kind"].as_str(), &command) {
         (Some(kind), _) => kind.to_string(),
         (None, Some(_)) => "command".into(),
@@ -326,7 +330,24 @@ pub fn fold(lines: impl Iterator<Item = Vec<u8>>, from_ns: i64, to_ns: i64) -> R
         }
     }
     usage.models = models.into_iter().collect();
+    drop_cancelled(&mut usage.interactions);
     Ok(usage)
+}
+
+fn drop_cancelled(interactions: &mut Vec<Interaction>) {
+    let resent: Vec<bool> = interactions
+        .iter()
+        .zip(interactions.iter().skip(1))
+        .map(|(a, b)| {
+            a.origin != "none" && a.api_calls == 0 && a.reply_chars == 0 && a.origin == b.origin && a.text == b.text
+        })
+        .collect();
+    let mut i = 0;
+    interactions.retain(|_| {
+        let keep = !resent.get(i).copied().unwrap_or(false);
+        i += 1;
+        keep
+    });
 }
 
 #[cfg(test)]
@@ -474,6 +495,29 @@ mod tests {
             (vec![t_ns], vec![t_ns], vec![t_ns])
         );
         assert_eq!(u.interactions.iter().map(|i| i.reply_chars).collect::<Vec<_>>(), [0, 14, 0, 0]);
+    }
+
+    #[test]
+    fn bash_mode_is_a_shell_line_and_a_prompt_resent_after_esc_counts_once() {
+        let t = "2026-10-21T10:00:00Z";
+        let human =
+            |text: &str| user(t, serde_json::json!({"origin": {"kind": "human"}, "message": {"content": text}}));
+        let lines = vec![
+            user(t, serde_json::json!({"message": {"content": "<bash-input>python3 hello.py</bash-input>"}})),
+            user(
+                t,
+                serde_json::json!({"message": {"content": "<bash-stdout>hi</bash-stdout><bash-stderr></bash-stderr>"}}),
+            ),
+            human("add a flag"),
+            human("add a flag"),
+            line(t, "r1", 1, 10, 0, 0),
+            human("add a flag"),
+            line(t, "r2", 1, 20, 0, 0),
+        ];
+        let u = fold(lines.into_iter(), 0, i64::MAX).unwrap();
+        let got: Vec<(&str, &str, u64)> =
+            u.interactions.iter().map(|i| (i.origin.as_str(), i.text.as_str(), i.api_calls)).collect();
+        assert_eq!(got, [("shell", "python3 hello.py", 0), ("human", "add a flag", 1), ("human", "add a flag", 1)]);
     }
 
     #[test]
