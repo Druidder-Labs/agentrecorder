@@ -133,6 +133,12 @@ pub fn annotate(store: &Store, id: &str, d: &Decisions, action: &Action) -> Resu
     }
 }
 
+fn prompt_sentence(m: &Moment, p: u64) -> String {
+    let label = decisions::prompt_label(m.origin.as_deref());
+    let mut c = label.chars();
+    c.next().map_or_else(String::new, |f| format!("{}{} {p}.", f.to_uppercase(), c.as_str()))
+}
+
 fn note_suffix(note: Option<&str>) -> String {
     note.map(|n| format!(" - {n}")).unwrap_or_default()
 }
@@ -186,7 +192,7 @@ pub fn render(head: &Header, d: &Decisions, kinds: &[Kind], annotations: &[Annot
             let _ = writeln!(o, "{:<idw$}  {}  {:<kw$}  {}", m.id, fmt::offset_ms(m.t_ms), m.kind, subject(m));
             let pad = " ".repeat(idw + 2);
             let line =
-                m.prompt.map(|p| format!("Prompt {p}.")).into_iter().chain(m.facts.iter().cloned()).collect::<Vec<_>>();
+                m.prompt.map(|p| prompt_sentence(m, p)).into_iter().chain(m.facts.iter().cloned()).collect::<Vec<_>>();
             if !line.is_empty() {
                 let _ = writeln!(o, "{pad}{}", line.join(" "));
             }
@@ -278,6 +284,7 @@ mod tests {
             t_ms,
             kind,
             prompt: None,
+            origin: None,
             tool: None,
             subject: None,
             wait_ms: None,

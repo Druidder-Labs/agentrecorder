@@ -235,6 +235,8 @@ ul.ofiles .by { word-break: normal; }
   .prompt { font-size: 14px; }
   dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   dt { margin-top: 6px; }
+  .tabs { flex-wrap: wrap; gap: 0; }
+  .tabs button { padding: 8px 10px; }
 }
 </style>
 </head>
@@ -336,11 +338,18 @@ const exitOk = S.exit_code === 0;
 const exitText = S.exit_code != null ? `exit ${S.exit_code}` : S.exit_signal != null ? `killed by signal ${S.exit_signal}` : S.status;
 const verifyCmd = `witnessed verify ${bundleName} --anchors ANCHORS_FILE${M.chain.token_bound ? " --token TOKEN" : ""}\n# ANCHORS_FILE: the anchor file you received while the session ran; leave --anchors out if you received none`;
 
+const DEC = D.decisions && typeof D.decisions === "object" ? D.decisions : null;
+// The decision moments computed when the bundle was written; when present they set the waits, outcomes and corrections.
+const decided = new Map(DEC && DEC.available !== false && Array.isArray(DEC.moments) ? DEC.moments.map(m => [m.id, m]) : []);
+const hasDecisions = !!(DEC && DEC.available !== false && Array.isArray(DEC.moments));
+const promptWord = origin => origin === "shell" ? "shell command" : origin === "command" ? "command" : "prompt";
 // Turns: one per prompt, from the transcript when the bundle has it, else from UserPromptSubmit hooks.
 const submits = hooks.filter(h => hookName(h) === "UserPromptSubmit");
-// Output times from the cast, used to see when the screen came back to life after a permission prompt.
-const outputsMs = (() => {
-  const out = [];
+// Output times from the cast, and the times the agent's input box came back (bracketed paste switched on again),
+// which is when a permission dialog closed.
+const outputsMs = [], closesMs = [];
+(() => {
+  const out = outputsMs;
   let t = 0, first = true;
   for (const line of String(D.cast || "").split("\n")) {
     if (!line) continue;
@@ -349,9 +358,11 @@ const outputsMs = (() => {
     try { e = JSON.parse(line); } catch { continue; }
     if (!Array.isArray(e) || typeof e[0] !== "number") continue;
     t += e[0];
-    if (e[1] === "o") out.push(Math.round(t * 1000));
+    if (e[1] === "o") {
+      out.push(Math.round(t * 1000));
+      if (String(e[2]).includes("\u001b[?2004h")) closesMs.push(Math.round(t * 1000));
+    }
   }
-  return out;
 })();
 const realTurns = P.available
   ? (P.interactions || []).filter(t => t.origin !== "none" && t.t_ms != null).map(t => ({ ...t, source: "transcript" }))
@@ -395,20 +406,31 @@ turns.forEach((t, i) => {
     const cutAt = cutStartAfter(h.t_ms);
     if (!resumed && !stop && !h.escaped && Number.isFinite(cutAt) && cutAt <= limit) h.cutAway = true;
     if (!Number.isFinite(limit)) limit = sessionEnd;
-    // The screen goes quiet while the permission prompt waits; it repaints once when the agent sends its idle
-    // notification. The first other output after the prompt appeared is taken as the moment of the answer.
+    // The answer is the refusal or Esc in the transcript, the dialog closing, or the tool running, whichever is first.
+    // Recordings without the dialog-close mark fall back to the first output that is not the idle notification's repaint.
     const notes = t.events.filter(x => hookName(x) === "Notification" && x.t_ms >= h.t_ms && x.t_ms < limit).map(x => x.t_ms);
-    let resume;
-    const instant = resumed && !h.refused && !h.escaped && (hookName(resumed) === "PostToolUse" || hookName(resumed) === "PostToolUseFailure")
-      && resumed.payload.tool_name === h.payload.tool_name && INSTANT_TOOLS.includes(h.payload.tool_name);
-    if (instant) resume = resumed.t_ms;
-    else if (h.refused || h.escaped) resume = limit;
-    for (let i = lowerBound(outputsMs, h.t_ms + 501, x => x); resume == null && i < outputsMs.length && outputsMs[i] < limit; i++) {
-      const o = outputsMs[i];
-      if (!notes.some(n => o >= n - 1000 && o <= n + 1000)) { resume = o; break; }
+    const ranAt = resumed && (hookName(resumed) === "PostToolUse" || hookName(resumed) === "PostToolUseFailure") && resumed.payload.tool_name === h.payload.tool_name ? resumed.t_ms : null;
+    let resume = null;
+    if (h.refused || h.escaped) resume = limit;
+    else if (closesMs.length) {
+      const c = closesMs[lowerBound(closesMs, h.t_ms + 1, x => x)];
+      const close = c != null && c <= limit ? c : null;
+      resume = close != null && ranAt != null ? Math.min(close, ranAt) : close ?? ranAt;
+    } else {
+      if (ranAt != null && INSTANT_TOOLS.includes(h.payload.tool_name)) resume = ranAt;
+      for (let i = lowerBound(outputsMs, h.t_ms + 501, x => x); resume == null && i < outputsMs.length && outputsMs[i] < limit; i++) {
+        const o = outputsMs[i];
+        if (!notes.some(n => o >= n - 1000 && o <= n + 1000)) { resume = o; break; }
+      }
     }
     h.waitMs = h.cutAway ? null : Math.max(0, (resume ?? limit) - h.t_ms);
     h.waitMeasured = resume != null;
+    const dm = decided.get(`p${h.seq}`);
+    if (dm) {
+      h.waitMs = dm.wait_ms ?? null;
+      h.waitMeasured = !(dm.facts || []).some(f => f.includes("upper bound"));
+      h.decided = dm.kind;
+    }
     // A refusal fires no hook; the screen changes when the person answers. No change at all means no answer.
     if (!resumed && !stop && !h.escaped && !h.refused && !h.cutAway && resume == null) h.unanswered = true;
     t.approvals += 1;
@@ -458,7 +480,7 @@ turns.forEach(t => {
     const window = nextAsk < 0 ? later : later.slice(0, nextAsk);
     const sameCmd = x => !tsum(h).command || !tsum(x).command || tsum(h).command === tsum(x).command;
     const ran = window.find(x => (hookName(x) === "PostToolUse" || hookName(x) === "PostToolUseFailure") && x.payload.tool_name === h.payload.tool_name && sameCmd(x));
-    h.outcome = h.refused ? "declined" : h.escaped ? "stopped" : ran ? "approved" : h.cutAway ? "unknown" : h.unanswered ? "unanswered" : "not approved";
+    h.outcome = h.decided ? h.decided.replace("_", " ") : h.refused ? "declined" : h.escaped ? "stopped" : ran ? "approved" : h.cutAway ? "unknown" : h.unanswered ? "unanswered" : "not approved";
     permissions.push(h);
   });
   t.interrupts = interrupts.filter(ms => ms >= t.t_ms && ms < t.next);
@@ -486,14 +508,16 @@ agentMs = sum(turns.map(t => t.agent));
 const words = s => new Set(String(s || "").toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) || []);
 const changedNames = new Set(changed.map(c => c.path.split("/").pop()));
 let prevTyped = null;
+const correctedPrompts = new Set([...decided.values()].filter(m => m.kind === "corrected").map(m => m.prompt));
 for (const t of typedTurns) {
   t.tags = [];
+  if (hasDecisions && correctedPrompts.has(t.index)) t.tags.push("corrects the agent");
   if (!(P.text && t.text)) continue;
   const text = t.text, w = words(text);
   if (/(?:^|[\s`'"(])(?![ei]\.g\.|i\.e\.)[A-Za-z_][\w\/-]*\.[A-Za-z][A-Za-z0-9]{0,5}\b/.test(text) || [...changedNames].some(n => text.includes(n))) t.tags.push("names a file");
-  if (/\b(do not|don't|dont|never|without|only|must|avoid|keep|não|nao|sem|apenas|nunca|somente)\b/i.test(text)) t.tags.push("sets a constraint");
+  if (/(?:^|[.,;:!?\n]\s*|\b(?:and|but|so|then|please|pls|i|we|you|e|mas|eu|nós)\s+)(?:do not|don't|dont|never|não|nao|nunca)\b|\b(?:without|only|must|avoid|keep|sem|apenas|somente)\b/i.test(text)) t.tags.push("sets a constraint");
   if (/\btest|\bteste/i.test(text)) t.tags.push("mentions tests");
-  if (/^\s*(no\b|nope|actually|wait\b|that'?s (wrong|not)|não[, ]|nao[, ]|na verdade|errado)|\bi meant\b|\beu quis dizer\b/i.test(text)) t.tags.push("corrects the agent");
+  if (!hasDecisions && /^\s*(no\b|nope|actually|wait\b|that'?s (wrong|not)|não[, ]|nao[, ]|na verdade|errado)|\bi meant\b|\beu quis dizer\b/i.test(text)) t.tags.push("corrects the agent");
   const pw = prevTyped ? words(prevTyped.text) : new Set();
   const overlap = [...pw].filter(x => w.has(x)).length;
   if (prevTyped && pw.size >= 3 && overlap / Math.min(pw.size, w.size) >= 0.6) t.tags.push(`rephrases #${prevTyped.index}`);
@@ -653,7 +677,7 @@ function stepsFor(t) {
     } else if (name === "PermissionRequest") {
       run = null;
       const [label, detail] = p.tool_name ? toolLabel(h) : ["", ""];
-      items.push(el("button", { type: "button", class: "step wait", title: `${detail ? detail + "\n" : ""}${h.waitMeasured ? "Measured from the request until the answer: the tool ran, the refusal was recorded, or the terminal showed activity again." : "The terminal showed no activity before the next agent event, so this is the time until that event."}`, onclick: () => seek(h.t_ms) }, stamp(h.t_ms),
+      items.push(el("button", { type: "button", class: "step wait", title: `${detail ? detail + "\n" : ""}${h.waitMeasured ? "Measured from the request until the answer: the dialog closed, the tool ran, or the refusal was recorded." : "No answer was seen before the next agent event, so this is the time until that event."}`, onclick: () => seek(h.t_ms) }, stamp(h.t_ms),
         `asked permission${label ? ` for ${label}` : ""}: ${({ approved: "you approved", declined: "you declined (No or Esc); it did not run", stopped: "you pressed Esc", unanswered: "never answered", unknown: "answer removed for sharing" })[h.outcome] || "not approved; the command did not run"}${h.waitMs != null ? ` after ${secs(h.waitMs)}` : ""}`, detail ? el("span", { class: "d" }, detail) : null));
     } else if (name === "Notification" && p.notification_type && p.notification_type !== "permission_prompt") {
       run = null;
@@ -705,7 +729,7 @@ for (const t of turns) {
         t.agent != null ? el("span", { class: "k agent", title: "From the prompt to the agent's answer (Stop hook), minus the time a permission prompt waited for you" }, `agent ${secs(t.agent)}`)
           : t.interruptedAt != null ? el("span", { class: "k human" }, `${t.endedByRefusal ? "ended when you declined a command" : "you interrupted"} after ${secs(t.interruptedAt - t.t_ms)}`)
           : el("span", { class: "k warn", title: "No Stop hook before the next prompt: interrupted, or still running at exit" }, "no answer recorded"),
-        t.approvals ? el("span", { class: "k warn", title: "From each permission request until the answer: the tool ran, for edits and reads, or the terminal showed activity again" }, `${secs(t.approvalMs)} waiting for you`) : null,
+        t.approvals ? el("span", { class: "k warn", title: "From each permission request until the answer: the dialog closed, the tool ran, or the refusal was recorded" }, `${secs(t.approvalMs)} waiting for you`) : null,
         t.calls.length ? el("span", { class: `k ${t.calls.some(c => hookName(c) === "PostToolUseFailure") ? "bad" : ""}` }, plural(t.calls.length, "tool call")) : null,
         t.total != null ? el("span", { class: "k", title: `${num(t.input)} input, ${num(t.output)} output, ${num(t.cache_read)} cache read, ${num(t.cache_creation)} cache write, ${plural(t.api_calls, "API call")}` }, `${kilo(t.total)} tokens`) : null)),
     prompt);
@@ -721,7 +745,7 @@ story.append(el("div", { class: "turn system" },
     el("span", { class: exitOk ? null : "bad" }, `${M.program} ${exitText} after ${dur(M.duration_ms)}${newCommits ? `, ${plural(newCommits, "commit")} made` : ""}`),
     changedCount != null ? el("span", { class: "right" }, el("a", { href: "#code", onclick: e => { e.preventDefault(); showTab("code"); } }, `${plural(changedCount, "file")} changed`)) : null)));
 if (turns.length) story.append(el("div", { class: "caveat" },
-  `Thinking: from the previous answer (Stop hook) to this prompt. Agent: from the prompt to its Stop hook, minus the time permission prompts waited for you (measured until an edit or read ran, or for other tools until the terminal showed activity again). Steps: the agent's tool calls from its hooks${toolDetail ? ", with the command, path and lines changed (never file contents); hover for the full command or error" : "; this recording has only tool names"}. Tokens: the replies until the next prompt.`
+  `Thinking: from the previous answer (Stop hook) to this prompt. Agent: from the prompt to its Stop hook, minus the time permission prompts waited for you (measured until the dialog closed, the tool ran or the refusal was recorded). Steps: the agent's tool calls from its hooks${toolDetail ? ", with the command, path and lines changed (never file contents); hover for the full command or error" : "; this recording has only tool names"}. Tokens: the replies until the next prompt.`
   + (P.available ? ` Prompts come from the ${P.source}${P.text ? ", text included with --prompts after redaction." : "; the text is included only when the bundle is written with --prompts."}` : "")));
 
 // Files
@@ -884,7 +908,6 @@ $("integrity").append(
   el("div", { class: "caveat" }, "Without anchors received while the session ran, the bundle is consistent with itself but self-reported: it shows how the session went in the recorded terminal, not that nothing happened outside it."));
 
 // Tabs
-const DEC = D.decisions && typeof D.decisions === "object" ? D.decisions : null;
 const TABS = [["overview", "Overview"], ...(DEC ? [["review", "Review"]] : []), ["timeline", "Timeline"], ["code", "Code changes"], ["details", "Details"]];
 function showTab(id) {
   for (const [t] of TABS) {
@@ -1182,7 +1205,7 @@ if (DEC) {
         el("div", { class: "head" }, momentLink(m.t_ms), el("span", { class: "k" }, kindLabel(m.kind)),
           m.tool ? el("span", { class: "mono" }, m.tool) : null, m.subject ? el("span", { class: "subj" }, m.subject) : null,
           el("span", { class: "right" },
-            t ? el("span", {}, "prompt ", promptLink(t)) : m.prompt != null ? el("span", {}, `prompt #${m.prompt}`) : null)),
+            t ? el("span", {}, `${promptWord(m.origin)} `, promptLink(t)) : m.prompt != null ? el("span", {}, `${promptWord(m.origin)} #${m.prompt}`) : null)),
         (m.facts || []).length ? el("ul", { class: "evidence" }, m.facts.map(f => el("li", {}, f))) : null,
         a ? el("div", { class: "author" }, `Author's own review: ${(VERDICT[a.verdict] || [null, a.verdict])[1]}${a.note ? ` - ${a.note}` : ""}`) : null,
         el("div", { class: "yours" }, el("span", { class: "lbl" }, "Your view:"), buttons,

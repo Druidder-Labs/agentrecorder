@@ -72,6 +72,8 @@ pub struct Moment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
@@ -91,6 +93,7 @@ impl Moment {
             t_ms,
             kind,
             prompt: None,
+            origin: None,
             tool: None,
             subject: None,
             wait_ms: None,
@@ -106,6 +109,18 @@ pub fn derive(store: &Store, s: &Session, cuts_ms: &[(i64, i64)]) -> Result<Deci
     let mut inputs = Inputs { duration_ms: crate::state::duration_ms(s), cwd: s.cwd.clone(), ..Inputs::default() };
     inputs.outputs =
         store.event_times(&s.id, kind::TERMINAL_OUTPUT)?.into_iter().map(|(_, mono)| mono / 1_000_000).collect();
+    let mut tail = Vec::new();
+    store.for_each_event(&s.id, Some(&[kind::TERMINAL_OUTPUT]), |e| {
+        let data = e.data.unwrap_or_default();
+        tail.extend_from_slice(&data);
+        if tail.windows(DIALOG_CLOSED.len()).any(|w| w == DIALOG_CLOSED) {
+            inputs.closes.push(e.mono_ns / 1_000_000);
+        }
+        let keep = tail.len().saturating_sub(DIALOG_CLOSED.len() - 1);
+        tail.drain(..keep);
+        Ok(())
+    })?;
+    inputs.home = std::env::var("HOME").ok().filter(|h| h.len() > 1);
     store.for_each_event(&s.id, Some(&[kind::SESSION_CREATED, kind::AGENT_HOOK]), |e| {
         base_ns.get_or_insert(e.ts_ns - e.mono_ns);
         let t_ms = e.mono_ns / 1_000_000;
@@ -140,7 +155,16 @@ pub fn derive(store: &Store, s: &Session, cuts_ms: &[(i64, i64)]) -> Result<Deci
     Ok(decide(inputs, cuts_ms))
 }
 
+pub fn prompt_label(origin: Option<&str>) -> &'static str {
+    match origin {
+        Some("shell") => "shell command",
+        Some("command") => "command",
+        _ => "prompt",
+    }
+}
+
 const INF: i64 = i64::MAX;
+const DIALOG_CLOSED: &[u8] = b"\x1b[?2004h";
 const EDIT_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit"];
 static TEST_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
@@ -189,14 +213,17 @@ struct Inputs {
     prompts: Vec<Prompt>,
     interrupts: Vec<i64>,
     refusals: Vec<i64>,
+    closes: Vec<i64>,
     duration_ms: Option<i64>,
     cwd: Option<String>,
+    home: Option<String>,
 }
 
 #[derive(Debug, Default)]
 struct Turn {
     index: Option<u64>,
     typed: bool,
+    origin: String,
     t_ms: i64,
     next: i64,
     end: Option<i64>,
@@ -204,6 +231,12 @@ struct Turn {
     interrupts: Vec<i64>,
     refusals: Vec<i64>,
     interrupted_at: Option<i64>,
+}
+
+impl Turn {
+    fn origin_if_not_typed(&self) -> Option<String> {
+        (!self.typed && self.index.is_some()).then(|| self.origin.clone())
+    }
 }
 
 #[derive(Debug)]
@@ -253,26 +286,30 @@ fn is_edit(h: &Hook) -> bool {
     EDIT_TOOLS.contains(&tool_name(h))
 }
 
-fn rel(path: &str, cwd: Option<&str>) -> String {
-    let cwd = cwd.unwrap_or("").trim_end_matches('/');
-    match path.strip_prefix(&format!("{cwd}/")) {
-        Some(r) if !cwd.is_empty() => r.to_string(),
-        _ => path.to_string(),
+fn rel(path: &str, cwd: Option<&str>, home: Option<&str>) -> String {
+    let under = |dir: Option<&str>| {
+        let dir = dir.unwrap_or("").trim_end_matches('/');
+        path.strip_prefix(&format!("{dir}/")).filter(|_| !dir.is_empty())
+    };
+    match (under(cwd), under(home)) {
+        (Some(r), _) => r.to_string(),
+        (None, Some(r)) => format!("~/{r}"),
+        (None, None) => path.to_string(),
     }
 }
 
-fn subject(h: &Hook, cwd: Option<&str>) -> Option<String> {
+fn subject(h: &Hook, cwd: Option<&str>, home: Option<&str>) -> Option<String> {
     let t = h.h.tool.as_ref()?;
     let or = |a: &Option<String>, b: &Option<String>| a.clone().or_else(|| b.clone());
     let s = match tool_name(h) {
         "Bash" => or(&t.command, &t.description),
         "Grep" | "Glob" => t.pattern.clone().map(|p| match &t.path {
-            Some(path) => format!("{p} in {}", rel(path, cwd)),
+            Some(path) => format!("{p} in {}", rel(path, cwd, home)),
             None => p,
         }),
         "WebFetch" | "WebSearch" => or(&t.url, &t.pattern),
         "Task" | "Agent" => or(&t.subagent, &t.description),
-        _ => t.path.as_deref().map(|p| rel(p, cwd)).or_else(|| t.description.clone()),
+        _ => t.path.as_deref().map(|p| rel(p, cwd, home)).or_else(|| t.description.clone()),
     };
     s.filter(|s| !s.trim().is_empty()).map(|s| crate::transcript::one_line(&s, 120))
 }
@@ -308,6 +345,7 @@ fn decide(mut inp: Inputs, cuts: &[(i64, i64)]) -> Decisions {
     inp.outputs.sort_unstable();
     inp.interrupts.sort_unstable();
     inp.refusals.sort_unstable();
+    inp.closes.sort_unstable();
     let moments: Vec<Moment> = moments(&inp, cuts).into_iter().filter(|m| !in_cut(m.t_ms)).collect();
     let mut counts = BTreeMap::new();
     for m in &moments {
@@ -327,6 +365,7 @@ fn turns(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Turn> {
         .map(|p| Turn {
             index: Some(p.index),
             typed: p.origin == "human" || p.origin == "user",
+            origin: p.origin.clone(),
             t_ms: p.t_ms,
             ..Turn::default()
         })
@@ -403,22 +442,26 @@ fn asks(inp: &Inputs, turns: &[Turn], cuts: &[(i64, i64)], escaped: &mut BTreeSe
                 .filter(|x| name(x) == "Notification" && x.t_ms >= h.t_ms && x.t_ms < limit)
                 .map(|x| x.t_ms)
                 .collect();
-            let instant = resumed
-                .filter(|x| {
-                    refused.is_none()
-                        && esc.is_none()
-                        && matches!(name(x), "PostToolUse" | "PostToolUseFailure")
-                        && x.h.tool_name == h.h.tool_name
-                        && h.h.tool_name.as_deref().is_some_and(|t| INSTANT_TOOLS.contains(&t))
-                })
-                .map(|x| x.t_ms);
-            let from = inp.outputs.partition_point(|&o| o < h.t_ms + 501);
-            let resume = instant.or(refused).or(esc).or_else(|| {
-                inp.outputs[from..]
-                    .iter()
-                    .copied()
-                    .take_while(|&o| o < limit)
-                    .find(|&o| !notes.iter().any(|&n| o >= n - 1000 && o <= n + 1000))
+            let ran_at = resumed.filter(|x| is_call(x) && x.h.tool_name == h.h.tool_name).map(|x| x.t_ms);
+            let resume = refused.or(esc).or_else(|| {
+                if inp.closes.is_empty() {
+                    let instant =
+                        ran_at.filter(|_| h.h.tool_name.as_deref().is_some_and(|t| INSTANT_TOOLS.contains(&t)));
+                    let from = inp.outputs.partition_point(|&o| o < h.t_ms + 501);
+                    return instant.or_else(|| {
+                        inp.outputs[from..]
+                            .iter()
+                            .copied()
+                            .take_while(|&o| o < limit)
+                            .find(|&o| !notes.iter().any(|&n| o >= n - 1000 && o <= n + 1000))
+                    });
+                }
+                let close =
+                    inp.closes.get(inp.closes.partition_point(|&c| c <= h.t_ms)).copied().filter(|&c| c <= limit);
+                match (close, ran_at) {
+                    (Some(c), Some(r)) => Some(c.min(r)),
+                    (c, r) => c.or(r),
+                }
             });
             let wait_ms = (!cut_away).then(|| (resume.unwrap_or(limit) - h.t_ms).max(0));
             let unanswered = resumed.is_none()
@@ -458,6 +501,7 @@ fn asks(inp: &Inputs, turns: &[Turn], cuts: &[(i64, i64)], escaped: &mut BTreeSe
 fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
     let hooks = &inp.hooks;
     let cwd = inp.cwd.as_deref();
+    let home = inp.home.as_deref();
     let turns = turns(inp, cuts);
     let mut escaped = BTreeSet::new();
     let asks = asks(inp, &turns, cuts, &mut escaped);
@@ -467,8 +511,9 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
         let t = &turns[a.turn];
         let mut m = Moment::new(format!("p{}", h.seq), h.t_ms, a.outcome);
         m.prompt = t.index;
+        m.origin = t.origin_if_not_typed();
         m.tool = h.h.tool_name.clone();
-        m.subject = subject(h, cwd);
+        m.subject = subject(h, cwd, home);
         m.wait_ms = a.wait_ms;
         let wait = a.wait_ms.map(secs).unwrap_or_default();
         match a.outcome {
@@ -487,23 +532,29 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
         }
         out.push(m);
     }
+    let mut per_prompt: BTreeMap<u64, u64> = BTreeMap::new();
     for &ms in inp.interrupts.iter().filter(|ms| !escaped.contains(ms)) {
         let turn = turns.iter().find(|t| ms >= t.t_ms && ms < t.next);
-        let last = turn.and_then(|t| {
-            t.events
-                .iter()
-                .rev()
-                .map(|&j| &hooks[j])
-                .find(|h| h.t_ms <= ms && matches!(name(h), "PreToolUse" | "PostToolUse" | "PostToolUseFailure"))
-        });
-        let mut m = Moment::new(format!("i{ms}"), ms, Kind::Interrupted);
-        m.prompt = turn.and_then(|t| t.index);
-        m.tool = last.and_then(|h| h.h.tool_name.clone());
-        m.subject = last.and_then(|h| subject(h, cwd));
-        m.facts.push(match turn.and_then(|t| t.index.map(|i| (i, t.t_ms))) {
-            Some((i, start)) => {
-                format!("Pressed Esc {} after prompt {i} started, while the agent worked.", secs(ms - start))
+        let last = turn.and_then(|t| last_tool(hooks, t, ms));
+        let id = match turn.and_then(|t| t.index) {
+            Some(p) => {
+                let n = per_prompt.entry(p).or_default();
+                *n += 1;
+                if *n == 1 { format!("i{p}") } else { format!("i{p}-{n}") }
             }
+            None => format!("i{ms}"),
+        };
+        let mut m = Moment::new(id, ms, Kind::Interrupted);
+        m.prompt = turn.and_then(|t| t.index);
+        m.origin = turn.and_then(Turn::origin_if_not_typed);
+        m.tool = last.and_then(|h| h.h.tool_name.clone());
+        m.subject = last.and_then(|h| subject(h, cwd, home));
+        m.facts.push(match turn.and_then(|t| t.index.map(|i| (i, t.t_ms))) {
+            Some((i, start)) => format!(
+                "Pressed Esc {} after {} {i} started, while the agent worked.",
+                secs(ms - start),
+                prompt_label(m.origin.as_deref())
+            ),
             None => "Pressed Esc while the agent worked.".into(),
         });
         m.facts.push(match last {
@@ -526,7 +577,7 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
         let mut causes: Vec<(i64, String, Option<&Hook>)> = Vec::new();
         if let Some(&ms) = prev.interrupts.last() {
             let what = if escaped.contains(&ms) { "Esc at a permission prompt" } else { "an interruption" };
-            causes.push((ms, what.into(), None));
+            causes.push((ms, what.into(), last_tool(hooks, prev, ms)));
         }
         if let Some(&ms) = prev.refusals.last() {
             let ask = asks
@@ -537,7 +588,9 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
             causes.push((ms, "a declined permission request".into(), ask));
         }
         if let Some(h) = calls.iter().rev().find(|h| is_test(h)).filter(|h| failed(h)) {
-            causes.push((h.t_ms, "a failed test run".into(), Some(h)));
+            let what =
+                if command(h).is_some_and(chained) { "a failed command that ran tests" } else { "a failed test run" };
+            causes.push((h.t_ms, what.into(), Some(h)));
         } else if let Some(h) = calls.last().filter(|h| failed(h)) {
             causes.push((h.t_ms, format!("a failed {} call", tool_name(h)), Some(h)));
         }
@@ -551,17 +604,28 @@ fn moments(inp: &Inputs, cuts: &[(i64, i64)]) -> Vec<Moment> {
         let mut m = Moment::new(format!("c{index}"), t.t_ms, Kind::Corrected);
         m.prompt = Some(index);
         m.tool = by.and_then(|h| h.h.tool_name.clone());
-        m.subject = by.and_then(|h| subject(h, cwd));
+        m.subject = by.and_then(|h| subject(h, cwd, home));
         m.wait_ms = wait_ms;
         let when = wait_ms.map(|w| format!(" {} later", secs(w))).unwrap_or_default();
         m.facts.push(match prev.index {
-            Some(p) => format!("Redirected the agent{when}, after {cause} in prompt {p}."),
+            Some(p) => format!(
+                "Redirected the agent{when}, after {cause} in {} {p}.",
+                prompt_label(prev.origin_if_not_typed().as_deref())
+            ),
             None => format!("Redirected the agent{when}, after {cause}."),
         });
         out.push(m);
     }
     out.sort_by(|a, b| a.t_ms.cmp(&b.t_ms).then_with(|| a.id.cmp(&b.id)));
     out
+}
+
+fn last_tool<'a>(hooks: &'a [Hook], t: &Turn, ms: i64) -> Option<&'a Hook> {
+    t.events
+        .iter()
+        .rev()
+        .map(|&j| &hooks[j])
+        .find(|h| h.t_ms <= ms && matches!(name(h), "PreToolUse" | "PostToolUse" | "PostToolUseFailure"))
 }
 
 fn approved(m: &mut Moment, inp: &Inputs, turns: &[Turn], a: &Ask, wait: String) {
@@ -603,8 +667,9 @@ fn approved(m: &mut Moment, inp: &Inputs, turns: &[Turn], a: &Ask, wait: String)
     let then = if ran.h.tool.as_ref().is_some_and(|t| t.interrupted) {
         Some("the call was interrupted".to_string())
     } else if tool_name(ran) == "Bash" {
+        let own = is_test(ran) && !command(ran).is_some_and(chained);
         Some(
-            match (is_test(ran), failed(ran)) {
+            match (own, failed(ran)) {
                 (true, true) => "tests failed",
                 (true, false) => "tests passed",
                 (false, true) => "the command failed",
@@ -625,6 +690,9 @@ fn approved(m: &mut Moment, inp: &Inputs, turns: &[Turn], a: &Ask, wait: String)
             .map(|j| &hooks[j])
             .find(|x| is_call(x) && is_test(x));
         Some(match test {
+            Some(x) if command(x).is_some_and(chained) => {
+                "tests ran next inside a longer command, so their result is not known".into()
+            }
             Some(x) if failed(x) => "tests failed next".into(),
             Some(_) => "tests passed next".into(),
             None => "no test ran next".into(),
@@ -636,7 +704,9 @@ fn approved(m: &mut Moment, inp: &Inputs, turns: &[Turn], a: &Ask, wait: String)
         m.facts.push(sentence(then));
     }
     if tool_name(ran) == "Bash" && is_test(ran) && command(ran).is_some_and(chained) {
-        m.facts.push("Other commands ran after the tests, so the exit status may not be theirs.".into());
+        m.facts.push(
+            "Tests ran inside it with other commands after them, so the exit status is not the tests' own.".into(),
+        );
     }
     m.then = then;
 }
@@ -723,6 +793,53 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_closing_answers_the_request_not_activity_behind_it() {
+        let hooks = vec![
+            hook(1, 2000, "PermissionRequest", bash("python3 -m unittest -v hello; echo done")),
+            hook(2, 12_800, "PostToolUse", bash("python3 -m unittest -v hello; echo done")),
+            hook(3, 13_000, "PermissionRequest", file("Write", "/w/a.py")),
+            hook(4, 15_100, "PostToolUse", file("Write", "/w/a.py")),
+            hook(5, 16_000, "Stop", None),
+        ];
+        let mut inp = inputs(hooks, vec![3100, 3200, 4000, 12_200, 14_000], vec![prompt(1, 0)]);
+        inp.closes = vec![500, 12_200, 15_050];
+        let d = decide(inp, &[]);
+        let waits: Vec<(String, Option<i64>)> = d.moments.iter().map(|m| (m.id.clone(), m.wait_ms)).collect();
+        assert_eq!(waits, vec![("p1".into(), Some(10_200)), ("p3".into(), Some(2050))]);
+        assert_eq!(d.moments[0].then.as_deref(), Some("the command exited 0"));
+        assert_eq!(
+            d.moments[0].facts.last().map(String::as_str),
+            Some("Tests ran inside it with other commands after them, so the exit status is not the tests' own.")
+        );
+    }
+
+    #[test]
+    fn work_after_a_shell_command_is_labelled_with_it() {
+        let hooks = vec![hook(1, 2000, "Stop", None), hook(2, 9000, "PermissionRequest", file("Edit", "/w/a.py"))];
+        let shell = Prompt { index: 2, t_ms: 8000, origin: "shell".into() };
+        let mut inp = inputs(hooks, vec![], vec![prompt(1, 0), shell, prompt(3, 20_000)]);
+        inp.refusals = vec![15_000];
+        let d = decide(inp, &[]);
+        let p = only(&d, Kind::Declined);
+        assert_eq!((p.prompt, p.origin.as_deref()), (Some(2), Some("shell")));
+        let c = only(&d, Kind::Corrected);
+        assert_eq!((c.prompt, c.origin.as_deref()), (Some(3), None));
+        assert_eq!(
+            c.facts[0],
+            "Redirected the agent 5.0 s later, after a declined permission request in shell command 2."
+        );
+    }
+
+    #[test]
+    fn paths_outside_the_project_are_shown_from_home() {
+        let home = Some("/Users/me");
+        assert_eq!(rel("/Users/me/.claude/notes.md", Some("/w"), home), "~/.claude/notes.md");
+        assert_eq!(rel("/w/src/a.rs", Some("/w"), home), "src/a.rs");
+        assert_eq!(rel("/etc/hosts", Some("/w"), home), "/etc/hosts");
+        assert_eq!(rel("/Users/meow/x", None, home), "/Users/meow/x");
+    }
+
+    #[test]
     fn checked_before_counts_a_test_or_a_read_after_the_last_edit() {
         let hooks = vec![
             hook(1, 1000, "PostToolUse", file("Edit", "/w/src/a.rs")),
@@ -783,7 +900,7 @@ mod tests {
         let i = only(&d, Kind::Interrupted);
         assert_eq!(
             (i.id.as_str(), i.prompt, i.tool.as_deref(), i.subject.as_deref()),
-            ("i7000", Some(1), Some("Read"), Some("README.md"))
+            ("i1", Some(1), Some("Read"), Some("README.md"))
         );
         assert_eq!(i.facts[0], "Pressed Esc 7.0 s after prompt 1 started, while the agent worked.");
         let c = only(&d, Kind::Corrected);
@@ -791,6 +908,7 @@ mod tests {
             (c.wait_ms, c.facts[0].as_str()),
             (Some(13_000), "Redirected the agent 13 s later, after an interruption in prompt 1.")
         );
+        assert_eq!((c.tool.as_deref(), c.subject.as_deref()), (Some("Read"), Some("README.md")));
     }
 
     #[test]
@@ -841,7 +959,10 @@ mod tests {
             (c.tool.as_deref(), c.subject.as_deref()),
             (Some("Bash"), Some("FOO=1 cargo test --all && echo ok"))
         );
-        assert_eq!(c.facts, vec!["Redirected the agent 3.0 s later, after a failed test run in prompt 1."]);
+        assert_eq!(
+            c.facts,
+            vec!["Redirected the agent 3.0 s later, after a failed command that ran tests in prompt 1."]
+        );
     }
 
     #[test]
@@ -858,7 +979,7 @@ mod tests {
         let b = decide(inp, &[]);
         assert_eq!(a, b);
         let ids: Vec<&str> = a.moments.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["p7", "i4000", "c2"]);
+        assert_eq!(ids, ["p7", "i1", "c2"]);
         assert_eq!(a.moments[0].then.as_deref(), Some("the command failed"));
     }
 
