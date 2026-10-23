@@ -38,6 +38,8 @@ pub struct Snapshot {
     pub head_sha: String,
     pub base_sha: String,
     pub base_ref: String,
+    #[serde(default)]
+    pub commits_total: Option<u64>,
     pub commits: Vec<Commit>,
     pub reviews: Vec<Review>,
 }
@@ -66,6 +68,7 @@ impl Snapshot {
             head_sha: text(&pull["head"]["sha"], "head.sha")?,
             base_sha: text(&pull["base"]["sha"], "base.sha")?,
             base_ref: text(&pull["base"]["ref"], "base.ref")?,
+            commits_total: pull["commits"].as_u64(),
             commits: pages(commits)
                 .filter_map(|c| {
                     Some(Commit {
@@ -105,6 +108,7 @@ impl Snapshot {
             .flat_map(|c| [c.author_login.as_deref(), c.committer_login.as_deref()])
             .flatten()
             .collect();
+        let commits_complete = self.commits_total.is_some_and(|t| t <= self.commits.len() as u64);
         let mut ordered: Vec<&Review> = self.reviews.iter().collect();
         ordered.sort_by(|a, b| (a.submitted_at.as_deref(), a.id).cmp(&(b.submitted_at.as_deref(), b.id)));
         let mut latest: BTreeMap<&str, &Review> = BTreeMap::new();
@@ -130,7 +134,7 @@ impl Snapshot {
                     at_commit,
                     is_author,
                     is_commit_author,
-                    independent: human && !is_author && !is_commit_author,
+                    independent: human && !is_author && !is_commit_author && commits_complete,
                 }
             })
             .collect();
@@ -149,6 +153,7 @@ impl Snapshot {
             head_sha: self.head_sha.clone(),
             base_sha: self.base_sha.clone(),
             head_matches_commit: self.head_sha.eq_ignore_ascii_case(commit),
+            commits_complete,
             commit_authors: commit_authors.into_iter().map(str::to_string).collect(),
             reviewers,
             independent_approvals,
@@ -178,6 +183,7 @@ pub struct ReviewFacts {
     pub head_sha: String,
     pub base_sha: String,
     pub head_matches_commit: bool,
+    pub commits_complete: bool,
     pub commit_authors: Vec<String>,
     pub reviewers: Vec<Reviewer>,
     pub independent_approvals: Vec<String>,
@@ -199,7 +205,7 @@ mod tests {
     }
 
     fn snapshot(reviews: Vec<Value>) -> Snapshot {
-        let pull = json!({"number": 7, "state": "open", "user": {"login": "dev", "type": "User"},
+        let pull = json!({"number": 7, "state": "open", "user": {"login": "dev", "type": "User"}, "commits": 1,
                           "head": {"sha": HEAD}, "base": {"sha": OLD, "ref": "main"}});
         let commits = json!([[{"sha": HEAD, "author": {"login": "agent-bot"}, "committer": {"login": "web-flow"}}]]);
         Snapshot::from_api("example/infra", &pull, &json!([reviews]), &commits).unwrap()
@@ -220,6 +226,17 @@ mod tests {
         assert!(dev.is_author && !dev.independent);
         let bob = f.reviewers.iter().find(|r| r.login == "bob").unwrap();
         assert!(!bob.at_commit);
+    }
+
+    #[test]
+    fn without_the_full_commit_list_no_reviewer_is_independent() {
+        let mut s = snapshot(vec![review(1, "alice", "User", "APPROVED", HEAD, "2026-10-23T10:00:00Z")]);
+        assert_eq!(s.facts(HEAD).independent_approvals, ["alice"]);
+        s.commits_total = Some(251);
+        let f = s.facts(HEAD);
+        assert!(!f.commits_complete && f.independent_approvals.is_empty());
+        s.commits_total = None;
+        assert!(s.facts(HEAD).independent_approvals.is_empty());
     }
 
     #[test]

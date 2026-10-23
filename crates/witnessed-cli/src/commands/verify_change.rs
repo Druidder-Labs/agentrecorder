@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use witnessed_assurance::engine::{self, EvidenceFile, Inputs, SessionEvidence, evidence_id};
 use witnessed_assurance::policy::Policy;
@@ -71,6 +71,9 @@ pub fn verify_change(args: &VerifyChangeArgs) -> Result<i32> {
                 let text = serde_json::to_string_pretty(&body)? + "\n";
                 emit(args.output.as_deref(), &text)?;
             }
+            if let Some(path) = &args.summary {
+                append(path, &report::error_markdown(&args.commit, VERSION, &message))?;
+            }
             Ok(EXIT_ERROR)
         }
     }
@@ -86,11 +89,26 @@ fn emit(output: Option<&Path>, text: &str) -> Result<()> {
     }
 }
 
+const MAX_EVIDENCE_BYTES: u64 = 16 << 20;
+
 fn read(path: &Path) -> Result<EvidenceFile> {
+    let len = fs::metadata(path).with_context(|| format!("reading {}", path.display()))?.len();
+    if len > MAX_EVIDENCE_BYTES {
+        bail!("{} is {len} bytes; evidence files are limited to {MAX_EVIDENCE_BYTES}", path.display());
+    }
     Ok(EvidenceFile {
         label: path.display().to_string(),
         bytes: fs::read(path).with_context(|| format!("reading {}", path.display()))?,
     })
+}
+
+fn append(path: &Path, text: &str) -> Result<()> {
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    f.write_all(text.as_bytes()).with_context(|| format!("writing {}", path.display()))
 }
 
 fn attestation_files(paths: &[PathBuf]) -> Result<Vec<EvidenceFile>> {
@@ -114,12 +132,18 @@ fn attestation_files(paths: &[PathBuf]) -> Result<Vec<EvidenceFile>> {
 }
 
 fn run(args: &VerifyChangeArgs) -> Result<i32> {
+    if args.pull_request.is_some() && args.repository.is_empty() {
+        bail!("--pull-request needs --repository (or GITHUB_REPOSITORY) to check which repository the snapshot is for");
+    }
     let change = git::change_set(&args.repo, &args.commit, &args.base).map_err(|e| anyhow!("{e}"))?;
     let policy = match &args.policy_ref {
-        Some(rev) => Policy::from_git(&args.repo, rev, &args.policy),
-        None => Policy::from_dir(Path::new(&args.policy)),
-    }
-    .map_err(|e| anyhow!("{e}"))?;
+        Some(rev) => Policy::from_git(&args.repo, rev, &args.policy).map_err(|e| anyhow!("{e}"))?,
+        None => {
+            let mut p = Policy::from_dir(Path::new(&args.policy)).map_err(|e| anyhow!("{e}"))?;
+            p.repo_path = path_in_repo(&args.repo, Path::new(&args.policy))?;
+            p
+        }
+    };
     let attestations = attestation_files(&args.attestations)?;
     let pull_request = args.pull_request.as_deref().map(read).transpose()?;
     let sessions = match &args.session {
@@ -144,14 +168,17 @@ fn run(args: &VerifyChangeArgs) -> Result<i32> {
     };
     emit(args.output.as_deref(), &text)?;
     if let Some(path) = &args.summary {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        f.write_all(report::markdown(&r).as_bytes()).with_context(|| format!("writing {}", path.display()))?;
+        append(path, &report::markdown(&r))?;
     }
     Ok(r.decision.exit_code())
+}
+
+fn path_in_repo(repo: &Path, dir: &Path) -> Result<Option<String>> {
+    let top = git::git(repo, &["rev-parse", "--show-toplevel"]).map_err(|e| anyhow!("{e}"))?;
+    let top = PathBuf::from(String::from_utf8_lossy(&top).trim_end());
+    let top = fs::canonicalize(&top).with_context(|| format!("resolving {}", top.display()))?;
+    let dir = fs::canonicalize(dir).with_context(|| format!("resolving {}", dir.display()))?;
+    Ok(dir.strip_prefix(&top).ok().map(|rel| rel.to_string_lossy().into_owned()).filter(|r| !r.is_empty()))
 }
 
 pub(crate) fn session_evidence(bundle: &Path, anchors: Option<PathBuf>) -> Result<SessionEvidence> {

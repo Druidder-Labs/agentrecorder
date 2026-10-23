@@ -19,7 +19,8 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       fmt: ${{ steps.fmt.outcome }}
       validate: ${{ steps.validate.outcome }}

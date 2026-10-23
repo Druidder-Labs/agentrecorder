@@ -28,7 +28,7 @@ Neither allows a merge when the check is required.
 
 ## `ERROR`
 
-The verifier could not reach a decision: the commit or base does not resolve, the policy is missing or does not compile, a policy rule returned an unexpected shape, a builtin was refused, an input is unreadable or malformed, or the report could not be written. Exit code 4, never 0.
+The verifier could not reach a decision: the commit or base does not resolve, the policy is missing or does not compile, a policy rule returned an unexpected shape, a builtin was refused, an input is unreadable, malformed or over 16 MiB, `--pull-request` was given without `--repository`, `--policy` with `--policy-ref` leaves the repository, or the report could not be written. With `--summary`, the summary gets an `ERROR` section. Exit code 4, never 0.
 
 ## Determinism
 

@@ -38,6 +38,7 @@ Written by `witnessed collect github-pr` from `GET /repos/{o}/{r}/pulls/{n}`, `/
 | `repository`, `number`, `state` | As collected |
 | `author` | `login`, `type` of the pull request author |
 | `head_sha`, `base_sha`, `base_ref` | At collection time |
+| `commits_total` | The pull request's commit count; GitHub returns at most 250 in `commits[]` |
 | `commits[]` | `sha`, `author_login`, `committer_login` (GitHub accounts linked to the commit, when any) |
 | `reviews[]` | `id`, `user` (`login`, `type`), `state`, `commit_id`, `submitted_at` |
 
@@ -50,12 +51,13 @@ change
   repository           from --repository (also under declared)
   commit, base, merge_base
   files[]              path, status (A, M, D, R, C, T), old_path for renames and copies
-  terraform[]          path, block_types: resource types and data.<type> on either side of the change
+  terraform[]          path, scanned (false for .tf.json), block_types: resource types, data.<type> and
+                       module.<name> on either side of the change
 evidence
   attestations[]       id (sha256 of the envelope), label, signer (trusted key name), trust: "signature",
                        predicate_type, subjects, predicate
   pull_request         null, or: id, repository, number, state, author, head_sha, base_sha,
-                       head_matches_commit, commit_authors, reviewers[], independent_approvals[],
+                       head_matches_commit, commits_complete, commit_authors, reviewers[], independent_approvals[],
                        changes_requested[]
   sessions[]           id, label, session_id, program, anchored, anchored_through_seq, token_matched,
                        exit_head, commits, dropped_events, terminated, trust ("anchored" or
@@ -64,7 +66,7 @@ declared
   repository
 ```
 
-Reviewer fields: `login`, `account_type`, `state` (the latest of `APPROVED`, `CHANGES_REQUESTED`, `DISMISSED`; comments do not replace it), `commit_id`, `at_commit`, `is_author`, `is_commit_author`, `independent` (account type `User`, not the author, not a commit author or committer). `independent_approvals` lists independent reviewers whose latest state is `APPROVED` at the commit.
+Reviewer fields: `login`, `account_type`, `state` (the latest of `APPROVED`, `CHANGES_REQUESTED`, `DISMISSED`; comments do not replace it), `commit_id`, `at_commit`, `is_author`, `is_commit_author`, `independent` (account type `User`, not the author, not a commit author or committer, and the snapshot lists every commit of the pull request). `independent_approvals` lists independent reviewers whose latest state is `APPROVED` at the commit.
 
 Attestations that fail verification, attestations for another commit, a snapshot for another repository or head, and inconsistent session bundles never appear under `evidence`; the verifier adds its own requirement for them.
 
@@ -80,7 +82,7 @@ Package `witnessed.change`, Rego v1. Rules:
 
 A requirement is `{"id": string, "status": "passed" | "failed" | "inconclusive", "reason": string, "evidence": [evidence ids]}`. Ids starting with `verifier.` are reserved. A duplicate id, another status or a missing field is a policy error (exit 4).
 
-Policy directory layout: `*.rego` modules (`*_test.rego` skipped) and `keys/<name>.pub.pem`. Other files are ignored and not part of the digest.
+Policy directory layout: top-level `*.rego` modules (`*_test.rego` skipped) and `keys/<name>.pub.pem`. Files in subdirectories and other files are ignored and not part of the digest. With `--policy-ref`, `--policy` is a relative path inside the repository (`./` and duplicate slashes are removed; `..` and absolute paths are errors). Without it, a directory inside the repository is still checked for edits by the change.
 
 ## Report: `witnessed.change-verification/v0.1`
 

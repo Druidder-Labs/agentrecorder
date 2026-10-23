@@ -8,6 +8,8 @@ pub fn block_types(text: &str) -> BTreeSet<String> {
             ("", rest)
         } else if let Some(rest) = line.strip_prefix("data") {
             ("data.", rest)
+        } else if let Some(rest) = line.strip_prefix("module") {
+            ("module.", rest)
         } else {
             continue;
         };
@@ -34,10 +36,16 @@ resource "aws_iam_role_policy" "deploy" {
   data "aws_iam_policy_document" "deploy" {}
 resource "aws_s3_bucket" "logs" {}
 resource "aws_iam_role_policy" "other" {}
+module "deploy_role" {
+  source = "./modules/role"
+}
 # resource "aws_iam_user" "commented" {}
 resourcefoo "x" {}
 "#;
         let types: Vec<String> = block_types(tf).into_iter().collect();
-        assert_eq!(types, ["aws_iam_role_policy", "aws_s3_bucket", "data.aws_iam_policy_document"]);
+        assert_eq!(
+            types,
+            ["aws_iam_role_policy", "aws_s3_bucket", "data.aws_iam_policy_document", "module.deploy_role"]
+        );
     }
 }

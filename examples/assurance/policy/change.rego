@@ -41,6 +41,22 @@ terraform_change if {
 	endswith(p, ".terraform.lock.hcl")
 }
 
+terraform_change if {
+	some p in paths
+	endswith(p, ".tf.json")
+}
+
+module_change if {
+	some f in input.change.terraform
+	some t in f.block_types
+	startswith(t, "module.")
+}
+
+unscanned_change if {
+	some f in input.change.terraform
+	f.scanned == false
+}
+
 iam_change if {
 	some f in input.change.terraform
 	some t in f.block_types
@@ -107,6 +123,10 @@ required_checks contains "terraform-validate" if terraform_change
 
 required_checks contains "terraform-security-scan" if iam_change
 
+required_checks contains "terraform-security-scan" if module_change
+
+required_checks contains "terraform-security-scan" if unscanned_change
+
 required_checks contains "tests" if not terraform_change
 
 check(name) := {"id": sprintf("check.%s", [name]), "status": "failed", "reason": sprintf("CI reported %s as failed for this commit", [name]), "evidence": evidence_for(name)} if {
@@ -124,6 +144,10 @@ requirements contains check(name) if some name in required_checks
 approval_reasons contains "IAM resources or policy documents are in the changed Terraform files" if iam_change
 
 approval_reasons contains "the change edits CI workflows, CODEOWNERS or the policy directory" if critical_change
+
+approval_reasons contains "a changed Terraform file calls a module, whose resources the file scan cannot see" if module_change
+
+approval_reasons contains "a changed Terraform JSON file was not scanned for resource types" if unscanned_change
 
 approvers := {login |
 	some login in input.evidence.pull_request.independent_approvals

@@ -94,6 +94,14 @@ pub fn statement(r: &Report) -> Statement {
     }
 }
 
+pub fn error_markdown(commit: &str, version: &str, error: &str) -> String {
+    format!(
+        "### Agent change verification: ERROR\n\nCommit `{}`: the verifier could not decide; this is not an approval.\n\n~~~\n{}\n~~~\n\nVerifier witnessed {version}.\n",
+        commit.replace('`', ""),
+        error.replace("~~~", "- - -")
+    )
+}
+
 pub fn error_json(commit: Option<&str>, version: &str, error: &str) -> Value {
     json!({
         "schema": REPORT_SCHEMA,

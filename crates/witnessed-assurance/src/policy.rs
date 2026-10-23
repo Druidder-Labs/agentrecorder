@@ -78,8 +78,11 @@ impl Policy {
         let mut digest = Sha256::new();
         let (mut modules, mut keys) = (Vec::new(), Vec::new());
         for (name, bytes) in files {
-            let is_rego = name.ends_with(".rego") && !name.ends_with("_test.rego");
-            let key_name = name.strip_prefix("keys/").and_then(|n| n.strip_suffix(".pub.pem"));
+            let is_rego = !name.contains('/') && name.ends_with(".rego") && !name.ends_with("_test.rego");
+            let key_name = name
+                .strip_prefix("keys/")
+                .and_then(|n| n.strip_suffix(".pub.pem"))
+                .filter(|n| !n.is_empty() && !n.contains('/'));
             if !is_rego && key_name.is_none() {
                 continue;
             }
@@ -120,9 +123,9 @@ impl Policy {
     }
 
     pub fn from_git(repo: &Path, rev: &str, path: &str) -> Result<Self, PolicyError> {
+        let path = normalize(path)?;
         let commit = git::resolve_commit(repo, rev).map_err(|e| PolicyError(format!("policy ref: {e}")))?;
-        let files = git::files_at(repo, &commit, path).map_err(|e| PolicyError(format!("policy at {rev}: {e}")))?;
-        let path = path.trim_end_matches('/').to_string();
+        let files = git::files_at(repo, &commit, &path).map_err(|e| PolicyError(format!("policy at {rev}: {e}")))?;
         Self::from_files(PolicySource::GitTree { commit, path: path.clone() }, Some(path), files)
     }
 
@@ -164,6 +167,16 @@ impl Policy {
         }
         Ok(Evaluation { id, version, requirements })
     }
+}
+
+pub fn normalize(path: &str) -> Result<String, PolicyError> {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+    if parts.is_empty() || parts.contains(&"..") || path.starts_with('/') {
+        return Err(PolicyError(format!(
+            "--policy {path:?} must be a relative path inside the repository with --policy-ref"
+        )));
+    }
+    Ok(parts.join("/"))
 }
 
 fn requirement(v: &Value) -> Result<Requirement, PolicyError> {
@@ -278,6 +291,30 @@ mod tests {
             ));
             assert!(p.evaluate(&json!({})).is_err(), "{call} evaluated");
         }
+    }
+
+    #[test]
+    fn repository_paths_are_normalized_and_must_stay_inside() {
+        assert_eq!(normalize("./.witnessed//policy/").unwrap(), ".witnessed/policy");
+        assert!(normalize("../policy").is_err());
+        assert!(normalize("/etc/policy").is_err());
+        assert!(normalize("./").is_err());
+    }
+
+    #[test]
+    fn nested_files_are_not_part_of_the_policy() {
+        let p = Policy::from_files(
+            PolicySource::Directory { path: "t".into() },
+            None,
+            vec![
+                ("p.rego".into(), format!("{HEADER}requirements := set()\n").into_bytes()),
+                ("old/x.rego".into(), b"not rego".to_vec()),
+                ("keys/old/ci.pub.pem".into(), b"not a key".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert!(p.keys.is_empty());
+        assert!(p.evaluate(&json!({})).is_ok());
     }
 
     #[test]

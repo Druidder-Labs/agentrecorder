@@ -40,7 +40,7 @@ mkdir -p "$work/attestations"
 snapshot() {
   cat > "$work/pr.json" <<EOF
 {"schema": "witnessed.github-pull-request/v0.1", "repository": "example/infra", "number": 7, "state": "open",
- "author": {"login": "dev", "type": "User"}, "head_sha": "$head", "base_sha": "$base", "base_ref": "main",
+ "author": {"login": "dev", "type": "User"}, "head_sha": "$head", "base_sha": "$base", "base_ref": "main", "commits_total": 1,
  "commits": [{"sha": "$head", "author_login": "agent-bot", "committer_login": "agent-bot"}],
  "reviews": [$1]}
 EOF

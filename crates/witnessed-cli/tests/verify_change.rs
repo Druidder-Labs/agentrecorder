@@ -143,6 +143,7 @@ impl Repo {
             "head_sha": head,
             "base_sha": self.base,
             "base_ref": "main",
+            "commits_total": 1,
             "commits": [{"sha": head, "author_login": "agent-bot", "committer_login": "agent-bot"}],
             "reviews": reviews,
         });
@@ -189,7 +190,12 @@ impl Repo {
 }
 
 fn run(args: &[&str], env: &[(&str, &str)]) -> Output {
+    run_in(Path::new("."), args, env)
+}
+
+fn run_in(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut c = Command::new(BIN);
+    c.current_dir(cwd);
     c.args(args).env_remove("GITHUB_REPOSITORY").env_remove("WITNESSED_GH");
     for (k, v) in env {
         c.env(k, v);
@@ -489,7 +495,7 @@ fn a_github_snapshot_is_built_from_api_responses_without_review_text() {
         "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\ncase \"$last\" in\n\
          */reviews*) echo '[[{{\"id\":1,\"user\":{{\"login\":\"alice\",\"type\":\"User\"}},\"state\":\"APPROVED\",\"commit_id\":\"{head}\",\"submitted_at\":\"2026-10-23T10:00:00Z\",\"body\":\"secret review text\"}}]]' ;;\n\
          */commits*) echo '[[{{\"sha\":\"{head}\",\"author\":{{\"login\":\"agent-bot\"}},\"committer\":{{\"login\":\"web-flow\"}}}}]]' ;;\n\
-         *) echo '{{\"number\":7,\"state\":\"open\",\"user\":{{\"login\":\"dev\",\"type\":\"User\"}},\"head\":{{\"sha\":\"{head}\"}},\"base\":{{\"sha\":\"{head}\",\"ref\":\"main\"}},\"body\":\"pr text\"}}' ;;\nesac\n"
+         *) echo '{{\"number\":7,\"commits\":1,\"state\":\"open\",\"user\":{{\"login\":\"dev\",\"type\":\"User\"}},\"head\":{{\"sha\":\"{head}\"}},\"base\":{{\"sha\":\"{head}\",\"ref\":\"main\"}},\"body\":\"pr text\"}}' ;;\nesac\n"
     );
     fs::write(&fake, script).unwrap();
     fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -506,6 +512,7 @@ fn a_github_snapshot_is_built_from_api_responses_without_review_text() {
         (v["head_sha"].as_str(), v["reviews"][0]["user"]["login"].as_str()),
         (Some(head.as_str()), Some("alice"))
     );
+    assert_eq!(v["commits_total"], 1);
 }
 
 #[test]
@@ -609,4 +616,80 @@ fn text_and_markdown_reports_name_the_decision_and_every_requirement() {
         md.contains("### Agent change verification: INCONCLUSIVE") && md.contains("`check.terraform-validate`"),
         "{md}"
     );
+}
+
+#[test]
+fn a_module_call_or_a_terraform_json_file_needs_the_scan_and_an_approval() {
+    let checks = &["terraform-fmt", "terraform-validate"];
+    let r = repo_with(&["ci"], |w| {
+        write(&w.join("infra/role.tf"), "module \"deploy_role\" {\n  source = \"./modules/role\"\n}\n")
+    });
+    let att = r.attest("a.json", &r.head, "ci", "passed", checks, &[]);
+    let (code, report) = r.verify(&["--attestation", s(&att)]);
+    assert_eq!(code, 3, "{report:#}");
+    assert_eq!(requirement(&report, "check.terraform-security-scan")["status"], "inconclusive");
+    assert!(requirement(&report, "review.independent-approval")["reason"].as_str().unwrap().contains("module"));
+    let r = repo_with(&["ci"], |w| write(&w.join("infra/extra.tf.json"), "{\"resource\": {}}\n"));
+    let att = r.attest("a.json", &r.head, "ci", "passed", checks, &[]);
+    let (code, report) = r.verify(&["--attestation", s(&att)]);
+    assert_eq!(code, 3, "{report:#}");
+    assert!(requirement(&report, "review.independent-approval")["reason"].as_str().unwrap().contains("JSON"));
+}
+
+#[test]
+fn policy_edits_are_detected_with_a_dot_slash_path_and_with_a_directory_inside_the_repository() {
+    let r = repo_with(&["ci"], |w| {
+        iam_change(w);
+        write(&w.join(".witnessed/policy/extra.rego"), "package witnessed.extra\n");
+    });
+    let work = r.work();
+    let common = ["verify-change", "--commit", &r.head, "--base", "main", "--format", "json"];
+    for extra in
+        [vec!["--policy", "./.witnessed/policy/", "--policy-ref", "main"], vec!["--policy", ".witnessed/policy"]]
+    {
+        let mut args = common.to_vec();
+        args.extend(extra.iter());
+        let o = run_in(&work, &args, &[]);
+        let report: Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(o.status.code(), Some(3), "{extra:?}: {report:#}");
+        assert_eq!(requirement(&report, "verifier.policy-change-approved")["status"], "inconclusive", "{extra:?}");
+    }
+    let mut args = common.to_vec();
+    args.extend(["--policy", "../outside", "--policy-ref", "main"]);
+    assert_eq!(run_in(&work, &args, &[]).status.code(), Some(4));
+}
+
+#[test]
+fn a_snapshot_without_a_repository_an_oversized_file_and_errors_reach_the_summary() {
+    let r = repo();
+    let work = r.work();
+    let summary = r.path("summary.md");
+    let pr = r.approved();
+    let base = [
+        "verify-change",
+        "--repo",
+        work.to_str().unwrap(),
+        "--commit",
+        &r.head,
+        "--base",
+        "main",
+        "--policy",
+        ".witnessed/policy",
+        "--policy-ref",
+        "main",
+    ];
+    let mut args = base.to_vec();
+    args.extend(["--pull-request", s(&pr), "--summary", s(&summary)]);
+    let o = run(&args, &[]);
+    assert_eq!(o.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("needs --repository"));
+    let md = fs::read_to_string(&summary).unwrap();
+    assert!(md.contains("### Agent change verification: ERROR") && md.contains("not an approval"), "{md}");
+    let big = r.path("big.json");
+    fs::write(&big, vec![b' '; (16 << 20) + 1]).unwrap();
+    let mut args = base.to_vec();
+    args.extend(["--attestation", s(&big)]);
+    let o = run(&args, &[]);
+    assert_eq!(o.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("limited to"));
 }

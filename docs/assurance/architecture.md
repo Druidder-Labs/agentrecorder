@@ -17,7 +17,7 @@ witnessed-assurance (library, no CLI, no provider calls except git)
 |-- dsse.rs       DSSE envelope, PAE, P-256 ECDSA sign and verify (RustCrypto p256)
 |-- intoto.rs     in-toto Statement v1, ResourceDescriptor, test-result v0.1 predicate
 |-- git.rs        commit resolution, merge base, changed paths, policy files at a commit
-|-- terraform.rs  resource and data block types in a Terraform file
+|-- terraform.rs  resource, data and module block types in a Terraform file
 |-- github.rs     pull request snapshot format, reviewer independence facts
 |-- policy.rs     policy loading (directory or git tree), digest, Rego evaluation (regorus)
 |-- engine.rs     evidence checks, policy input, verifier requirements, decision

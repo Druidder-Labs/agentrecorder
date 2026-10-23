@@ -23,11 +23,19 @@ Verifies each pull request head commit and blocks the merge until the decision i
 
 | Job | Pull request code | Secrets | Token permissions | Output |
 | --- | --- | --- | --- | --- |
-| `checks` | Yes, checked out at the head commit | None | none | Step outcomes |
+| `checks` | Yes, checked out at the head commit | None | `contents: read` (needed to check out a private repository; not persisted in git config) | Step outcomes |
 | `attest` | No checkout | `WITNESSED_ATTESTATION_KEY` (environment) | none | `checks.dsse.json`: a test-result attestation for the head commit |
 | `verify` | Checked out, read with git only | None | `contents: read`, `pull-requests: read` | Report in the job summary, `report.json` artifact, exit code |
 
 The workflow uses `pull_request_target`, so its definition comes from the base branch; a pull request that edits it changes nothing until it merges. The `verify` job reads the policy from the base commit (`--policy-ref "${BASE_SHA}"`).
+
+## Key rotation
+
+1. Generate the new key and add `keys/ci-next.pub.pem` and `"ci-next"` to `attesters` in a pull request; it needs an independent approval because it edits the policy.
+2. After it merges, replace `WITNESSED_ATTESTATION_KEY` with the new private key and set `--keyid ci-next` in the workflow.
+3. Once no open pull request depends on the old key, remove `keys/ci.pub.pem` and `"ci"` from `attesters`.
+
+Attestations signed with a key that is no longer in the policy fail as `verifier.evidence-authentic`; re-run the workflow to sign with the current key.
 
 ## After an approval
 

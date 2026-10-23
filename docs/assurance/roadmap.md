@@ -34,8 +34,8 @@ Phases from the mission, with what this release delivers and what is left. "Done
 - Run the example workflow on a demonstration repository with branch rules; record timings.
 - Release binaries with `verify-change` so CI installs a checksummed binary instead of compiling.
 - Benchmarks for large change sets (thousands of files, many attestations).
-- Fuzzing of the DSSE, Statement and snapshot parsers.
-- Key rotation: several keys per role in the policy, with a documented overlap period.
+- Coverage-guided fuzzing of the DSSE, Statement and snapshot parsers (`cargo fuzz`). Today a unit test feeds every truncation and a set of bit flips of real inputs and checks they return errors without panicking.
+- Key expiry: a validity window per key in the policy. Rotation itself works today (`github.md`, Key rotation).
 - A Terraform plan JSON input (`terraform show -json`) for resource-level facts instead of the block-type scan. The verifier still never runs `plan` itself.
 - GitLab merge requests: a snapshot type and a collector; the engine and policy contract stay.
 

@@ -449,6 +449,31 @@ mod tests {
     }
 
     #[test]
+    fn truncated_or_corrupted_inputs_are_errors_not_panics() {
+        let envelope = include_bytes!("../tests/fixtures/openssl-signed.dsse.json");
+        let keys = vec![crate::dsse::TrustedKey::from_pem("ci", include_str!("../tests/fixtures/ci.pub.pem")).unwrap()];
+        let snapshot = br#"{"schema":"witnessed.github-pull-request/v0.1","repository":"o/r","number":1,"state":"open","author":null,"head_sha":"a","base_sha":"b","base_ref":"main","commits":[],"reviews":[]}"#;
+        for cut in 0..envelope.len() {
+            let mut bytes = envelope[..cut].to_vec();
+            let _ = crate::dsse::parse(&bytes).and_then(|e| crate::dsse::verify(&e, &keys));
+            let _ = Statement::parse(&bytes);
+            bytes.reverse();
+            let _ = crate::dsse::parse(&bytes);
+        }
+        for cut in 0..snapshot.len() {
+            let _ = Snapshot::parse(&snapshot[..cut]);
+        }
+        let mut flipped = envelope.to_vec();
+        for i in (0..flipped.len()).step_by(7) {
+            flipped[i] ^= 0x20;
+            let _ = crate::dsse::parse(&flipped).and_then(|e| crate::dsse::verify(&e, &keys));
+            flipped[i] ^= 0x20;
+        }
+        assert!(Snapshot::parse(snapshot).is_ok());
+        assert!(crate::dsse::verify(&crate::dsse::parse(envelope).unwrap(), &keys).is_ok());
+    }
+
+    #[test]
     fn exit_codes_are_stable() {
         assert_eq!(
             [Decision::Verified, Decision::Rejected, Decision::Inconclusive].map(Decision::exit_code),

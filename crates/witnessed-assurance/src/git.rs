@@ -14,6 +14,7 @@ pub struct ChangedFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TerraformFile {
     pub path: String,
+    pub scanned: bool,
     pub block_types: Vec<String>,
 }
 
@@ -77,9 +78,13 @@ pub fn change_set(repo: &Path, commit: &str, base: &str) -> Result<ChangeSet, Gi
     )?;
     let files = parse_name_status(&raw)?;
     let mut terraform = Vec::new();
-    for f in
-        files.iter().filter(|f| f.path.ends_with(".tf") || f.old_path.as_deref().is_some_and(|p| p.ends_with(".tf")))
-    {
+    let is_tf = |p: &str| p.ends_with(".tf") || p.ends_with(".tf.json");
+    for f in files.iter().filter(|f| is_tf(&f.path) || f.old_path.as_deref().is_some_and(is_tf)) {
+        let scanned = !f.path.ends_with(".tf.json") && !f.old_path.as_deref().is_some_and(|p| p.ends_with(".tf.json"));
+        if !scanned {
+            terraform.push(TerraformFile { path: f.path.clone(), scanned, block_types: Vec::new() });
+            continue;
+        }
         let mut types = std::collections::BTreeSet::new();
         if f.status != "D" {
             types.extend(crate::terraform::block_types(&blob(repo, &commit, &f.path)?));
@@ -88,7 +93,7 @@ pub fn change_set(repo: &Path, commit: &str, base: &str) -> Result<ChangeSet, Gi
             let before = f.old_path.as_deref().unwrap_or(&f.path);
             types.extend(crate::terraform::block_types(&blob(repo, &merge_base, before)?));
         }
-        terraform.push(TerraformFile { path: f.path.clone(), block_types: types.into_iter().collect() });
+        terraform.push(TerraformFile { path: f.path.clone(), scanned, block_types: types.into_iter().collect() });
     }
     Ok(ChangeSet { commit, base, merge_base, files, terraform })
 }
