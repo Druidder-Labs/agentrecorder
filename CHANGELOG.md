@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/Druidder-Labs/witnessed/compare/v0.6.0...v0.6.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **assurance:** keep evidence file paths out of the policy input ([b80896f](https://github.com/Druidder-Labs/witnessed/commit/b80896ff495083adbe9d321e852940793a16221f))
+
 ## [0.6.0](https://github.com/Druidder-Labs/witnessed/compare/v0.5.0...v0.6.0) (2026-10-23)
 
 

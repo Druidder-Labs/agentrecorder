@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "witnessed-assurance"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "witnessed-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "witnessed-store"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "witnessed-supervisor"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
