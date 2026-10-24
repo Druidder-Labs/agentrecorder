@@ -12,7 +12,7 @@ Verifies each pull request head commit and blocks the merge until the decision i
    ```
 
 2. Add the policy on the default branch: `examples/assurance/policy/change.rego` as `.witnessed/policy/change.rego`, and `ci.pub.pem` as `.witnessed/policy/keys/ci.pub.pem`. Edit `attesters`, `agent_accounts`, `critical_prefixes` and the required checks to fit the repository.
-3. Create an environment `assurance-signing` with the secret `WITNESSED_ATTESTATION_KEY` holding the PEM private key. Add a repository variable `WITNESSED_REV` with the full commit id of the witnessed version to install.
+3. Create an environment `assurance-signing` with the secret `WITNESSED_ATTESTATION_KEY` holding the PEM private key, and limit its deployment branches to the default branch. `pull_request_target` runs in the default branch's context and gets the key; a workflow that a pull request adds runs on the pull request's ref and does not. Add a repository variable `WITNESSED_REV` with the full commit id of the witnessed version to install.
 4. Copy `examples/assurance/github/agent-change-assurance.yml` to `.github/workflows/` on the default branch. The `checks` job runs `terraform fmt`, `terraform validate` and `checkov` on `infra/`; adjust the steps and the check names together with the policy.
 5. Require the result:
    - Recommended: a repository or organization ruleset with "Require workflows to pass before merging" pointing at this workflow file on the default branch. GitHub then matches the workflow, not a job name.
@@ -53,7 +53,7 @@ witnessed verify-change --commit <head> --base <base> --repository owner/name \
   --attestation attestations/ --pull-request pull-request.json --format json
 ```
 
-The report is byte-identical to the CI report when the inputs and the verifier version are the same; compare `input_digest` first. `witnessed attest verify checks.dsse.json --public-key .witnessed/policy/keys/ci.pub.pem --commit <head>` checks one attestation on its own.
+With the same inputs and verifier version, the decision, requirements, evidence ids and `input_digest` match the CI report; only `evidence[].label` differs, because it is the local file path. `witnessed attest verify checks.dsse.json --public-key .witnessed/policy/keys/ci.pub.pem --commit <head>` checks one attestation on its own.
 
 ## Demo without GitHub
 

@@ -186,7 +186,6 @@ fn check_attestations(files: &[EvidenceFile], policy: &Policy, commit: &str) -> 
             Ok((signer, s)) => {
                 out.verified.push(json!({
                     "id": id,
-                    "label": f.label,
                     "signer": signer,
                     "trust": "signature",
                     "predicate_type": s.predicate_type,
@@ -361,6 +360,9 @@ pub fn evaluate(inputs: &Inputs) -> Result<Report, EngineError> {
         .filter(|s| s.consistent)
         .map(|s| {
             let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+            if let Some(o) = v.as_object_mut() {
+                o.remove("label");
+            }
             v["trust"] = json!(if s.anchored { "anchored" } else { "self_reported" });
             v["linked_to_commit"] = json!(
                 s.exit_head.as_deref() == Some(commit) || s.commits.iter().any(|c| c.eq_ignore_ascii_case(commit))

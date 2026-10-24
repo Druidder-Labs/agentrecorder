@@ -54,12 +54,12 @@ change
   terraform[]          path, scanned (false for .tf.json), block_types: resource types, data.<type> and
                        module.<name> on either side of the change
 evidence
-  attestations[]       id (sha256 of the envelope), label, signer (trusted key name), trust: "signature",
+  attestations[]       id (sha256 of the envelope), signer (trusted key name), trust: "signature",
                        predicate_type, subjects, predicate
   pull_request         null, or: id, repository, number, state, author, head_sha, base_sha,
                        head_matches_commit, commits_complete, commit_authors, reviewers[], independent_approvals[],
                        changes_requested[]
-  sessions[]           id, label, session_id, program, anchored, anchored_through_seq, token_matched,
+  sessions[]           id, session_id, program, anchored, anchored_through_seq, token_matched,
                        exit_head, commits, dropped_events, terminated, trust ("anchored" or
                        "self_reported"), linked_to_commit, partial
 declared
@@ -96,7 +96,7 @@ Policy directory layout: top-level `*.rego` modules (`*_test.rego` skipped) and 
 | `policy` | `id`, `version`, `digest` (`sha256:`), `source` (`git_tree` with `commit` and `path`, or `directory` with `path`) |
 | `input_digest` | SHA-256 of the policy input |
 | `requirements[]` | `id`, `status`, `reason`, `evidence`, `source` (`policy` or `verifier`), sorted by id |
-| `evidence[]` | `id`, `kind` (`attestation`, `pull_request`, `session`), `label`, `status`, `trust`, `signer`, `predicate_type`, `detail` |
+| `evidence[]` | `id`, `kind` (`attestation`, `pull_request`, `session`), `label` (the path given on the command line; not part of the policy input), `status`, `trust`, `signer`, `predicate_type`, `detail` |
 | `reasons[]` | One line per requirement that did not pass |
 
 Evidence status values: attestation `verified`, `invalid`, `other_commit`; pull request `collected`, `stale`, `other_repository`; session `consistent`, `invalid`. Trust values: `signature`, `collected`, `anchored`, `self_reported`, `none`.

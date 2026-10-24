@@ -32,7 +32,7 @@ The verifier could not reach a decision: the commit or base does not resolve, th
 
 ## Determinism
 
-Given the same repository objects, policy, evidence files and verifier version, the report is byte-identical: no timestamps, sorted requirements and evidence, sorted JSON keys, and no policy access to time, randomness or the network. `input_digest` is the SHA-256 of the exact policy input, so two runs can be compared without the files. Test: `an_iam_change_with_signed_checks_and_an_independent_approval_is_verified`.
+Given the same repository objects, policy, evidence files and verifier version, the report is byte-identical: no timestamps, sorted requirements and evidence, sorted JSON keys, and no policy access to time, randomness or the network. `input_digest` is the SHA-256 of the exact policy input, so two runs can be compared without the files. Evidence is identified by content digest; the file paths in `evidence[].label` stay out of the policy input, so `input_digest` is the same on a CI runner and on a laptop. Test: `an_iam_change_with_signed_checks_and_an_independent_approval_is_verified`.
 
 ## Cryptography
 

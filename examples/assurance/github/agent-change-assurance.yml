@@ -32,6 +32,7 @@ jobs:
           persist-credentials: false
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
+          terraform_version: 1.17.0
           terraform_wrapper: false
       - id: fmt
         continue-on-error: true
@@ -42,8 +43,9 @@ jobs:
       - id: scan
         continue-on-error: true
         run: |
-          python3 -m pip install --user checkov==3.3.30
-          python3 -m checkov.main --directory infra --framework terraform --compact --quiet
+          python3 -m venv "${RUNNER_TEMP}/checkov"
+          "${RUNNER_TEMP}/checkov/bin/pip" install --quiet checkov==3.3.30
+          "${RUNNER_TEMP}/checkov/bin/checkov" --directory infra --framework terraform --compact --quiet
 
   attest:
     needs: checks

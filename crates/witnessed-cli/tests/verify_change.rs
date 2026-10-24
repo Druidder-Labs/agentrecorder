@@ -231,6 +231,14 @@ fn an_iam_change_with_signed_checks_and_an_independent_approval_is_verified() {
     assert!(report["reasons"].as_array().unwrap().is_empty());
     let (_, again) = r.verify(&["--attestation", s(&att), "--pull-request", s(&pr)]);
     assert_eq!(report, again, "the same inputs give the same report");
+    let moved = r.path("elsewhere");
+    fs::create_dir(&moved).unwrap();
+    fs::copy(&att, moved.join("renamed.json")).unwrap();
+    fs::copy(&pr, moved.join("snapshot.json")).unwrap();
+    let (_, relocated) =
+        r.verify(&["--attestation", s(&moved.join("renamed.json")), "--pull-request", s(&moved.join("snapshot.json"))]);
+    assert_eq!(relocated["input_digest"], report["input_digest"], "file locations do not change the policy input");
+    assert_eq!(relocated["requirements"], report["requirements"]);
 }
 
 #[test]
